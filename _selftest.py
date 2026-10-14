@@ -459,6 +459,84 @@ root.update()
 check("空备注用例的任务已清理",
       all(app.task_by_id(x["id"]) is None for x in (ng, ng2, ng3)))
 
+print("\n-- 「添加子任务」在卡片任何位置都进得去 --")
+
+
+def menu_labels(m):
+    """把菜单上的字全列出来（命令 + 子菜单）。要看"有没有那一项"就靠它。"""
+    out = []
+    for i in range(m.index("end") + 1):
+        kind = m.type(i)
+        if kind in ("command", "cascade"):
+            out.append(m.entrycget(i, "label"))
+    return out
+
+
+_keep_sm_tasks = list(app.tasks)
+sm = mk("菜单测试")
+app.add_subs(sm, ["唯一的一条子任务"])
+app.tasks = [sm]
+app.redraw()
+root.update()
+
+m_card = app.build_card_menu(sm)
+check("整卡菜单里有「添加子任务…」", "添加子任务…" in menu_labels(m_card),
+      "实际 %s" % menu_labels(m_card))
+m_card.destroy()
+
+sid_sm = sm["subs"][0]["id"]
+m_sub = app.build_sub_menu(sm, sid_sm)
+check("子任务菜单构建成功", m_sub is not None)
+check("子任务菜单里也有「添加子任务…」",
+      m_sub is not None and "添加子任务…" in menu_labels(m_sub),
+      "实际 %s" % (m_sub and menu_labels(m_sub)))
+check("子任务菜单里那几项老功能还在",
+      m_sub is not None and all(x in menu_labels(m_sub) for x in
+                                ("编辑文字…", "标记完成 / 取消", "上移", "下移",
+                                 "提升成独立任务", "删除这条子任务")))
+if m_sub:
+    m_sub.destroy()
+check("不存在的子任务 id 返回 None（调用方会退回整卡菜单）",
+      app.build_sub_menu(sm, "根本没有这个id") is None)
+
+# 走**真实右键路径**：把卡面上每一个能点的位置都点一遍，看弹出的菜单里
+# 有没有「添加子任务…」。_popup 会被替换掉（真弹菜单就进模态循环了，
+# 测试跑不下去），改成把菜单记下来。
+_seen = {}
+_orig_popup = app._popup
+app._popup = lambda menu, widget=None, x=None, y=None: _seen.update(menu=menu)
+
+_box = region(app, "card", sm["id"])
+_probes = {}
+for _k, _tid, _x1, _y1, _x2, _y2 in list(app.regions):
+    if _tid == sm["id"]:
+        _ctr = ((_x1 + _x2) / 2.0, (_y1 + _y2) / 2.0)
+        _probes.setdefault(app.hit(*_ctr)[0], _ctr)
+# 再补三个"卡面空白处"：左上角、右下角、最后一行下面那块
+for _pt in ((_box[0] + 6, _box[1] + 6), (_box[2] - 6, _box[3] - 6),
+            ((_box[0] + _box[2]) / 2.0, _box[3] - 20)):
+    _probes.setdefault(app.hit(*_pt)[0], _pt)
+check("卡面上一共探到了好几种可点区域", len(_probes) >= 4,
+      "实际 %s" % sorted(str(k) for k in _probes))
+
+_bad = []
+for _k, (_px, _py) in _probes.items():
+    _seen.pop("menu", None)
+    app.on_right(E(_px, _py, 500, 500))
+    _m = _seen.get("menu")
+    if _m is None or "添加子任务…" not in menu_labels(_m):
+        _bad.append((_k, _m and menu_labels(_m)))
+    if _m is not None:
+        _m.destroy()
+app._popup = _orig_popup
+check("卡片上每个位置右键都能进「添加子任务」", not _bad,
+      "这些位置点不到：%s" % _bad)
+
+app.tasks = _keep_sm_tasks
+app.redraw()
+root.update()
+check("菜单用例的任务已清理", app.task_by_id(sm["id"]) is None)
+
 print("\n-- 已完成的任务第二天从板面收起 --")
 app.set_filter("all")
 app.q = ""

@@ -110,7 +110,10 @@
   · 改"拖到卡片上算不算嵌套" → 改 _nest_zone 记的那块范围（在 _draw_card 里，
                       下沿是 NEST_PAD）。想改成"整张卡片都能嵌套"，
                       就把范围改成整卡 —— 但那样同组排序就没落点了
-  · 加一条子任务菜单项 → 搜 "提升成独立任务"，照着加
+  · 加一条子任务菜单项 → 改 build_sub_menu（子任务行右键）；想让它也出现在
+                      整卡右键菜单里，再改 build_card_menu。
+                      **两个菜单都要能进"加子任务"这类通用操作** ——
+                      子任务行铺满卡片时，"卡面空白处"是不存在的
   · 改子任务每页显示几条 → 改 SUB_MAX。超过一页时卡面会自动长出
                       ‹ 1/2 › 翻页按钮（不用去别处加代码）
   · 改拖拽时的提示语 → 改 DRAG_HINT / SUB_DRAG_HINT
@@ -513,7 +516,8 @@ HELP_SECTIONS = [
     ("k", ("点右下角药丸",   "开始 / 暂停计时，药丸里显示累计投入的时间")),
     ("k", ("右键卡片",       "编辑任务… / 删除备注 / 改优先级 / 设置截止日期 / 重复规则 / "
                               "添加子任务 / 子任务批量操作 / 计时 / 标记完成 / 删除（进回收站）")),
-    ("k", ("右键子任务",     "编辑文字 / 标记完成 / 上移 / 下移 / 提升成独立任务 / 删除这条子任务")),
+    ("k", ("右键子任务",     "编辑文字 / 标记完成 / 添加子任务 / 上移 / 下移 / "
+                             "提升成独立任务 / 删除这条子任务")),
     ("k", ("右键空白处",     "新建任务 / 耗时统计 / 每日复盘 / 回收站 / 清空已完成")),
 
     ("h2", "拖拽能做五件事（最容易被忽略，也最省事）"),
@@ -2615,35 +2619,51 @@ class App:
         if not t:
             self.show_canvas_menu(e)        # 点在空白处
             return
-
         # 点在子任务那一行上，弹子任务自己的菜单
         if kind and (kind.startswith("sc:") or kind.startswith("st:")):
-            sid = kind[3:]
-            s = sub_by_id(t, sid)
-            if s:
-                subs = subs_of(t)
-                i = next((k for k, x in enumerate(subs) if x["id"] == sid), 0)
-                # 已经在头 / 尾的那一条，对应的方向就没得移了
-                up = "normal" if i > 0 else "disabled"
-                dn = "normal" if i < len(subs) - 1 else "disabled"
-                m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
-                m.add_command(label="编辑文字…",
-                              command=lambda: self.open_editor(t, "st:" + sid))
-                m.add_command(label="标记完成 / 取消",
-                              command=lambda: self.toggle_sub(t, sid))
-                m.add_separator()
-                m.add_command(label="上移", state=up,
-                              command=lambda: self.move_sub(t, sid, -1))
-                m.add_command(label="下移", state=dn,
-                              command=lambda: self.move_sub(t, sid, +1))
-                m.add_command(label="提升成独立任务",
-                              command=lambda: self.promote_sub(t, sid))
-                m.add_separator()
-                m.add_command(label="删除这条子任务",
-                              command=lambda: self.del_sub(t, sid))
+            m = self.build_sub_menu(t, kind[3:])
+            if m:
                 self._popup(m, x=e.x_root, y=e.y_root)
                 return
+        # 其余一律是整卡菜单 —— 卡片上任何位置右键都走得到这里，
+        # 所以「添加子任务…」在哪儿都点得到（见 build_sub_menu 里的注释）
+        self._popup(self.build_card_menu(t), x=e.x_root, y=e.y_root)
 
+    def build_sub_menu(self, t, sid):
+        """子任务右键菜单。**拆成独立方法是为了能被测试直接调用**（同 build_more_menu）：
+        菜单一旦弹出就进了模态循环，测试没法验它里面到底有没有哪几项。
+
+        没有这条子任务时返回 None，调用方会退回到整卡菜单。
+        """
+        if not sub_by_id(t, sid):
+            return None
+        subs = subs_of(t)
+        i = next((k for k, x in enumerate(subs) if x["id"] == sid), 0)
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        m.add_command(label="编辑文字…",
+                      command=lambda: self.open_editor(t, "st:" + sid))
+        m.add_command(label="标记完成 / 取消",
+                      command=lambda: self.toggle_sub(t, sid))
+        # 「添加子任务」在这里也要有 —— 子任务行铺满卡片时，卡面上压根没有
+        # "空白处"可点；只在整卡菜单里放它，这块就成了唯一进不去的死角
+        # （用户报的就是"在子任务处右键看不到添加子任务"）。
+        # 现在卡片上任何位置右键，都能进「添加子任务」。
+        m.add_command(label="添加子任务…", command=lambda: self.ask_add_sub(t))
+        m.add_separator()
+        # 已经在头 / 尾的那一条，对应的方向就没得移了
+        m.add_command(label="上移", state=("normal" if i > 0 else "disabled"),
+                      command=lambda: self.move_sub(t, sid, -1))
+        m.add_command(label="下移",
+                      state=("normal" if i < len(subs) - 1 else "disabled"),
+                      command=lambda: self.move_sub(t, sid, +1))
+        m.add_command(label="提升成独立任务",
+                      command=lambda: self.promote_sub(t, sid))
+        m.add_separator()
+        m.add_command(label="删除这条子任务", command=lambda: self.del_sub(t, sid))
+        return m
+
+    def build_card_menu(self, t):
+        """整卡右键菜单（拆分理由同 build_sub_menu）。"""
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
         # 「编辑任务」放最前面：改标题（错别字）/ 备注是这条任务自己的内容，
         # 和标题一样属于「第一层」信息，也是最高频的操作。
@@ -2688,7 +2708,7 @@ class App:
         m.add_separator()
         m.add_command(label="标记完成 / 取消", command=lambda: self.toggle_done(t))
         m.add_command(label="删除（进回收站）", command=lambda: self.delete_task(t))
-        self._popup(m, x=e.x_root, y=e.y_root)
+        return m
 
     def show_canvas_menu(self, e):
         """右键点在空白处。"""
