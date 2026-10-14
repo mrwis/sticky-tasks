@@ -88,8 +88,10 @@
                       四个象限的颜色在 PRIOS 列表的 bg 和 band 字段
   · 换字号          → 改 F_TITLE / F_BODY 等。注意字号是负数（如 -14），
                       负数表示"按像素算"，这样不受系统缩放影响
-  · 改卡片大小      → 改 CARD_W / CARD_H / GAP；
-                      子任务区的高度在 SUB_LINE / SUB_MAX / SUB_GAP
+  · 改卡片大小      → 改 CARD_W / GAP。**卡片高度不再是一个固定值**：
+                      它由 block_h() 按内容算出来（见机制⑪），
+                      别再去找 CARD_H 调高调低了（它现在只是最小高度）。
+                      子任务区的行高在 SUB_LINE / SUB_MAX / SUB_PAD
   · 改象限名字      → 改 PRIOS 里的 name 和 act（如"立刻做"）
   · 加一个字段      → ① load() 的 out.append({...}) 里加上默认值
                       ② _draw_card() 里决定怎么显示它
@@ -152,7 +154,7 @@
 
 
 ----------------------------------------------------------------
-  十个值得单独弄懂的小机制
+  十一个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -248,6 +250,19 @@
      注：只按"主窗 + 相对偏移"摆、不收边的窗口（统计 / 回收站 / 各对话框）
      本来就跟着主窗走，不用管。
 
+  ⑪ 卡片高度是按内容实算的（block_h）
+     卡片内部是"从上往下摆内容 + 底部一条徽章行"。中间那段空白以前是
+     靠一个固定的 CARD_H 撑出来的 —— 标题、备注只有一两行时，卡片下半截
+     就全是空的，又难看又白占地方。现在 block_h(t) 直接算：
+     标题占几行 + 备注占几行 + 子任务占几行 + 呼吸位 + 底部徽章行。
+     **它和 _draw_card 里的画法是一对**：TITLE_TOP / LINE_TITLE / NOTE_GAP /
+     LINE_NOTE / FOOT_H / FOOT_GAP 这一串就是照 _draw_card 里的坐标抄下来的，
+     改了一边必须改另一边，否则高度算少了卡片就会压住下面那张
+     （同一行的行高取最高一张，见 row_heights）。
+     算行数要折行，用的是模块级 _wrap_lines —— App._wrap 和 block_h 共用它，
+     **别再写第二份折行逻辑**；两处规则一旦不一致，算出来的高度就错了。
+     文字可用宽度是 _text_w(t)：标题左边有重复徽章时，两边会再窄 24px。
+
   另外：数据存盘用"先写 .tmp 再 os.replace"的方式，避免中途断电
   导致 tasks.json 被写坏 —— 这是个通用且值得记住的写法。
 """
@@ -332,7 +347,9 @@ INNER     = 11
 # CARD_W 是实测出来的：徽章行放「P0 立刻做 + 逾期 12 天 + 1时05分」
 # 最坏需要 255px，取 264 留一点余量，同时仍能保持每格 2 列。
 CARD_W    = 264
-CARD_H    = 140
+# CARD_H 现在只是**最小高度**（内容再少卡片也不矮于它）。
+# 真实高度由 block_h() 按内容实算 —— 别再拿它当"卡片固定就这么高"用。
+CARD_H    = 96
 QHEAD     = 28
 QMIN_H    = 96
 DRAG_TOL  = 5
@@ -343,6 +360,15 @@ SUB_LINE  = 14      # 每条子任务的行高
 SUB_HEAD  = 13      # "子任务 1/3" 这一行的高度
 SUB_PAD   = 3       # 子任务区上下各留的空白
 SUB_BOX   = 11      # 子任务复选框边长
+
+# 卡片内部的纵向排布。**这几个值是照着 _draw_card 里的画法抄下来的**，
+# block_h() 靠它们算卡片到底要多高 —— 改卡面布局就必须同步改这里（见机制⑪）。
+TITLE_TOP  = 17     # 标题第一行距卡片顶
+LINE_TITLE = 18     # 标题每行高度
+NOTE_GAP   = 4      # 标题底到备注顶的间距
+LINE_NOTE  = 16     # 备注每行高度（空备注那行「＋ 备注」也算一行）
+FOOT_H     = 34     # 底部：虚线分隔 + 徽章行（虚线到卡片底的总高）
+FOOT_GAP   = 10     # 内容底到虚线之间的呼吸位，别调到 0（会和徽章行贴死）
 
 # 拖拽时「卡片上半张 = 变成它的子任务」的判定区下沿：
 # 标题/备注画完之后再往下多算这么多像素（免得只差一两像素点不中）。
@@ -645,13 +671,107 @@ def sub_by_id(t, sid):
     return None
 
 
+_FONTS = {}
+
+
+def _font_of(font):
+    """按字体规格取一个缓存的 tkfont.Font。
+
+    折行要不停 measure()，每次新建 Font 太浪费；而且 block_h() 在每次重绘
+    时都会被调很多遍。按规格缓存一份就够。
+    """
+    key = tuple(font) if isinstance(font, (list, tuple)) else font
+    f = _FONTS.get(key)
+    if f is None:
+        f = tkfont.Font(font=font)
+        _FONTS[key] = f
+    return f
+
+
+def _wrap_lines(text, font, maxw, maxlines):
+    """按像素宽度折行，返回折好的行列表。
+
+    **全项目只有这一份折行规则**：App._wrap（画的时候用）和 block_h（算高度
+    用）都调它。以前高度是写死的，所以折行只影响画面；现在高度靠行数算，
+    两处规则一旦不一致，卡片就会算矮、互相压住 —— 所以千万别在别处再抄一份。
+    英文/数字当成一个整体，避免把 NAS 拆成 N / AS。
+    """
+    f = _font_of(font)
+    tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_.]*|[ \t]+|\r|\n|.", str(text))
+    lines, cur = [], ""
+    for tk_ in tokens:
+        if tk_ == "\r":               # 容错：\r\n 里的 \r 直接丢掉
+            continue
+        if tk_ == "\n":
+            lines.append(cur)
+            cur = ""
+            if len(lines) > maxlines:
+                break
+            continue
+        cand = cur + tk_
+        if f.measure(cand) > maxw and cur:
+            lines.append(cur)
+            cur = tk_.lstrip() if tk_.strip() else ""
+        else:
+            cur = cand
+        if len(lines) > maxlines:
+            break
+    if cur and len(lines) <= maxlines:
+        lines.append(cur)
+    if len(lines) > maxlines:
+        lines = lines[:maxlines]
+        last = lines[-1]
+        while last and f.measure(last + "…") > maxw:
+            last = last[:-1]
+        lines[-1] = last + "…"
+    return lines
+
+
+def _text_w(t):
+    """卡面上标题/备注能用的文字宽度。
+
+    必须和 _draw_card 里 tw 的算法一致，否则按这里算出来的行数会和实际
+    画出来的对不上（卡片就压住了）。左边这一串是：复选框左缘 + 复选框边长
+    + 与文字的间距；标题前面挂重复徽章时还要再让出徽章 + 间距。
+    """
+    left = 13 + 15 + 10
+    if t.get("repeat"):
+        left += 18 + 6
+    return CARD_W - 13 - left
+
+
+def note_lines(t):
+    """备注占几行。**空备注也算一行** —— 那行画的是「＋ 备注」入口。"""
+    if not t.get("note"):
+        return 1
+    return len(_wrap_lines(t["note"], F_BODY, _text_w(t), 2)) or 1
+
+
 def block_h(t):
-    """卡片高度 = 基础高度 + 子任务区。
-    布局和绘制必须都调这个函数，否则高度算错就会出现卡片互相压住。"""
+    """卡片高度 = 内容实高 + 呼吸位 + 底部徽章行。
+
+    以前是「固定 CARD_H + 子任务增量」：标题、备注只有一两行时，卡片下半截
+    全是空白，既不好看又白占地方（见机制⑪）。改成按内容实算。
+
+    **布局和绘制必须都调这个函数**，而且在没有 Tk 环境时也要能算
+    （_selftest 会这么用），所以它只依赖折行测量，不碰任何控件。
+    下面的偏移量和 _draw_card 里的坐标是一对，改一边必须改另一边。
+    """
+    nth = len(_wrap_lines(t.get("title", ""), F_TITLE, _text_w(t), 2))
+    note_top = TITLE_TOP + LINE_TITLE * nth + NOTE_GAP
+    note_bottom = note_top + LINE_NOTE * note_lines(t)
+
     n = len(subs_of(t))
-    if not n:
-        return CARD_H
-    return CARD_H + SUB_PAD + SUB_HEAD + min(n, SUB_MAX) * SUB_LINE + SUB_PAD
+    if n:
+        # 子任务区的起点在 _draw_card 里是「备注**顶** + SUB_PAD」（备注为空时
+        # ny 没往下走，那行「＋ 备注」会被「子任务 x/y」压住 —— 这是待修的第 4 条）。
+        # 这里先跟着它算，等那处修掉再一起简化成 note_bottom + SUB_PAD。
+        sub_top = (note_bottom if t.get("note") else note_top) + SUB_PAD
+        content = max(note_bottom,
+                      sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * min(n, SUB_MAX))
+    else:
+        content = note_bottom
+    return max(CARD_H, content + FOOT_GAP + FOOT_H)
 
 
 def row_heights(items, ncol):
@@ -1695,24 +1815,35 @@ class App:
         if t["note"]:
             nlines = self._wrap(t["note"], F_BODY, tw, 2)
             top = ny
+            widest = 0
             for ln in nlines:
                 cv.create_text(tx, ny, anchor="nw", text=ln, font=F_BODY,
                                fill="#8a8377", tags=(tag,))
+                widest = max(widest, _font_of(F_BODY).measure(ln))
                 ny += 16
-            self.regions.append(("note", t["id"], tx - 3, top - 2, tx + tw + 3, ny + 2))
+            # 单击区域只覆盖**真正画出来的字**，不是整行宽度。卡片现在是按内容
+            # 算高度的，矮卡片上"整行宽度"会横跨半张卡，点哪儿都被当成点了备注。
+            self.regions.append(("note", t["id"], tx - 3, top - 2,
+                                 tx + min(tw, widest) + 6, ny + 2))
         else:
             # 空备注：画一行浅灰的「＋ 备注」当入口。
             # 以前这里什么都不画，只登记了一条看不见的热区 —— 新建的任务
             # 卡片上没有任何能加备注的地方，等于按钮藏起来了，用户根本找不到。
             cv.create_text(tx, ny, anchor="nw", text=NOTE_EMPTY, font=F_BODY,
                            fill=NOTE_EMPTY_FG, tags=(tag,))
-            self.regions.append(("note", t["id"], tx - 3, ny - 2, tx + tw + 3, ny + 16))
+            # 同理：热区只包住这几个字，别让它铺满整行（它是个"按钮"）
+            ew = _font_of(F_BODY).measure(NOTE_EMPTY)
+            self.regions.append(("note", t["id"], tx - 3, ny - 2,
+                                 tx + min(tw, ew) + 6, ny + 16))
 
         # 拖拽落点区：卡片**上半张**（标题 + 备注那一段）＝「变成它的子任务」。
         # 下半张（子任务 + 徽章行）和卡片之间的空隙仍然留给「插到第几位」，
-        # 否则同组排序就没地方可放了。这里记的是画布坐标，拖拽时直接比即可
+        # 否则同组排序就没地方可放了。
+        # 注意：卡片高度现在是按内容算的，"内容块 + NEST_PAD" 在矮卡片上会超过
+        # 一半，所以再拿**卡片中线**封一次顶，保证下半张永远留得下排序落点。
+        # 这里记的是画布坐标，拖拽时直接比即可
         # （拖拽过程中只有被拖那张卡在动，别人这份快照是准的）。
-        self._nest_zone[t["id"]] = (x, y, x2, ny + NEST_PAD)
+        self._nest_zone[t["id"]] = (x, y, x2, min(ny + NEST_PAD, (y + y2) / 2.0))
 
         # 子任务区（只有真的有子任务时才画；高度已在 block_h() 里预留）
         if subs_of(t):
@@ -1842,36 +1973,9 @@ class App:
         return d.strftime("%m/%d"), ""
 
     def _wrap(self, text, font, maxw, maxlines):
-        """按像素宽度折行。英文/数字单词整体处理，避免把 NAS 拆成 N / AS。"""
-        f = tkfont.Font(font=font)
-        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_.]*|[ \t]+|\r|\n|.", str(text))
-        lines, cur = [], ""
-        for tk_ in tokens:
-            if tk_ == "\r":               # 容错：\r\n 里的 \r 直接丢掉
-                continue
-            if tk_ == "\n":
-                lines.append(cur)
-                cur = ""
-                if len(lines) > maxlines:
-                    break
-                continue
-            cand = cur + tk_
-            if f.measure(cand) > maxw and cur:
-                lines.append(cur)
-                cur = tk_.lstrip() if tk_.strip() else ""
-            else:
-                cur = cand
-            if len(lines) > maxlines:
-                break
-        if cur and len(lines) <= maxlines:
-            lines.append(cur)
-        if len(lines) > maxlines:
-            lines = lines[:maxlines]
-            last = lines[-1]
-            while last and f.measure(last + "…") > maxw:
-                last = last[:-1]
-            lines[-1] = last + "…"
-        return lines
+        """按像素宽度折行。**规则本体在模块级 _wrap_lines**，这里只是转一下 ——
+        绘制和 block_h() 算卡片高度必须共用同一套，见机制⑪。"""
+        return _wrap_lines(text, font, maxw, maxlines)
 
     def _update_stats(self):
         T = today()
