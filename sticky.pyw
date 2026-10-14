@@ -270,6 +270,9 @@
      算行数要折行，用的是模块级 _wrap_lines —— App._wrap 和 block_h 共用它，
      **别再写第二份折行逻辑**；两处规则一旦不一致，算出来的高度就错了。
      文字可用宽度是 _text_w(t)：标题左边有重复徽章时，两边会再窄 24px。
+     **备注为空时那行「＋ 备注」也算一整行**（note_lines 返回 1），
+     所以卡面上画完那行字必须把 ny 推到 LINE_NOTE 之后，否则子任务区会
+     从备注**顶**开始画，「子任务 x/y」正好压在那行浅灰字上（改过一回）。
 
   ⑫ 「已完成」的任务第二天会自动从板面上收起（visible / archived_done）
      板面上到底画哪些任务，**只有 visible() 这一个出口**（重绘时先用它过一遍，
@@ -801,12 +804,10 @@ def block_h(t):
 
     n = len(subs_of(t))
     if n:
-        # 子任务区的起点在 _draw_card 里是「备注**顶** + SUB_PAD」（备注为空时
-        # ny 没往下走，那行「＋ 备注」会被「子任务 x/y」压住 —— 这是待修的第 4 条）。
-        # 这里先跟着它算，等那处修掉再一起简化成 note_bottom + SUB_PAD。
-        sub_top = (note_bottom if t.get("note") else note_top) + SUB_PAD
-        content = max(note_bottom,
-                      sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * min(n, SUB_MAX))
+        # 子任务区一律从**备注底**往下排（备注为空时那行「＋ 备注」也算一行，
+        # 见 note_lines）—— 这样空备注的卡片不会把「子任务 x/y」压到那行字上。
+        sub_top = note_bottom + SUB_PAD
+        content = sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * min(n, SUB_MAX)
     else:
         content = note_bottom
     return max(CARD_H, content + FOOT_GAP + FOOT_H)
@@ -1850,20 +1851,23 @@ class App:
         # 标题
         tw = (x2 - 13) - tx
         lines = self._wrap(t["title"], F_TITLE, tw, 2)
-        ty = y + 17
+        ty = y + TITLE_TOP
         for ln in lines:
             cv.create_text(tx, ty, anchor="nw", text=ln, font=F_TITLE,
                            fill=(C_INK3 if t["done"] else C_INK), tags=(tag,))
-            ty += 18
+            ty += LINE_TITLE
         if t["done"] and lines:
             fm = tkfont.Font(font=F_TITLE)
             for i, ln in enumerate(lines):
-                ly = y + 17 + i * 18 + 8
+                ly = y + TITLE_TOP + i * LINE_TITLE + 8
                 cv.create_line(tx, ly, tx + fm.measure(ln), ly, fill="#a8a196", tags=(tag,))
-        self.regions.append(("title", t["id"], tx - 3, y + 14, tx + tw + 3, ty + 2))
+        self.regions.append(("title", t["id"], tx - 3, y + TITLE_TOP - 3,
+                             tx + tw + 3, ty + 2))
 
-        # 备注
-        ny = ty + 4
+        # 备注。**空备注也要占满一行**（画的是那行浅灰的「＋ 备注」），
+        # 否则子任务区会直接从备注**顶**开始画，「子任务 x/y」就压在这行字上了。
+        # ny 走完这一段必须等于 block_h() 里的 note_bottom —— 两边是一对。
+        ny = ty + NOTE_GAP
         if t["note"]:
             nlines = self._wrap(t["note"], F_BODY, tw, 2)
             top = ny
@@ -1872,7 +1876,7 @@ class App:
                 cv.create_text(tx, ny, anchor="nw", text=ln, font=F_BODY,
                                fill="#8a8377", tags=(tag,))
                 widest = max(widest, _font_of(F_BODY).measure(ln))
-                ny += 16
+                ny += LINE_NOTE
             # 单击区域只覆盖**真正画出来的字**，不是整行宽度。卡片现在是按内容
             # 算高度的，矮卡片上"整行宽度"会横跨半张卡，点哪儿都被当成点了备注。
             self.regions.append(("note", t["id"], tx - 3, top - 2,
@@ -1886,7 +1890,8 @@ class App:
             # 同理：热区只包住这几个字，别让它铺满整行（它是个"按钮"）
             ew = _font_of(F_BODY).measure(NOTE_EMPTY)
             self.regions.append(("note", t["id"], tx - 3, ny - 2,
-                                 tx + min(tw, ew) + 6, ny + 16))
+                                 tx + min(tw, ew) + 6, ny + LINE_NOTE))
+            ny += LINE_NOTE          # ← 这一行就是"空备注也占一行"的全部秘密
 
         # 拖拽落点区：卡片**上半张**（标题 + 备注那一段）＝「变成它的子任务」。
         # 下半张（子任务 + 徽章行）和卡片之间的空隙仍然留给「插到第几位」，
@@ -1898,11 +1903,12 @@ class App:
         self._nest_zone[t["id"]] = (x, y, x2, min(ny + NEST_PAD, (y + y2) / 2.0))
 
         # 子任务区（只有真的有子任务时才画；高度已在 block_h() 里预留）
+        # 起点 = 备注**底** + SUB_PAD，和 block_h() 里的 sub_top 是同一个式子
         if subs_of(t):
             self._draw_subs(t, x, ny + SUB_PAD, w, pr, tag)
 
         # 底部分隔
-        fy = y2 - 34
+        fy = y2 - FOOT_H
         cv.create_line(x + 12, fy, x2 - 12, fy, fill="#d8d2c6", dash=(3, 3), tags=(tag,))
 
         # ---- 徽章行：左边是优先级 + 日期，右边是计时器 ----
