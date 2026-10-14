@@ -391,6 +391,74 @@ app.redraw()
 root.update()
 check("翻页测试任务已清理", len([t for t in app.tasks if t["id"] == pg_["id"]]) == 0)
 
+print("\n-- 空备注不再和「子任务 x/y」挤在一起 --")
+
+
+def canvas_texts(tid):
+    """把某张卡上**真正画出来**的文字列出来（取画布 item 的真实 bbox）。
+
+    故意不照代码里的公式去算 —— 要验的是"眼睛看到的两行字会不会叠在一起"，
+    只有画布上的 bbox 说了算。
+    """
+    out = []
+    for i in app.cv.find_withtag("card" + tid):
+        if app.cv.type(i) == "text":
+            out.append((app.cv.itemcget(i, "text"), app.cv.bbox(i)))
+    return out
+
+
+_keep_ng_tasks = list(app.tasks)
+ng = mk("空备注带子任务")
+app.add_subs(ng, ["第一条"])
+app.tasks = [ng]
+app.redraw()
+root.update()
+_texts = canvas_texts(ng["id"])
+_note = [b for s, b in _texts if s == sticky.NOTE_EMPTY]
+_head = [b for s, b in _texts if s.startswith("子任务")]
+check("空备注那行「＋ 备注」和「子任务 x/y」都画出来了",
+      len(_note) == 1 and len(_head) == 1, "实际 %s" % [s for s, _ in _texts])
+check("两行字不重叠（「＋ 备注」的底在「子任务 x/y」的顶之上）",
+      bool(_note) and bool(_head) and _note[0][3] <= _head[0][1],
+      "备注底 %s / 子任务标题顶 %s" % (_note and _note[0][3],
+                                      _head and _head[0][1]))
+
+# 高度上也要真的让出那一行：空备注 + 一条子任务，
+# 应该和「一行短备注 + 一条子任务」一样高（同标题保证折行行数也一样）。
+ng2 = mk("空备注带子任务", note="短")
+app.add_subs(ng2, ["第一条"])
+app.tasks = [ng, ng2]
+app.redraw()
+root.update()
+check("空备注的卡片和「有一行短备注」的卡片一样高（那行也占位）",
+      sticky.block_h(ng) == sticky.block_h(ng2),
+      "空备注 %s / 一行备注 %s" % (sticky.block_h(ng), sticky.block_h(ng2)))
+check("两张卡的实高也都对得上 block_h",
+      bool(region(app, "card", ng["id"])) and bool(region(app, "card", ng2["id"]))
+      and abs((region(app, "card", ng["id"])[3]
+               - region(app, "card", ng["id"])[1]) - sticky.block_h(ng)) < 0.5
+      and abs((region(app, "card", ng2["id"])[3]
+               - region(app, "card", ng2["id"])[1]) - sticky.block_h(ng2)) < 0.5)
+
+# 有备注的一侧也要检查一遍：两行字同样不该叠
+ng3 = mk("有备注带子任务", note="一行备注")
+app.add_subs(ng3, ["第一条"])
+app.tasks = [ng3]
+app.redraw()
+root.update()
+_texts3 = canvas_texts(ng3["id"])
+_nt3 = [b for s, b in _texts3 if s == "一行备注"]
+_hd3 = [b for s, b in _texts3 if s.startswith("子任务")]
+check("有备注时「备注」和「子任务 x/y」也不重叠",
+      len(_nt3) == 1 and len(_hd3) == 1 and _nt3[0][3] <= _hd3[0][1],
+      "备注底 %s / 子任务标题顶 %s" % (_nt3 and _nt3[0][3], _hd3 and _hd3[0][1]))
+
+app.tasks = _keep_ng_tasks
+app.redraw()
+root.update()
+check("空备注用例的任务已清理",
+      all(app.task_by_id(x["id"]) is None for x in (ng, ng2, ng3)))
+
 print("\n-- 已完成的任务第二天从板面收起 --")
 app.set_filter("all")
 app.q = ""
