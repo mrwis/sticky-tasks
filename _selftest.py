@@ -289,6 +289,108 @@ root.update()
 check("超出显示上限的子任务仍然保留在数据里", len(st_["subs"]) == 7)
 check("超限时仍能正常渲染", region(app, "card", st_["id"]) is not None)
 
+print("\n-- 子任务翻页（超过 SUB_MAX 条时）--")
+check("页数换算：0 条 / 正好一页 / 多一条 / 7 条",
+      (sticky.sub_pages(0), sticky.sub_pages(sticky.SUB_MAX),
+       sticky.sub_pages(sticky.SUB_MAX + 1), sticky.sub_pages(7)) == (1, 1, 2, 3),
+      "实际 %s" % [sticky.sub_pages(x)
+                   for x in (0, sticky.SUB_MAX, sticky.SUB_MAX + 1, 7)])
+
+
+def click_pager(kind, tid):
+    """走真实点击路径（按下 + 原地松手）点一次翻页按钮。"""
+    r = region(app, kind, tid)
+    if not r:
+        return False
+    x, y = (r[0] + r[2]) / 2.0, (r[1] + r[3]) / 2.0
+    app.on_press(E(x, y))
+    app.on_release(E(x, y))
+    root.update()
+    return True
+
+
+_keep_pg_tasks = list(app.tasks)
+pg_ = mk("翻页测试", order=1.0)
+app.add_subs(pg_, ["P1", "P2", "P3", "P4", "P5", "P6", "P7"])
+app.tasks = [pg_]                      # 只留这一张卡，免得别的卡片挤进来
+app.sub_page.pop(pg_["id"], None)
+app.redraw()
+root.update()
+
+
+def shown_subs():
+    return [sid for sid, _a, _b in (app._sub_rows.get(pg_["id"]) or [])]
+
+
+sub_ids = [s["id"] for s in pg_["subs"]]
+check("第一页只画 SUB_MAX 条",
+      len(shown_subs()) == sticky.SUB_MAX, "实际 %s" % len(shown_subs()))
+check("默认从第一页开始（画的是前三条）",
+      shown_subs() == sub_ids[:sticky.SUB_MAX], "实际 %s" % shown_subs())
+check("超过一页时画出翻页按钮",
+      region(app, "subprev", pg_["id"]) is not None
+      and region(app, "subnext", pg_["id"]) is not None)
+box_pg = region(app, "card", pg_["id"])
+
+click_pager("subnext", pg_["id"])
+check("点 › 翻到第二页", app.sub_page.get(pg_["id"]) == 1,
+      "实际 %s" % app.sub_page.get(pg_["id"]))
+check("第二页画的是第 4~6 条",
+      shown_subs() == sub_ids[sticky.SUB_MAX:sticky.SUB_MAX * 2],
+      "实际 %s" % shown_subs())
+check("翻页不会改变卡片高度（翻到第二页时只剩一条也照样占满）",
+      region(app, "card", pg_["id"]) == box_pg,
+      "翻页前 %s 翻页后 %s" % (box_pg, region(app, "card", pg_["id"])))
+
+click_pager("subnext", pg_["id"])
+check("再点一次翻到第三页", app.sub_page.get(pg_["id"]) == 2)
+check("第三页只剩第 7 条", shown_subs() == sub_ids[6:], "实际 %s" % shown_subs())
+
+click_pager("subnext", pg_["id"])
+check("已经是最后一页，再点 › 不动", app.sub_page.get(pg_["id"]) == 2,
+      "实际 %s" % app.sub_page.get(pg_["id"]))
+click_pager("subprev", pg_["id"])
+click_pager("subprev", pg_["id"])
+check("连点两次 ‹ 回到第一页", app.sub_page.get(pg_["id"]) == 0)
+click_pager("subprev", pg_["id"])
+check("已经是第一页，再点 ‹ 也不动", app.sub_page.get(pg_["id"]) == 0)
+
+# 拖拽落点要的是**列表下标**，屏幕上的第几行得加上页偏移，否则翻到第二页
+# 拖子任务会插到前三名去。
+app.sub_page[pg_["id"]] = 1
+app.redraw()
+root.update()
+_rows2 = app._sub_rows.get(pg_["id"]) or []
+check("第二页的落点下标带上了页偏移",
+      bool(_rows2)
+      and app._sub_insert_index(pg_["id"], _rows2[0][1] - 5) == sticky.SUB_MAX,
+      "实际 %s 期望 %s"
+      % (_rows2 and app._sub_insert_index(pg_["id"], _rows2[0][1] - 5),
+         sticky.SUB_MAX))
+check("落在第二页最后一行下方 = 列表末尾",
+      app._sub_insert_index(pg_["id"], _rows2[-1][2] + 5) == sticky.SUB_MAX * 2,
+      "实际 %s" % app._sub_insert_index(pg_["id"], _rows2[-1][2] + 5))
+
+# 页码越界（子任务被删掉几条之后）要能自己夹回来，不能画出空白卡片
+app.sub_page[pg_["id"]] = 99
+app.redraw()
+root.update()
+check("页码越界自动夹到最后一页", app.sub_page.get(pg_["id"]) == 2,
+      "实际 %s" % app.sub_page.get(pg_["id"]))
+check("越界夹回后仍然画得出子任务行", len(shown_subs()) == 1)
+app.add_subs(pg_, ["P8"])
+app.sub_page[pg_["id"]] = 5
+app.redraw()
+root.update()
+check("子任务变多后越界页码夹回合法范围", app.sub_page.get(pg_["id"]) == 2,
+      "实际 %s" % app.sub_page.get(pg_["id"]))
+
+app.tasks = _keep_pg_tasks
+app.sub_page.pop(pg_["id"], None)
+app.redraw()
+root.update()
+check("翻页测试任务已清理", len([t for t in app.tasks if t["id"] == pg_["id"]]) == 0)
+
 nz = sticky._norm_subs(["x", {"text": "y"}, {"text": ""}, 123, {"text": "z", "done": True}])
 check("归一化丢掉空文本与非字典项", len(nz) == 3, "实际 %d" % len(nz))
 check("归一化保留完成状态", nz[2]["done"] is True and nz[2]["text"] == "z")

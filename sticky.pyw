@@ -111,6 +111,8 @@
                       下沿是 NEST_PAD）。想改成"整张卡片都能嵌套"，
                       就把范围改成整卡 —— 但那样同组排序就没落点了
   · 加一条子任务菜单项 → 搜 "提升成独立任务"，照着加
+  · 改子任务每页显示几条 → 改 SUB_MAX。超过一页时卡面会自动长出
+                      ‹ 1/2 › 翻页按钮（不用去别处加代码）
   · 改拖拽时的提示语 → 改 DRAG_HINT / SUB_DRAG_HINT
   · 改备注（增删改）→ 搜 set_note（唯一的落库出口，顺手把 \r\n 归一成 \n：
                       两版共用一个 tasks.json，tk 侧留下 \r 会在 aardio 的
@@ -200,7 +202,10 @@
      卡片那套字段。拖动时不真的搬行、只画辅助线（被拖那行描虚线框 +
      落点一条横线），松手才落库。
      "插到第几条"看 self._sub_rows（画子任务时记下的每行 y 区间）——
-     注意卡面只画前 SUB_MAX 条，所以落点也只能在看得见的那几条之间。
+     卡面每页只画 SUB_MAX 条（超过就在「子任务 x/y」右边出 ‹ 1/2 › 翻页，
+     当前页存在 self.sub_page 里），所以落点也只能在看得见的那几条之间；
+     _sub_insert_index 会把当前页码折算成**绝对下标**（sub_page_base），
+     别直接拿屏幕上的第几行当列表下标 —— 翻到第二页时两者差着 SUB_MAX。
      没拖动就松手仍然算单击（勾选那条子任务），行为和以前一致。
      落点在**卡片以外的空白**时是另一回事：那不是"搬走"而是"提升成独立
      任务"（drag 里带 promote=<象限号>，松手走 _promote_drop）。判据就是
@@ -354,12 +359,14 @@ QHEAD     = 28
 QMIN_H    = 96
 DRAG_TOL  = 5
 
-# 子任务区的尺寸（卡片高度会随子任务条数增加，所以这三个值直接决定布局）
-SUB_MAX   = 3       # 卡面最多显示几条子任务，多出来的只看计数
+# 子任务区的尺寸（卡片高度会随子任务条数增加，所以这几个值直接决定布局）
+SUB_MAX   = 3       # **每一页**显示几条子任务；超过一页就自动出 ‹ 1/2 › 翻页。
+                    # 注意卡片高度按 min(总数, SUB_MAX) 算，翻页不会让卡片长高变矮
 SUB_LINE  = 14      # 每条子任务的行高
-SUB_HEAD  = 13      # "子任务 1/3" 这一行的高度
+SUB_HEAD  = 13      # "子任务 1/3" 这一行的高度（翻页按钮也画在这一行里）
 SUB_PAD   = 3       # 子任务区上下各留的空白
 SUB_BOX   = 11      # 子任务复选框边长
+SUB_PAGER = 16      # 翻页箭头按钮的宽度（整体在 SUB_HEAD 那一行里）
 
 # 卡片内部的纵向排布。**这几个值是照着 _draw_card 里的画法抄下来的**，
 # block_h() 靠它们算卡片到底要多高 —— 改卡面布局就必须同步改这里（见机制⑪）。
@@ -483,6 +490,8 @@ HELP_SECTIONS = [
     ("k", ("双击标题",       "就地改字，回车提交、Esc 取消")),
     ("k", ("双击备注文字",   "就地改备注")),
     ("k", ("单击「＋ 备注」", "给这条加备注（还没备注时，卡片上会显示这行浅灰的字）")),
+    ("k", ("点「‹ 1/2 ›」", "子任务超过 3 条时的翻页按钮，在「子任务 x/y」右边；"
+                            "每页 3 条，翻页不会改变卡片高度")),
     ("k", ("点右下角药丸",   "开始 / 暂停计时，药丸里显示累计投入的时间")),
     ("k", ("右键卡片",       "编辑任务… / 删除备注 / 改优先级 / 设置截止日期 / 重复规则 / "
                               "添加子任务 / 子任务批量操作 / 计时 / 标记完成 / 删除（进回收站）")),
@@ -662,6 +671,12 @@ def subs_of(t):
 
 def sub_done_n(t):
     return len([s for s in subs_of(t) if s.get("done")])
+
+
+def sub_pages(n):
+    """n 条子任务要分几页（每页 SUB_MAX 条）。**至少一页** ——
+    没子任务时也返回 1，省得调用方到处写 `or 1`。"""
+    return max(1, -(-int(n) // SUB_MAX))
 
 
 def sub_by_id(t, sid):
@@ -924,6 +939,9 @@ class App:
         #   _sub_rows ：某张卡片里子任务行的 y 区间，按显示顺序 —— 子任务拖拽排序用
         self._nest_zone = {}
         self._sub_rows = {}
+        # 子任务翻到的页码：{任务id: 第几页}。只活在内存里（不落库）——
+        # 「上次翻到第二页」不值得存盘，重开程序回到第一页反而更不容易迷路。
+        self.sub_page = {}
         self.drag = None
         self.editor = None
         self.hover_tid = None
@@ -1891,14 +1909,18 @@ class App:
 
         cv.create_line(x + 12, y, x + w - 12, y, fill=C_SUB_SEP, tags=(tag,))
         y += SUB_PAD
-        head = "子任务 %d/%d" % (done, n)
-        if n > SUB_MAX:
-            head += "  ·  还有 %d 条" % (n - SUB_MAX)
-        cv.create_text(x + 13, y, anchor="nw", text=head, font=F_SUB,
-                       fill=C_INK3, tags=(tag,))
+        cv.create_text(x + 13, y, anchor="nw", text="子任务 %d/%d" % (done, n),
+                       font=F_SUB, fill=C_INK3, tags=(tag,))
+
+        # 超过一页就在这一行右边画 ‹ 1/2 ›。页码越界（比如刚删掉几条子任务）
+        # 会在 _sub_page 里自动夹回合法范围，所以这里拿到的永远是对的。
+        pgs = sub_pages(n)
+        pg = self._sub_page(t["id"], pgs)
+        if pgs > 1:
+            self._draw_sub_pager(t, x + w - 11, y, pgs, pg, tag)
         y += SUB_HEAD
 
-        for s in subs[:SUB_MAX]:
+        for s in subs[pg * SUB_MAX:(pg + 1) * SUB_MAX]:
             sd = bool(s.get("done"))
             bx, by = x + 14, y + 1
             cv.create_rectangle(bx, by, bx + SUB_BOX, by + SUB_BOX, fill=C_WHITE,
@@ -1925,6 +1947,64 @@ class App:
             self._sub_rows.setdefault(t["id"], []).append((s["id"], y - 2, y + 13))
             y += SUB_LINE
         return y
+
+    def _draw_sub_pager(self, t, xr, y, pgs, pg, tag):
+        """在「子任务 x/y」那一行的右端画 ‹ 1/2 ›。
+
+        箭头是用 create_line 画的折线，不是 ‹ › 这两个字符 —— 字符要靠字体
+        碰运气，缺字形就是豆腐块；折线永远画得出来（复选框的勾也是这么画的）。
+        到头的那一侧画成浅灰（点了也原地不动，见 turn_sub_page）。
+        """
+        cv = self.cv
+        lbl = "%d/%d" % (pg + 1, pgs)
+        pw = max(24, _font_of(F_SUB).measure(lbl) + 6)
+        n1, n2 = xr - SUB_PAGER, xr                 # 右端 = 下一页 ›
+        t1, t2 = n1 - pw, n1                        # 中间 = 页码
+        p1, p2 = t1 - SUB_PAGER, t1                 # 左端 = 上一页 ‹
+        cy = y + SUB_HEAD / 2.0 - 1
+        # 一整块浅底 + 细边，让它一眼就是个按钮（单摆两个小尖角太不起眼）
+        round_rect(cv, p1 - 3, y - 3, n2 + 3, y + SUB_HEAD + 1, 7,
+                   fill=C_WHITE, outline=C_LINE, width=1, tags=(tag,))
+
+        cv.create_text((t1 + t2) / 2.0, y, anchor="n", text=lbl,
+                       font=F_SUB, fill=C_INK3, tags=(tag,))
+        # 折线的尖端朝哪边：a=-1 → 尖端在左（‹ 上一页）；a=+1 → 尖端在右（› 下一页）
+        for (b1, b2, a, live, knd) in ((p1, p2, -1, pg > 0, "subprev"),
+                                       (n1, n2, +1, pg < pgs - 1, "subnext")):
+            cx = (b1 + b2) / 2.0
+            ink = C_INK2 if live else "#c9c2b5"
+            cv.create_line(cx - 3 * a, cy - 4, cx + 3 * a, cy, cx - 3 * a, cy + 4,
+                           fill=ink, width=1.6, capstyle="round",
+                           joinstyle="round", tags=(tag,))
+            self.regions.append((knd, t["id"], b1 - 3, y - 4, b2 + 3, y + SUB_HEAD + 2))
+
+    def _sub_page(self, tid, pgs):
+        """这张卡当前翻到第几页（0 起）。**越界一律夹回合法范围再返回** ——
+        子任务被删掉几条之后，存在内存里的页码会指到不存在的页上去。"""
+        pg = int(self.sub_page.get(tid) or 0)
+        pg = max(0, min(pg, pgs - 1))
+        self.sub_page[tid] = pg
+        return pg
+
+    def _sub_page_base(self, tid):
+        """当前页第一条子任务在**整个列表**里的下标。
+
+        子任务拖拽的落点算的是"屏幕上的第几行"，落库要的是列表下标 ——
+        翻到第二页时两者正好差 SUB_MAX，所以必须折算一次。
+        """
+        return max(0, int(self.sub_page.get(tid) or 0)) * SUB_MAX
+
+    def turn_sub_page(self, t, d):
+        """翻一页子任务（d = -1 上一页 / +1 下一页）。到头了就停住，不循环。"""
+        pgs = sub_pages(len(subs_of(t)))
+        if pgs <= 1:
+            return
+        old = self._sub_page(t["id"], pgs)
+        new = max(0, min(old + d, pgs - 1))
+        if new == old:
+            return
+        self.sub_page[t["id"]] = new
+        self.redraw()
 
     def _draw_timer(self, t, x2, y, pr, tag):
         """画右下角的计时药丸：点它就切换计时（见 handle_click 的 timer 分支）。
@@ -2268,12 +2348,17 @@ class App:
 
     def _sub_insert_index(self, tid, cy):
         """子任务拖拽：落点该插到第几条。只看卡面上画出来的那几条
-        （超过 SUB_MAX 的本来就看不见，没法当落点）。"""
+        （没翻到的那几页本来就看不见，没法当落点）。
+
+        返回的是**整个列表里的绝对下标**（不是屏幕上的第几行）：
+        卡片翻到第二页时，画出来的第一行其实是列表里的第 SUB_MAX 条。
+        """
         rows = self._sub_rows.get(tid) or []
+        base = self._sub_page_base(tid)
         for i, (_sid, y1, y2) in enumerate(rows):
             if cy < (y1 + y2) / 2.0:
-                return i
-        return len(rows)
+                return base + i
+        return base + len(rows)
 
     def _motion_sub(self, d, cx, cy):
         """子任务拖拽：不真的搬行，只画辅助线；松手才落库。
@@ -2348,8 +2433,9 @@ class App:
         band = PRIO_BY_P[t["p"]]["band"] if t else "#9c9384"
         rows = self._sub_rows.get(tid) or []
         if rows:
-            idx = max(0, min(int(idx), len(rows)))
-            ly = rows[idx][1] - 1 if idx < len(rows) else rows[-1][2] + 1
+            # idx 是列表绝对下标，画线要看它是当前这一页里的第几行
+            i = max(0, min(int(idx) - self._sub_page_base(tid), len(rows)))
+            ly = rows[i][1] - 1 if i < len(rows) else rows[-1][2] + 1
             self.cv.create_line(r[0] + 14, ly, r[2] - 14, ly,
                                 fill=band, width=3, capstyle="round", tags="hl")
         else:
@@ -2447,6 +2533,10 @@ class App:
                 self.ask_edit(t, focus="note")
         elif kind and kind.startswith("sc:"):
             self.toggle_sub(t, kind[3:])
+        elif kind == "subprev":
+            self.turn_sub_page(t, -1)
+        elif kind == "subnext":
+            self.turn_sub_page(t, +1)
         # kind == "st:xxx" 是子任务文字：单击不做事，留给双击去编辑
 
     def on_double(self, e):
