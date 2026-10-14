@@ -1,0 +1,1758 @@
+# -*- coding: utf-8 -*-
+"""便利贴程序的功能自测：真实创建窗口，直接驱动事件处理逻辑。"""
+import datetime
+import json
+import os
+import sys
+import tempfile
+import tkinter as tk
+
+sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+import sticky
+
+TMP = tempfile.mkdtemp(prefix="sticky_test_")
+sticky.DATA_FILE = os.path.join(TMP, "tasks.json")
+# 「导入前备份」这类文件是按 APP_DIR 落盘的，也指到临时目录，
+# 免得测试跑完在程序目录里留下一堆垃圾。
+sticky.APP_DIR = TMP
+
+OK = FAIL = 0
+
+
+def check(name, cond, extra=""):
+    global OK, FAIL
+    if cond:
+        OK += 1
+        print("  [PASS] %s" % name)
+    else:
+        FAIL += 1
+        print("  [FAIL] %s   %s" % (name, extra))
+
+
+class E:
+    def __init__(self, x, y, xr=100, yr=100):
+        self.x, self.y, self.x_root, self.y_root = x, y, xr, yr
+
+
+def region(app, kind, tid):
+    for k, i, x1, y1, x2, y2 in app.regions:
+        if k == kind and i == tid:
+            return (x1, y1, x2, y2)
+    return None
+
+
+root = tk.Tk()
+app = sticky.App(root)
+# 测试里把提醒关掉：种子数据里就有今天到期的任务，
+# 不关的话跑到一半会蹦出一个提醒窗，干扰后面的用例。
+app.ui["remind_on"] = False
+root.update()
+root.update_idletasks()
+app.redraw()
+root.update()
+
+print("窗口 %dx%d，种子任务 %d 条" % (root.winfo_width(), root.winfo_height(), len(app.tasks)))
+check("首次启动生成种子数据", len(app.tasks) == 4)
+check("四个象限均已布局", len(app._quad_rects) == 4)
+
+print("\n-- 新增 --")
+app.quick_p = 0
+app.entry.insert(0, "单元测试任务")
+app.do_add()
+root.update()
+items = [t for t in app.tasks if t["title"] == "单元测试任务"]
+check("回车可添加任务", len(items) == 1)
+new = items[0] if items else None
+check("新任务继承所选优先级", new and new["p"] == 0)
+check("添加后输入框清空", app.entry.get() == "")
+app.entry.insert(0, "   ")
+app.do_add()
+check("空白输入被忽略", len(app.tasks) == 5)
+app.entry.delete(0, "end")
+
+print("\n-- 命中测试（防止整卡区域盖住内部控件）--")
+app.redraw()
+root.update()
+for kindname in ("chk", "title", "prio", "due"):
+    b = region(app, kindname, new["id"])
+    if not b:
+        check("存在 %s 区域" % kindname, False)
+        continue
+    cxx, cyy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+    k, _ = app.hit(cxx, cyy)
+    check("命中 %s 区域" % kindname, k == kindname, "实际=%s" % k)
+
+print("\n-- 点击完成（走真实事件路径）--")
+b = region(app, "chk", new["id"])
+cxx, cyy = (b[0] + b[2]) / 2, (b[1] + b[3]) / 2
+app.on_press(E(cxx, cyy))
+app.on_release(E(cxx, cyy))
+root.update()
+check("点复选框标记完成", new["done"] is True)
+app.redraw()
+root.update()
+
+print("\n-- 拖拽改优先级 --")
+box = region(app, "card", new["id"])
+check("能定位到卡片绘制区域", box is not None)
+q3 = app._quad_rects[3]
+cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+tx, ty = q3[0] + q3[2] / 2, q3[1] + q3[3] / 2
+app.on_press(E(cx, cy))
+app.on_motion(E((cx + tx) / 2, (cy + ty) / 2))
+app.on_motion(E(tx, ty))
+app.on_release(E(tx, ty))
+root.update()
+check("拖到 P3 后优先级变为 3", new["p"] == 3, "实际=%s" % new["p"])
+
+app.redraw()
+root.update()
+box = region(app, "card", new["id"])
+cx, cy = (box[0] + box[2]) / 2, (box[1] + box[3]) / 2
+app.on_press(E(cx, cy))
+app.on_motion(E(cx + 3, cy + 3))
+app.on_release(E(cx + 3, cy + 3))
+root.update()
+check("3px 抖动不误判为拖拽", new["p"] == 3, "实际=%s" % new["p"])
+
+print("\n-- 就地编辑 --")
+app.redraw()
+root.update()
+box = region(app, "title", new["id"])
+check("能定位到标题区域", box is not None)
+app.on_double(E(box[0] + 8, box[1] + 8))
+root.update()
+check("双击标题打开编辑器", app.editor is not None)
+if app.editor:
+    app.editor["entry"].delete(0, "end")
+    app.editor["entry"].insert(0, "改名后的任务")
+    app._commit_editor()
+    root.update()
+    check("编辑内容写回数据", new["title"] == "改名后的任务")
+    check("编辑器已关闭", app.editor is None)
+# 标题不允许为空
+app.redraw()
+root.update()
+box = region(app, "title", new["id"])
+app.on_double(E(box[0] + 8, box[1] + 8))
+root.update()
+if app.editor:
+    app.editor["entry"].delete(0, "end")
+    app._commit_editor()
+    root.update()
+check("空标题被拒绝，保留原标题", new["title"] == "改名后的任务")
+
+print("\n-- 日期 --")
+app.set_due(new, "2026-12-31")
+check("设置截止日期", new["due"] == "2026-12-31")
+app.set_due(new, "不是日期")
+check("非法日期被拒绝", new["due"] == "2026-12-31")
+app.set_due(new, "")
+check("可清除日期", new["due"] == "")
+
+print("\n-- 搜索与筛选 --")
+app.search.insert(0, "报销单")
+app.on_search()
+check("搜索命中一条", len([t for t in app.tasks if app.visible(t)]) == 1,
+      "实际 %d 条，q=%r" % (len([t for t in app.tasks if app.visible(t)]), app.q))
+app.search.delete(0, "end")
+app.on_search()
+app.set_filter("done")
+vis = [t for t in app.tasks if app.visible(t)]
+check("筛选已完成", len(vis) >= 1 and all(t["done"] for t in vis))
+app.set_filter("open")
+vis = [t for t in app.tasks if app.visible(t)]
+check("筛选未完成", len(vis) >= 1 and all(not t["done"] for t in vis))
+app.set_filter("overdue")
+vis = [t for t in app.tasks if app.visible(t)]
+check("筛选逾期", all(not t["done"] for t in vis))
+app.set_filter("all")
+
+print("\n-- 视图切换与渲染 --")
+app.toggle_view()
+root.update()
+app.redraw()
+root.update()
+check("切到列表视图", app.mode == "list")
+check("列表视图四组齐全", len(app._quad_rects) == 4)
+app.toggle_view()
+root.update()
+app.redraw()
+root.update()
+check("切回四象限", app.mode == "matrix")
+
+print("\n-- 极端内容 --")
+app.entry.insert(0, "含特殊字符 <>&\"' 的任务 & <script>")
+app.do_add()
+root.update()
+check("特殊字符不抛异常", any("<script>" in t["title"] for t in app.tasks))
+app.entry.insert(0, "超长中文标题" * 24)
+app.do_add()
+root.update()
+check("超长文本不抛异常", True)
+app.entry.insert(0, "VeryLongEnglishWordWithoutAnySpace" * 8)
+app.do_add()
+root.update()
+check("超长英文单词不抛异常", True)
+
+print("\n-- 清空已完成 --")
+before = len(app.tasks)
+ndone = len([t for t in app.tasks if t["done"]])
+app.do_clear_done()
+root.update()
+check("已完成条目被清空", len([t for t in app.tasks if t["done"]]) == 0)
+check("未完成条目保留", len(app.tasks) == before - ndone,
+      "期望 %d 实际 %d" % (before - ndone, len(app.tasks)))
+
+print("\n-- 子任务 --")
+
+
+def mk(title, **kw):
+    """直接造一条任务，绕过界面（这些用例只在测数据/布局逻辑）。"""
+    t = {"id": sticky.new_id(), "title": title, "note": "", "p": 1, "due": "",
+         "done": False, "order": sticky.now_ts(), "subs": [], "logs": {}, "timer": 0,
+         "repeat": "", "done_at": 0, "remind_key": ""}
+    t.update(kw)
+    app.tasks.append(t)
+    return t
+
+
+st_ = mk("子任务测试任务")
+app.add_subs(st_, ["第一步", "第二步", "", "   第三步   "])
+check("多行添加子任务（空行被忽略、首尾空白被去掉）", len(st_["subs"]) == 3,
+      "实际 %d 条" % len(st_["subs"]))
+check("子任务进度初始为 0/3", sticky.sub_done_n(st_) == 0)
+
+sid0 = st_["subs"][0]["id"]
+app.toggle_sub(st_, sid0)
+check("toggle_sub 可切换完成", st_["subs"][0]["done"] is True)
+check("进度变为 1", sticky.sub_done_n(st_) == 1)
+
+app.redraw()
+root.update()
+check("有子任务的卡片更高", sticky.block_h(st_) > sticky.CARD_H,
+      "block_h=%s CARD_H=%s" % (sticky.block_h(st_), sticky.CARD_H))
+box = region(app, "card", st_["id"])
+check("卡片实际高度与 block_h 一致",
+      box and abs((box[3] - box[1]) - sticky.block_h(st_)) < 0.5,
+      "实际 %s 期望 %s" % (box[3] - box[1], sticky.block_h(st_)))
+
+sc = region(app, "sc:" + sid0, st_["id"])
+check("子任务复选框区域已登记", sc is not None)
+if sc:
+    cxx, cyy = (sc[0] + sc[2]) / 2, (sc[1] + sc[3]) / 2
+    k, _ = app.hit(cxx, cyy)
+    check("命中子任务复选框（没被整卡兜底盖住）", k == "sc:" + sid0, "实际=%s" % k)
+    app.on_press(E(cxx, cyy))
+    app.on_release(E(cxx, cyy))
+    root.update()
+    check("走真实点击路径可取消完成", st_["subs"][0]["done"] is False)
+
+app.redraw()
+root.update()
+stb = region(app, "st:" + sid0, st_["id"])
+check("子任务文字区域已登记", stb is not None)
+app.on_double(E(stb[0] + 5, stb[1] + 5))
+root.update()
+check("双击子任务文字打开就地编辑器", app.editor is not None)
+if app.editor:
+    app.editor["entry"].delete(0, "end")
+    app.editor["entry"].insert(0, "改过的子任务")
+    app._commit_editor()
+    root.update()
+    check("子任务文字被改写", st_["subs"][0]["text"] == "改过的子任务")
+
+n_before = len(st_["subs"])
+app.redraw()
+root.update()
+stb = region(app, "st:" + sid0, st_["id"])
+app.on_double(E(stb[0] + 5, stb[1] + 5))
+root.update()
+if app.editor:
+    app.editor["entry"].delete(0, "end")     # 清空 = 删除这条
+    app._commit_editor()
+    root.update()
+check("清空子任务文字即删除该条", len(st_["subs"]) == n_before - 1,
+      "期望 %d 实际 %d" % (n_before - 1, len(st_["subs"])))
+
+app.add_subs(st_, ["a", "b", "c", "d", "e"])
+cap_h = sticky.CARD_H + sticky.SUB_PAD * 2 + sticky.SUB_HEAD + sticky.SUB_MAX * sticky.SUB_LINE
+check("子任务很多时卡片高度封顶", sticky.block_h(st_) == cap_h,
+      "实际 %s 期望 %s" % (sticky.block_h(st_), cap_h))
+app.redraw()
+root.update()
+check("超出显示上限的子任务仍然保留在数据里", len(st_["subs"]) == 7)
+check("超限时仍能正常渲染", region(app, "card", st_["id"]) is not None)
+
+nz = sticky._norm_subs(["x", {"text": "y"}, {"text": ""}, 123, {"text": "z", "done": True}])
+check("归一化丢掉空文本与非字典项", len(nz) == 3, "实际 %d" % len(nz))
+check("归一化保留完成状态", nz[2]["done"] is True and nz[2]["text"] == "z")
+check("归一化给纯字符串补上 id 与 done", bool(nz[0]["id"]) and nz[0]["done"] is False)
+
+nl = sticky._norm_logs({"2026-01-02": 60, "坏键": 10, "2026-01-02x": 5,
+                        "2026-01-03": "abc", "2026-01-04": -3})
+check("logs 只保留合法日期键", list(nl.keys()) == ["2026-01-02"], "实际 %s" % list(nl.keys()))
+check("logs 保留合法秒数", nl["2026-01-02"] == 60.0)
+
+print("\n-- 计时 --")
+t1 = mk("计时任务一")
+app.toggle_timer(t1)
+check("开始计时会写 timer", bool(t1["timer"]))
+check("计时中 spent_of 是活的", sticky.spent_of(t1) >= 0)
+t1["timer"] = sticky.now_ts() - 90          # 假装已经计了 1 分半
+app.toggle_timer(t1)
+check("暂停后 timer 归零", t1["timer"] == 0)
+key_today = sticky.d2s(sticky.today())
+check("时长落账进今天的 logs", t1["logs"].get(key_today, 0) >= 85,
+      "实际 %s" % t1["logs"])
+check("fmt_dur(90) == 1分", sticky.fmt_dur(90) == "1分")
+check("fmt_dur 秒级", sticky.fmt_dur(45) == "45秒")
+check("fmt_dur 小时级补零", sticky.fmt_dur(3900) == "1时05分")
+
+t2 = mk("跨天计时任务")
+two_days_ago = datetime.datetime.now() - datetime.timedelta(days=2, hours=1)
+t2["timer"] = two_days_ago.timestamp()
+app.toggle_timer(t2)
+old_key = sticky.d2s(two_days_ago.date())
+check("跨天计时记在「开始那天」", t2["logs"].get(old_key, 0) >= 3500,
+      "实际 %s" % t2["logs"])
+check("今天不替昨天背锅", t2["logs"].get(key_today) is None)
+
+t3 = mk("完成后自动停表")
+app.toggle_timer(t3)
+t3["timer"] = sticky.now_ts() - 30
+app.toggle_done(t3)
+check("勾完成时自动停表", t3["timer"] == 0)
+check("停下时把 30 秒记了账", sum(t3["logs"].values()) >= 25,
+      "实际 %s" % t3["logs"])
+app.reset_timer(t3)
+check("清零耗时记录", t3["logs"] == {} and t3["timer"] == 0)
+
+t4 = mk("退出时落账")
+app.toggle_timer(t4)
+t4["timer"] = sticky.now_ts() - 40
+n_committed = app.commit_timers()
+check("退出时把所有在跑的计时落账", n_committed >= 1)
+check("落账后没有任务还在计时", not any(t.get("timer") for t in app.tasks))
+
+app.toggle_timer(t1)
+app.set_filter("running")
+vis = [t for t in app.tasks if app.visible(t)]
+check("「计时中」筛选只留正在计时的", len(vis) == 1 and bool(vis[0].get("timer")),
+      "实际 %d 条" % len(vis))
+app.toggle_timer(t1)
+app.set_filter("all")
+
+print("\n-- 心跳刷新 --")
+app.toggle_timer(t1)
+t1["timer"] = sticky.now_ts() - 60
+app.redraw()
+root.update()
+
+_calls = [0]
+_orig_redraw = app.redraw
+
+
+def _counting_redraw():
+    _calls[0] += 1
+    return _orig_redraw()
+
+
+app.redraw = _counting_redraw
+app._tick()
+check("计时中且空闲时，心跳会重绘界面", _calls[0] >= 1, "重绘 %d 次" % _calls[0])
+app.redraw = _orig_redraw
+
+tb3 = region(app, "title", t1["id"])
+app.on_double(E(tb3[0] + 5, tb3[1] + 5))
+root.update()
+check("编辑器已打开", app.editor is not None)
+_calls[0] = 0
+app.redraw = _counting_redraw
+app._tick()
+app.redraw = _orig_redraw
+check("编辑中时心跳不重绘（否则输入框会被抹掉）", _calls[0] == 0, "重绘 %d 次" % _calls[0])
+check("编辑器仍然在", app.editor is not None)
+app.cancel_editor()
+root.update()
+
+app.drag = {"tid": t1["id"]}                  # 模拟正在拖拽
+_calls[0] = 0
+app.redraw = _counting_redraw
+app._tick()
+app.redraw = _orig_redraw
+app.drag = None
+check("拖拽中时心跳不重绘（否则卡片会被拉回原位）", _calls[0] == 0, "重绘 %d 次" % _calls[0])
+app.toggle_timer(t1)
+
+print("\n-- 每日自动备份 --")
+bkdir = os.path.join(TMP, "bk")
+os.makedirs(bkdir, exist_ok=True)
+today_file = os.path.join(bkdir, "便利贴备份-%s.json" % key_today)
+other_file = os.path.join(bkdir, "别的文件.json")
+stale = os.path.join(bkdir, "便利贴备份-2020-01-01.json")
+recent = os.path.join(bkdir, "便利贴备份-%s.json"
+                      % sticky.d2s(sticky.today() - datetime.timedelta(days=3)))
+
+app.ui["backup_dir"] = bkdir
+app.ui["backup_on"] = True
+app.ui["backup_keep"] = 7
+app.ui["last_backup"] = ""
+app.save()
+check("当天首次保存会生成备份", os.path.exists(today_file))
+
+snap1 = open(today_file, encoding="utf-8").read()
+check("备份内容是合法的 JSON",
+      len(json.loads(snap1)["tasks"]) == len(app.tasks))
+
+app.entry.insert(0, "备份一致性测试任务")
+app.do_add()
+root.update()
+check("同一天内不会反复覆盖备份", open(today_file, encoding="utf-8").read() == snap1)
+
+app.do_backup_now()
+root.update()
+check("手动备份会刷新快照", open(today_file, encoding="utf-8").read() != snap1)
+
+for p in (stale, recent, other_file):
+    open(p, "w", encoding="utf-8").write("{}")
+app._prune_backups()
+check("超出保留期的备份被清掉", not os.path.exists(stale))
+check("保留期内的备份不动", os.path.exists(recent))
+check("不碰文件名不符合规则的文件", os.path.exists(other_file))
+
+app.ui["backup_on"] = False
+app.ui["last_backup"] = ""
+os.remove(today_file)
+app.save()
+check("关掉开关后不再自动备份", not os.path.exists(today_file))
+
+app.ui["backup_on"] = True
+app.ui["backup_dir"] = os.path.join(TMP, "这个目录不存在")
+app.ui["last_backup"] = ""
+app.save()
+check("备份目录不存在时不抛异常", True)
+
+app.ui["backup_dir"] = ""
+app.ui["last_backup"] = ""
+app.save()
+check("没设备份目录时不做任何事", not app.backup_dir())
+
+app.entry.insert(0, "空的")
+app.ui["backup_keep"] = 0
+app._prune_backups()
+check("保留天数设为 0 表示永久保留（不删任何东西）", os.path.exists(recent))
+app.ui["backup_keep"] = 30
+
+print("\n-- 耗时统计面板 --")
+check("today 口径只有一天", len(app._period_keys("today")) == 1)
+check("近 7 天口径有 7 天", len(app._period_keys("d7")) == 7)
+check("本周口径包含今天", key_today in app._period_keys("week"))
+check("「全部」口径不做日期过滤", app._period_keys("all") is None)
+
+sample = {"logs": {"2026-01-01": 100.0, "2026-01-02": 200.0}, "timer": 0}
+check("按日期集合过滤耗时", app._secs_of(sample, {"2026-01-02"}, 0) == 200.0)
+check("全口径累加所有天", app._secs_of(sample, None, 0) == 300.0)
+check("计时中的部分按开始日归入",
+      app._secs_of({"logs": {}, "timer": 1000.0}, {sticky.d2s(
+          datetime.date.fromtimestamp(1000.0))}, 1060.0) == 60.0)
+
+app.toggle_timer(t1)
+t1["timer"] = sticky.now_ts() - 300          # 让它在计时，检验实时量是否被算进去
+_dt = app._day_totals()
+_per = sum(app._secs_of(t, app._period_keys("today")) for t in app.tasks)
+check("按天合计包含实时计时，与口径合计对得上",
+      abs(_dt.get(key_today, 0) - _per) < 0.5,
+      "按天=%s 口径=%s" % (_dt.get(key_today, 0), _per))
+check("按天合计里今天的量大于已落账的量（证明实时量算进去了）",
+      _dt.get(key_today, 0) > sum((t.get("logs") or {}).get(key_today, 0)
+                                  for t in app.tasks))
+app.toggle_timer(t1)
+
+app.open_stats()
+root.update()
+check("统计面板已创建", app._stats_win is not None and app._stats_win.winfo_exists())
+check("统计面板渲染出内容", len(app._stats_body.winfo_children()) > 0)
+app.set_stats_period("all")
+root.update()
+check("切到全部口径不报错", len(app._stats_body.winfo_children()) > 0)
+app.set_stats_period("week")
+root.update()
+check("切到本周口径不报错", len(app._stats_body.winfo_children()) > 0)
+app._render_stats()
+root.update()
+check("重复渲染不报错", True)
+app._stats_win.destroy()
+root.update()
+
+print("\n-- 不等高卡片布局 --")
+hi, lo = mk("高的", subs=[{"id": sticky.new_sid(), "text": "x", "done": False}]), mk("矮的")
+check("同行取最高的一张作为行高",
+      sticky.row_heights([hi, lo], 2) == [max(sticky.block_h(hi), sticky.block_h(lo))])
+check("空列表回落到基础高度", sticky.row_heights([], 3) == [sticky.CARD_H])
+check("单行多列时行高一致", len(sticky.row_heights([hi, lo, mk("第三"), mk("第四")], 2)) == 2)
+
+app.redraw()
+root.update()
+cards = [(tid, x1, y1, x2, y2) for k, tid, x1, y1, x2, y2 in app.regions if k == "card"]
+overlap = []
+for i in range(len(cards)):
+    for j in range(i + 1, len(cards)):
+        a, b = cards[i], cards[j]
+        if a[1] < b[3] and b[1] < a[3] and a[2] < b[4] and b[2] < a[4]:
+            overlap.append((a[0], b[0]))
+check("卡片之间没有互相压住", not overlap, "重叠: %s" % overlap)
+
+badge = region(app, "timer", t1["id"])
+check("计时药丸区域已登记", badge is not None)
+if badge:
+    bxc, byc = (badge[0] + badge[2]) / 2, (badge[1] + badge[3]) / 2
+    k, _ = app.hit(bxc, byc)
+    check("命中计时药丸", k == "timer", "实际=%s" % k)
+    app.on_press(E(bxc, byc))
+    app.on_release(E(bxc, byc))
+    root.update()
+    check("走真实点击路径可开始计时", bool(t1.get("timer")))
+    app.toggle_timer(t1)
+
+print("\n-- 就地编辑的提交方式（防止编辑器一闪就没）--")
+app.redraw()
+root.update()
+tb2 = region(app, "title", st_["id"])
+app.on_double(E(tb2[0] + 5, tb2[1] + 5))
+root.update()
+check("编辑器已打开", app.editor is not None)
+check("编辑器不会因为一次假的 FocusOut 就自己关掉", app.editor is not None)
+app._maybe_commit_editor(E(0, 0, xr=5, yr=5))       # 点在别处
+root.update()
+check("点到输入框以外的地方会提交并关闭", app.editor is None)
+
+# ---- 真实事件顺序：双击的第二次「按下」会同时发出 <Button-1> 和
+#      <Double-Button-1>，一次事件要沿着 bindtags 走完 —— 画布上的 on_double
+#      建好输入框之后，root 上那条 <Button-1>（_maybe_commit_editor，点别处提交）
+#      还会对**同一次按下**再跑一遍。那一瞬间输入框刚建、X 窗口还没映射，
+#      winfo_containing 查到的是画布，于是被当成"点到了别处"当场提交。
+#      真机上的表现就是：双击标题毫无反应，焦点还掉回新增输入框。
+app.redraw()
+root.update()
+tb5 = region(app, "title", st_["id"])
+_t5_before = st_["title"]
+app.on_press(E(tb5[0] + 5, tb5[1] + 5))                 # 第二次按下的前半截
+app.on_double(E(tb5[0] + 5, tb5[1] + 5))                # 同一时刻的 <Double-Button-1>
+app._maybe_commit_editor(E(tb5[0] + 5, tb5[1] + 5))     # 同一次按下走到 root 的那条
+app.on_release(E(tb5[0] + 5, tb5[1] + 5))
+root.update()                                           # 空闲了才真正建框
+check("双击标题：同一次按下不会把刚开的编辑器吃掉", app.editor is not None,
+      "editor=%r" % (app.editor,))
+if app.editor:
+    _e5 = app.editor["entry"]
+    check("编辑器里装的是原标题（没被人顺手提交掉）", _e5.get() == st_["title"],
+          "实际 %r" % _e5.get())
+    app.root.focus_force()
+    _e5.focus_set()
+    root.update()
+    check("光标停在就地编辑器里，不跳回新增输入框",
+          root.focus_get() is _e5, "实际 %r" % (root.focus_get(),))
+    app.cancel_editor()
+root.update()
+check("Esc 之后编辑器和数据都回到原样",
+      app.editor is None and st_["title"] == _t5_before and app.drag is None,
+      "editor=%r title=%r drag=%r" % (app.editor, st_["title"], app.drag))
+
+app.on_double(E(tb2[0] + 5, tb2[1] + 5))
+root.update()
+if app.editor:
+    ent = app.editor["entry"]
+    ent.update_idletasks()
+    ex, ey = ent.winfo_rootx() + 3, ent.winfo_rooty() + 3
+    app._maybe_commit_editor(E(0, 0, xr=ex, yr=ey))
+    root.update()
+    still = app.editor is not None
+    check("点在输入框自己身上不提交", still,
+          "winfo_containing=%r 期望=%r" % (
+              app.root.winfo_containing(ex, ey), ent))
+    # ---- Esc = 取消。真的按一下才作数：以前这条只调了 cancel_editor()，
+    #      等于没测「Esc 到底绑上没有」。
+    check("就地编辑框绑了 Esc",
+          "<Key-Escape>" in ent.bind(), "实际 %s" % list(ent.bind()))
+    _et_ = app.editor["t"]
+    _t_before = _et_["title"]
+    ent.delete(0, "end")
+    ent.insert(0, "不该生效的标题")
+    app.root.focus_force()
+    ent.focus_set()
+    ent.update_idletasks()
+    app.root.update()
+    ent.event_generate("<Escape>", when="now")
+    app.root.update_idletasks()
+    app.root.update()
+    check("按 Esc：编辑器关掉、标题原封不动",
+          app.editor is None and _et_["title"] == _t_before,
+          "实际 editor=%s title=%r" % (app.editor, _et_["title"]))
+else:
+    check("就地编辑框绑了 Esc", False, "编辑器没打开")
+    check("按 Esc：编辑器关掉、标题原封不动", False, "编辑器没打开")
+check("Escape 可取消编辑（兜底：直接调方法）", app.editor is None)
+
+print("\n-- 搜索命中子任务文字 --")
+app.search.insert(0, "第三步")
+app.on_search()
+vis = [t for t in app.tasks if app.visible(t)]
+check("搜索能匹配到子任务里的文字", len(vis) == 1 and vis[0] is st_,
+      "实际 %d 条" % len(vis))
+app.search.delete(0, "end")
+app.on_search()
+
+print("\n-- 更多菜单可构建 --")
+try:
+    m = app.build_more_menu()
+    check("更多菜单构建成功", m.index("end") is not None or True)
+    labels = [m.entrycget(i, "label") for i in range(m.index("end") + 1)
+              if m.type(i) == "command"]
+    m.destroy()
+except Exception as ex:
+    labels = []
+    check("更多菜单构建成功", False, repr(ex))
+check("更多菜单里不再重复摆「耗时统计…」", "耗时统计…" not in labels,
+      "实际 %s" % labels)
+check("更多菜单里不再重复摆「每日复盘…」", "每日复盘…" not in labels)
+check("但回收站还在菜单里（顶栏没有它）", "回收站…" in labels)
+
+
+# ------------------------------------------------------------------ 拖拽
+# 这一段要自己摆一组干净的任务来测拖拽，所以先把现有的挪开，测完再放回去
+# （后面的持久化用例还要靠前面那些任务，不能真丢）。
+_keep_tasks = list(app.tasks)
+_keep_trash = list(app.trash)
+
+
+def do_drag(app, start_xy, end_xy):
+    """走一遍真实的「按下 → 移动 → 松手」。位移必须超过 DRAG_TOL，
+    否则会被当成单击。返回松手前的 app.drag（可以看落点判定结果）。"""
+    app.on_press(E(start_xy[0], start_xy[1]))
+    app.on_motion(E(end_xy[0], end_xy[1]))
+    root.update()
+    d = dict(app.drag) if app.drag else None
+    app.on_release(E(end_xy[0], end_xy[1]))
+    root.update()
+    return d
+
+
+def center(box):
+    return ((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0)
+
+
+def subs_text(tid):
+    """从当前任务列表里现取某条任务的子任务文字。
+
+    撤销是「整份任务列表换成一份新副本」，所以撤销之后手里那把旧引用就
+    作废了 —— 测试里一律按 id 现取。
+    """
+    return [s["text"] for s in sticky.subs_of(app.task_by_id(tid))]
+
+
+print("\n-- 拖到别人卡片上半张 = 变成它的子任务 --")
+app.tasks = []
+app.trash = []
+mom = mk("母任务", p=0, order=1.0)
+kid = mk("要变成子任务的", p=0, order=2.0)
+mid, kid_id = mom["id"], kid["id"]
+app.redraw()
+root.update()
+
+mb = region(app, "card", mid)
+kb = region(app, "card", kid_id)
+check("两张卡片都画出来了", bool(mb) and bool(kb))
+zone = app._nest_zone.get(mid)
+check("母任务记录了「上半张」嵌套区", bool(zone), "实际 %s" % (zone,))
+check("嵌套区确实是卡片的上半张（下沿不到卡片一半高）",
+      bool(zone) and zone[1] == mb[1] and zone[3] < (mb[1] + mb[3]) / 2.0,
+      "实际 %s / 卡片 %s" % (zone, mb))
+
+# 抓在卡片下半张（徽章行那一段），起点本身不会落在别人的嵌套区里
+d = do_drag(app, (kb[0] + 40, kb[3] - 14), center(zone))
+check("拖到上半张时判定为「嵌套」", bool(d) and d.get("nest") == mid,
+      "实际 %s" % (d or {}).get("nest"))
+check("被拖走的卡片从任务列表里消失", [t["id"] for t in app.tasks] == [mid])
+check("母任务多了一条同名子任务", subs_text(mid) == ["要变成子任务的"])
+check("嵌套后给了撤销入口", app._undo_cb is not None)
+
+app._do_undo()
+check("撤销后任务回来了", len(app.tasks) == 2 and subs_text(mid) == [])
+
+# 备注 / 自带子任务会丢的时候先弹确认框；把确认框打桩成「同意」
+orig_ask = sticky.tkmb.askyesno
+asked = []
+sticky.tkmb.askyesno = lambda *a, **k: (asked.append(a[1]) or True)
+kid = app.task_by_id(kid_id)
+kid["note"] = "有个备注"
+kid["subs"] = [{"id": sticky.new_sid(), "text": "自带子任务", "done": False}]
+app.redraw()
+root.update()
+kb = region(app, "card", kid_id)
+do_drag(app, (kb[0] + 40, kb[3] - 14), center(app._nest_zone.get(mid)))
+check("有信息会丢时先弹确认框", len(asked) == 1, "实际 %s" % len(asked))
+check("确认文案点名了会丢的东西",
+      bool(asked) and "备注会丢掉" in asked[0] and "摊平" in asked[0],
+      "实际 %s" % (asked[0] if asked else ""))
+check("自带的子任务被摊平成同级",
+      subs_text(mid) == ["要变成子任务的", "自带子任务"])
+sticky.tkmb.askyesno = orig_ask
+app._do_undo()
+
+# 用户点「否」时什么都不该发生
+sticky.tkmb.askyesno = lambda *a, **k: False
+app.redraw()
+root.update()
+kb = region(app, "card", kid_id)
+do_drag(app, (kb[0] + 40, kb[3] - 14), center(app._nest_zone.get(mid)))
+check("点「否」时任务原地不动", len(app.tasks) == 2 and subs_text(mid) == [])
+sticky.tkmb.askyesno = orig_ask
+
+# 落点在下半张 = 排序落点，不该误触发嵌套
+kb = region(app, "card", kid_id)
+mb = region(app, "card", mid)
+d = do_drag(app, (kb[0] + 40, kb[3] - 14), (mb[0] + 40, mb[3] - 10))
+check("落点在下半张不算嵌套", bool(d) and not d.get("nest"),
+      "实际 %s" % (d or {}).get("nest"))
+check("落点在下半张仍然只做同组排序", len(app.tasks) == 2)
+
+print("\n-- 子任务：拖拽排序 / 跨卡片搬移 --")
+app.tasks = []
+host = mk("带子任务", p=1, order=1.0)
+hid = host["id"]
+app.tasks = [host]
+app.add_subs(host, ["甲", "乙", "丙"])
+app.redraw()
+root.update()
+hb = region(app, "card", hid)
+rows = app._sub_rows.get(hid)
+check("记录了三条子任务行的位置", len(rows) == 3, "实际 %s" % (rows,))
+check("行按显示顺序排列（y 递增）",
+      len(rows) == 3 and rows[0][1] < rows[1][1] < rows[2][1])
+
+first_sid = app.task_by_id(hid)["subs"][0]["id"]
+sb = region(app, "st:" + first_sid, hid)
+do_drag(app, (sb[0] + 5, sb[1] + 5), (hb[0] + 60, rows[2][2] + 4))
+check("拖到最后一行下面 = 挪到末尾",
+      subs_text(hid) == ["乙", "丙", "甲"], "实际 %s" % subs_text(hid))
+app._do_undo()
+check("撤销后顺序还原", subs_text(hid) == ["甲", "乙", "丙"])
+
+# 没拖动就松手 = 单击，仍然勾选那条子任务
+app.redraw()
+root.update()
+cb = region(app, "sc:" + first_sid, hid)
+was = bool(app.task_by_id(hid)["subs"][0]["done"])
+do_drag(app, (cb[0] + 2, cb[1] + 2), (cb[0] + 2, cb[1] + 2))
+check("原地松手仍然算单击（勾选那条子任务）",
+      bool(app.task_by_id(hid)["subs"][0]["done"]) != was)
+
+# 菜单：上移 / 下移
+app.redraw()
+root.update()
+app.move_sub(app.task_by_id(hid), app.task_by_id(hid)["subs"][2]["id"], -1)
+check("下移一格可把最后一条往上提", subs_text(hid) == ["甲", "丙", "乙"],
+      "实际 %s" % subs_text(hid))
+app.move_sub(app.task_by_id(hid), app.task_by_id(hid)["subs"][0]["id"], -1)
+check("第一条再上移应当无效（已经在头）", subs_text(hid) == ["甲", "丙", "乙"])
+app._do_undo()
+check("撤销回到上移之前", subs_text(hid) == ["甲", "乙", "丙"])
+
+# 拖到别的卡片上 = 搬到那张卡里
+other = mk("另一个任务", p=1, order=2.0)
+oid = other["id"]
+app.redraw()
+root.update()
+sb = region(app, "st:" + app.task_by_id(hid)["subs"][0]["id"], hid)
+ob = region(app, "card", oid)
+do_drag(app, (sb[0] + 5, sb[1] + 5), (ob[0] + 60, ob[1] + 12))
+check("子任务被搬到另一张卡片",
+      subs_text(oid) == ["甲"] and subs_text(hid) == ["乙", "丙"],
+      "实际 目标=%s 源=%s" % (subs_text(oid), subs_text(hid)))
+app._do_undo()
+check("撤销后子任务回到原处",
+      subs_text(hid) == ["甲", "乙", "丙"] and subs_text(oid) == [])
+
+print("\n-- 子任务：提升成独立任务 --")
+app.tasks = []
+hp = mk("父任务", p=2, order=5.0)
+hid2 = hp["id"]
+app.tasks = [hp]
+app.add_subs(hp, ["甲", "乙"])
+app.redraw()
+root.update()
+nt = app.promote_sub(app.task_by_id(hid2),
+                     app.task_by_id(hid2)["subs"][1]["id"])
+check("提升后多出一个独立任务", nt is not None and len(app.tasks) == 2)
+check("提升出来的任务继承了标题与象限",
+      bool(nt) and nt["title"] == "乙" and nt["p"] == 2)
+check("父任务里那条子任务已摘除", subs_text(hid2) == ["甲"],
+      "实际 %s" % subs_text(hid2))
+check("新任务紧跟在父任务后面",
+      bool(nt) and sorted(app.tasks, key=app.sort_key)[1]["id"] == nt["id"])
+check("提升也给了撤销入口", app._undo_cb is not None)
+app._do_undo()
+check("撤销后回到子任务状态",
+      subs_text(hid2) == ["甲", "乙"] and len(app.tasks) == 1)
+
+print("\n-- 子任务：拖到卡片以外的空白 = 提升成独立任务 --")
+# 先给 P0 摆一张卡，好验证「提升出来的任务落进鼠标所在象限、并按落点排在后面」
+boss = mk("P0 老大哥", p=0, order=1.0)
+app.redraw()
+root.update()
+q0 = app._quad_rects.get(0)
+check("P0 象限矩形已记录", bool(q0), "实际 %s" % (q0,))
+check("P0 里已经有卡片", bool(region(app, "card", boss["id"])))
+
+sb = region(app, "st:" + app.task_by_id(hid2)["subs"][0]["id"], hid2)
+dest = (q0[0] + q0[2] - 40, q0[1] + q0[3] - 26)     # 象限里的空白（卡片都在左侧）
+check("落点确实是空白（不在任何卡片上）", app._card_under(dest[0], dest[1]) is None)
+check("落点在 P0 象限里", app._quad_at(dest[0], dest[1], None) == 0)
+
+d = do_drag(app, (sb[0] + 5, sb[1] + 5), dest)
+check("落点在卡片以外的空白时判定为「提升」",
+      bool(d) and d.get("promote") == 0, "实际 %s" % (d or {}).get("promote"))
+check("子任务已从父任务里摘除", subs_text(hid2) == ["乙"], "实际 %s" % subs_text(hid2))
+newt = [t for t in app.tasks if t["title"] == "甲"]
+check("原地多出一张同名独立任务", len(newt) == 1 and len(app.tasks) == 3)
+check("新任务落在鼠标所在的象限（P0）",
+      bool(newt) and newt[0]["p"] == 0, "实际 %s" % (newt[0]["p"] if newt else None))
+check("新任务在 P0 里排在已有卡片之后（按落点算的位置）",
+      bool(newt) and sorted([t for t in app.tasks if t["p"] == 0],
+                            key=app.sort_key)[-1]["id"] == newt[0]["id"])
+check("提升也给了撤销入口", app._undo_cb is not None)
+app._do_undo()
+check("撤销后回到子任务状态",
+      subs_text(hid2) == ["甲", "乙"] and len(app.tasks) == 2,
+      "实际 %s / %d 条" % (subs_text(hid2), len(app.tasks)))
+
+# 反向确认：落在卡片上仍然是「搬过去」，别被误判成提升
+app.redraw()
+root.update()
+sb = region(app, "st:" + app.task_by_id(hid2)["subs"][0]["id"], hid2)
+cb = region(app, "card", boss["id"])
+d = do_drag(app, (sb[0] + 5, sb[1] + 5), (cb[0] + 60, cb[1] + 12))
+check("落在卡片上不算提升（仍然是搬过去）",
+      bool(d) and d.get("promote") is None and d.get("target") == boss["id"],
+      "实际 %s" % (d or {}))
+check("子任务确实被搬进了那张卡", subs_text(boss["id"]) == ["甲"],
+      "实际 %s" % subs_text(boss["id"]))
+app._do_undo()
+
+# 甩到顶栏上不该被当成「拖到空白」—— 否则一松手就凭空多出一个任务
+app.redraw()
+root.update()
+sb = region(app, "st:" + app.task_by_id(hid2)["subs"][0]["id"], hid2)
+above = (sb[0] + 5, min(y for (_x, y, _w, _h) in app._quad_rects.values()) - 30)
+check("顶栏那个落点确实在板子外面", app._in_board(above[1]) is False)
+d = do_drag(app, (sb[0] + 5, sb[1] + 5), above)
+check("甩到顶栏上不算提升", bool(d) and d.get("promote") is None,
+      "实际 %s" % (d or {}).get("promote"))
+check("甩到顶栏上也不会把子任务弄丢",
+      subs_text(hid2) == ["甲", "乙"] and len(app.tasks) == 2,
+      "实际 %s / %d 条" % (subs_text(hid2), len(app.tasks)))
+
+print("\n-- 卡片高度跟着子任务走 --")
+app.tasks = []
+h1 = mk("空的", p=3, order=1.0)
+h1id = h1["id"]
+app.tasks = [h1]
+app.redraw()
+root.update()
+h_before = sticky.block_h(app.task_by_id(h1id))
+app.add_subs(app.task_by_id(h1id), ["一"])
+app.redraw()
+root.update()
+check("加了子任务后卡片变高", sticky.block_h(app.task_by_id(h1id)) > h_before)
+check("高度算的是子任务区，没写死",
+      sticky.block_h(app.task_by_id(h1id)) == h_before + sticky.SUB_PAD * 2
+      + sticky.SUB_HEAD + sticky.SUB_LINE)
+
+# 把前面那些任务放回来，后面的持久化用例还要用
+app.tasks = _keep_tasks
+app.trash = _keep_trash
+app.redraw()
+root.update()
+check("测试任务已复原", len(app.tasks) == len(_keep_tasks))
+
+print("\n-- 重复任务：日期推算（纯函数，边界最多）--")
+D11 = datetime.date(2026, 10, 11)
+check("每天：往后推一天",
+      sticky.next_date("2026-10-11", "daily", base=D11) == "2026-10-12")
+check("每周：往后推七天",
+      sticky.next_date("2026-10-11", "weekly", base=D11) == "2026-10-18")
+check("每月：月末自动对齐（1/31 → 2/28）",
+      sticky.next_date("2026-01-31", "monthly", base=datetime.date(2026, 1, 31))
+      == "2026-02-28")
+check("每年：往后推一年",
+      sticky.next_date("2026-10-11", "yearly", base=D11) == "2027-10-11")
+check("没设日期时从今天往后算",
+      sticky.next_date("", "weekly", base=D11) == "2026-10-18")
+check("拖太久才完成，不会补出一串过期任务",
+      sticky.next_date("2026-01-01", "daily", base=D11) == "2026-10-12",
+      "实际 %s" % sticky.next_date("2026-01-01", "daily", base=D11))
+check("逢 2/29 每年重复，平年落到 2/28",
+      sticky.next_date("2024-02-29", "yearly", base=datetime.date(2024, 2, 29))
+      == "2025-02-28")
+check("不重复时返回空串", sticky.next_date("2026-10-11", "") == "")
+
+print("\n-- 重复任务：勾完成即续期 --")
+rp = mk("每周复盘", repeat="weekly", due=key_today)
+n_before = len(app.tasks)
+app.toggle_done(rp)
+twin = [t for t in app.tasks if t is not rp and t["title"] == "每周复盘"]
+check("原任务被标记完成", rp["done"] is True)
+check("自动生成了下一条", len(app.tasks) == n_before + 1)
+check("新任务继承重复周期", bool(twin) and twin[0]["repeat"] == "weekly")
+check("新任务是未完成的", bool(twin) and twin[0]["done"] is False)
+check("新任务日期推到了下一轮", bool(twin) and twin[0]["due"] > key_today,
+      "实际 %s" % (twin[0]["due"] if twin else "没生成"))
+check("完成时间被记了下来", rp["done_at"] > 0)
+check("完成日期能算出来", sticky.done_day(rp) == key_today)
+once = mk("一次性的")
+n_once = len(app.tasks)
+app.toggle_done(once)
+check("没有重复周期的任务不会长出新任务", len(app.tasks) == n_once)
+app.tasks.remove(once)
+for x in [rp] + (twin or []):
+    if x in app.tasks:
+        app.tasks.remove(x)
+
+print("\n-- 重复任务的卡片徽章 --")
+rp2 = mk("每月对账", repeat="monthly")
+app.redraw()
+root.update()
+rep = region(app, "rep", rp2["id"])
+check("卡片上出现了重复徽章", rep is not None)
+if rep:
+    k, _ = app.hit((rep[0] + rep[2]) / 2, (rep[1] + rep[3]) / 2)
+    check("徽章没被整卡兜底盖住", k == "rep", "实际=%s" % k)
+app.set_repeat(rp2, "")
+app.redraw()
+root.update()
+check("清掉重复周期后徽章消失", region(app, "rep", rp2["id"]) is None)
+app.tasks.remove(rp2)
+
+print("\n-- 删除 → 回收站 → 撤销 --")
+# 注意：前面的用例（比如「清空已完成」）也会往回收站里放东西，
+# 所以这里一律用「相对变化量」断言，不写死绝对条数。
+tb0 = len(app.trash)
+tr = mk("将被删除的任务")
+app.redraw()
+root.update()
+n_before = len(app.tasks)
+app.delete_task(tr)
+root.update_idletasks()
+check("删除后从任务列表消失", tr not in app.tasks)
+check("删除后进了回收站", len(app.trash) == tb0 + 1 and app.trash[-1]["task"] is tr,
+      "回收站 %d → %d" % (tb0, len(app.trash)))
+check("回收站记下了删除时间", app.trash[-1]["deleted_at"] > 0)
+check("状态栏出现了撤销按钮", bool(app.undo_btn.winfo_ismapped()))
+back = app.undo_delete()
+check("撤销把任务捞了回来", back is tr and tr in app.tasks)
+check("撤销后回收站回到原样", len(app.trash) == tb0,
+      "实际 %d，期望 %d" % (len(app.trash), tb0))
+check("任务数量复原", len(app.tasks) == n_before)
+app._clear_undo()
+
+print("\n-- 清空已完成也进回收站，且能整批撤销 --")
+tb1 = len(app.trash)
+d1, d2 = mk("已完成甲"), mk("已完成乙")
+app.toggle_done(d1)
+app.toggle_done(d2)
+ndone = len([t for t in app.tasks if t["done"]])     # 前面的用例也会留下已完成项
+app.do_clear_done()
+check("清空后没有已完成任务", len([t for t in app.tasks if t["done"]]) == 0)
+check("清掉的都进了回收站", len(app.trash) == tb1 + ndone,
+      "回收站 %d → %d，清掉 %d 条" % (tb1, len(app.trash), ndone))
+got = app.undo_batch(ndone)
+check("可以一次性撤销回来", got == ndone and d1 in app.tasks and d2 in app.tasks,
+      "实际恢复 %d 条，期望 %d" % (got, ndone))
+check("撤销后回收站回到原样", len(app.trash) == tb1,
+      "实际 %d，期望 %d" % (len(app.trash), tb1))
+app._clear_undo()
+
+print("\n-- 回收站面板 --")
+tb2 = len(app.trash)
+x1 = mk("回收站面板测试")
+app._to_trash(x1)
+app.open_trash()
+root.update()
+check("回收站面板已创建",
+      app._trash_win is not None and app._trash_win.winfo_exists())
+check("列表里显示出了全部条目", app._trash_list.size() == len(app.trash),
+      "列表 %d 条 / 数据 %d 条" % (app._trash_list.size(), len(app.trash)))
+check("最新那条的文字里带着标题",
+      "回收站面板测试" in app._trash_list.get(app._trash_list.size() - 1))
+app._trash_list.selection_set(app._trash_list.size() - 1)
+check("选中后能恢复", app.trash_restore() == 1 and x1 in app.tasks)
+check("恢复后回收站回到原样", len(app.trash) == tb2)
+app._trash_win.destroy()
+root.update()
+
+print("\n-- 导入 / 恢复备份 --")
+imp_dir = os.path.join(TMP, "imp")
+os.makedirs(imp_dir, exist_ok=True)
+snapshot = os.path.join(imp_dir, "snapshot.json")
+app.save()
+with open(sticky.DATA_FILE, encoding="utf-8") as f:
+    _snap = f.read()
+with open(snapshot, "w", encoding="utf-8") as f:
+    f.write(_snap)
+
+good = os.path.join(imp_dir, "good.json")
+with open(good, "w", encoding="utf-8") as f:
+    json.dump({"v": 3, "tasks": [
+        {"title": "导入来的甲", "p": 0, "due": "2026-12-01",
+         "subs": ["子一"], "logs": {"2026-10-01": 600}, "repeat": "weekly"},
+        {"title": "导入来的乙", "p": 2},
+        {"title": "    "},                       # 空标题，应该被丢掉
+    ]}, f, ensure_ascii=False)
+
+n, err = app.import_from(good, "merge")
+check("合并导入成功", err == "" and n == 2, "n=%s err=%r" % (n, err))
+arr = [t for t in app.tasks if t["title"] == "导入来的甲"]
+check("导入的任务进了列表", bool(arr))
+if arr:
+    a = arr[0]
+    check("导入保留了优先级", a["p"] == 0)
+    check("导入保留了子任务", len(a["subs"]) == 1 and a["subs"][0]["text"] == "子一")
+    check("导入保留了耗时流水", a["logs"].get("2026-10-01") == 600)
+    check("导入保留了重复周期", a["repeat"] == "weekly")
+check("空标题的条目被丢掉", not any(not t["title"].strip() for t in app.tasks))
+check("导入前自动留了一份后悔药",
+      any(f.startswith(sticky.IMPORT_BACKUP_PREFIX) for f in os.listdir(TMP)))
+
+n, err = app.import_from(good, "replace")
+check("替换导入成功", err == "" and n == 2)
+check("替换后只剩文件里那两条", len(app.tasks) == 2,
+      "实际 %d 条" % len(app.tasks))
+
+bad = os.path.join(imp_dir, "bad.json")
+with open(bad, "w", encoding="utf-8") as f:
+    f.write("{ 这不是合法的 JSON")
+n, err = app.import_from(bad, "merge")
+check("坏 JSON 会报错而不是崩掉", n == 0 and bool(err), "err=%r" % err)
+
+empty = os.path.join(imp_dir, "empty.json")
+with open(empty, "w", encoding="utf-8") as f:
+    json.dump({"v": 3, "tasks": []}, f)
+n, err = app.import_from(empty, "merge")
+check("空备份被识别出来", n == 0 and bool(err), "err=%r" % err)
+
+weird = os.path.join(imp_dir, "weird.json")
+with open(weird, "w", encoding="utf-8") as f:
+    json.dump({"hello": "world"}, f)
+n, err = app.import_from(weird, "merge")
+check("不是备份格式的文件被识别出来", n == 0 and bool(err), "err=%r" % err)
+
+n, err = app.import_from(snapshot, "replace")
+check("从快照恢复现场成功", err == "" and n > 0, "n=%s err=%r" % (n, err))
+
+print("\n-- 同象限内手动排序 --")
+s1, s2, s3 = mk("排序甲", p=3), mk("排序乙", p=3), mk("排序丙", p=3)
+s1["order"], s2["order"], s3["order"] = 1.0, 2.0, 3.0
+app.redraw()
+root.update()
+seq = [t["title"] for t in sorted([s1, s2, s3], key=app.sort_key)]
+check("初始顺序是甲乙丙", seq == ["排序甲", "排序乙", "排序丙"], "实际 %s" % seq)
+
+r3 = region(app, "card", s3["id"])
+r1 = region(app, "card", s1["id"])
+app.on_press(E(r3[0] + 20, r3[1] + 20))
+app.on_motion(E(r3[0] + 20, r1[1] - 10))       # 一直移到「甲」的上方
+app.on_release(E(r3[0] + 20, r1[1] - 10))
+root.update()
+seq = [t["title"] for t in sorted([s1, s2, s3], key=app.sort_key)]
+check("拖到最前面后「丙」排第一", seq[0] == "排序丙", "实际 %s" % seq)
+check("同组排序不会改动优先级", all(t["p"] == 3 for t in (s1, s2, s3)))
+n_p3 = len([t for t in app.tasks if t["p"] == 3 and t["id"] != s1["id"]])
+check("落点在最下方时插到末尾",
+      app._insert_index(3, 99999, 99999, s1["id"]) == n_p3,
+      "实际 %s 期望 %s" % (app._insert_index(3, 99999, 99999, s1["id"]), n_p3))
+
+print("\n-- 已完成的任务在组内始终沉底 --")
+s2["done"] = True
+app._apply_drop(s1, 3, 0)
+seq = [t["title"] for t in sorted([s1, s2, s3], key=app.sort_key)]
+check("已完成的排在未完成的后面", seq[-1] == "排序乙", "实际 %s" % seq)
+s2["done"] = False
+for x in (s1, s2, s3):
+    app.tasks.remove(x)
+
+print("\n-- 到点提醒 --")
+app.ui["remind_on"] = True
+r_due = mk("今天到期的事", due=key_today)
+r_late = mk("早就逾期的事",
+            due=sticky.d2s(sticky.today() - datetime.timedelta(days=3)))
+r_future = mk("以后的事",
+              due=sticky.d2s(sticky.today() + datetime.timedelta(days=5)))
+r_fin = mk("已完成的事", due=key_today, done=True)
+for t in (r_due, r_late, r_future, r_fin):
+    t["remind_key"] = ""
+rem = app.due_reminders()
+names = [t["title"] for t in rem]
+check("今天到期的会被提醒", "今天到期的事" in names)
+check("已逾期的会被提醒", "早就逾期的事" in names)
+check("还没到期的不打扰", "以后的事" not in names)
+check("已完成的不提醒", "已完成的事" not in names)
+check("逾期的排在今天到期的前面", names.index("早就逾期的事") < names.index("今天到期的事"))
+
+n_rem = app._maybe_remind()
+check("到点了会弹出提醒", n_rem >= 2, "实际提醒 %d 条" % n_rem)
+check("提醒窗已创建",
+      app._remind_win is not None and app._remind_win.winfo_exists())
+check("提醒过的任务打上了今天的标记", r_due["remind_key"] == key_today)
+check("同一天不会再提醒第二次", app._maybe_remind() == 0)
+app._remind_win.destroy()
+root.update()
+
+app.ui["remind_on"] = False
+r_due["remind_key"] = ""
+check("关掉开关后就不再提醒", app._maybe_remind() == 0)
+app.ui["remind_on"] = True
+for t in (r_due, r_late, r_future, r_fin):
+    app.tasks.remove(t)
+
+print("\n-- 每日复盘 --")
+dn = mk("今天完成的")
+app.toggle_done(dn)
+start, hd = app._heat_data()
+check("热力图起点对齐到周一", start.weekday() == 0)
+check("热力图覆盖最近 %d 周" % sticky.HEAT_WEEKS,
+      (sticky.today() - start).days < sticky.HEAT_WEEKS * 7 + 7,
+      "起点 %s" % start)
+check("今天完成的条目被统计进去", hd.get(key_today, 0) >= 1, "实际 %s" % hd)
+check("颜色分档：0 条最浅", app._heat_color(0) == sticky.HEAT_LEVELS[0])
+check("颜色分档：很多条取最深", app._heat_color(99) == sticky.HEAT_LEVELS[-1])
+check("颜色分档：1 条不是最浅", app._heat_color(1) != sticky.HEAT_LEVELS[0])
+
+app.open_review()
+root.update()
+check("复盘面板已创建",
+      app._review_win is not None and app._review_win.winfo_exists())
+check("复盘面板渲染出了内容", len(app._review_body.winfo_children()) > 0)
+app._render_review()
+root.update()
+check("重复渲染复盘不报错", True)
+app._review_win.destroy()
+root.update()
+app.tasks.remove(dn)
+
+print("\n-- 备份保留天数：0 表示永久，不能被悄悄改成 30 --")
+app.ui["backup_keep"] = 0
+app.save()
+raw0 = json.load(open(sticky.DATA_FILE, encoding="utf-8"))
+check("保留天数 0 原样写进文件", raw0["ui"]["backup_keep"] == 0,
+      "实际 %s" % raw0["ui"]["backup_keep"])
+check("读取时 0 仍然是 0（= 永久）", app._keep_days() == 0)
+app.ui["backup_keep"] = 30
+app.save()
+
+print("\n-- 窗口置顶开关 --")
+
+
+def is_top(w):
+    """Tk 的 -topmost 在不同环境返回 0/1 或 '0'/'1'，统一成 bool。"""
+    return str(w.attributes("-topmost")).lower() in ("1", "true")
+
+
+app.topmost = False
+app._apply_topmost(announce=False)
+root.update_idletasks()
+check("未置顶时按钮写「置顶」", app.top_btn.cget("text") == "置顶",
+      "实际 %r" % app.top_btn.cget("text"))
+check("未置顶时按钮是白底", app.top_btn.cget("bg") == sticky.C_PIN_OFF_BG,
+      "实际 %s" % app.top_btn.cget("bg"))
+check("未置顶时窗口属性也是关的", not is_top(app.root))
+w_off = app.top_btn.winfo_reqwidth()
+
+app.toggle_top()
+root.update_idletasks()
+check("点一下：状态字段翻转", app.topmost is True)
+check("点一下：真正作用到了窗口属性", is_top(app.root),
+      "实际 %r" % (app.root.attributes("-topmost"),))
+check("点一下：按钮变成「已置顶」", app.top_btn.cget("text") == "已置顶",
+      "实际 %r" % app.top_btn.cget("text"))
+check("点一下：按钮换成深底白字",
+      app.top_btn.cget("bg") == sticky.C_PIN_ON_BG
+      and app.top_btn.cget("fg") == sticky.C_PIN_ON_FG,
+      "bg=%s fg=%s" % (app.top_btn.cget("bg"), app.top_btn.cget("fg")))
+w_on = app.top_btn.winfo_reqwidth()
+check("两种文字下按钮同宽（切换时工具栏不抖）", w_off == w_on,
+      "置顶 %dpx / 已置顶 %dpx" % (w_off, w_on))
+check("状态栏说明了怎么取消", "取消" in app.status.cget("text"),
+      "实际 %r" % app.status.cget("text"))
+check("置顶状态已写进文件",
+      json.load(open(sticky.DATA_FILE, encoding="utf-8"))["ui"]["topmost"] is True)
+
+app.toggle_top()
+root.update_idletasks()
+check("再点一下：关掉置顶", app.topmost is False and not is_top(app.root))
+check("关掉后按钮回到白底「置顶」",
+      app.top_btn.cget("text") == "置顶"
+      and app.top_btn.cget("bg") == sticky.C_PIN_OFF_BG)
+
+print("\n-- 置顶跟随：子面板不能被主窗压在后面 --")
+w0 = tk.Toplevel(root)
+w0.title("跟随测试A")
+app._follow_top(w0)
+root.update_idletasks()
+check("没置顶时，新面板也不置顶", not is_top(w0),
+      "实际 %r" % (w0.attributes("-topmost"),))
+w0.destroy()
+root.update()
+
+app.toggle_top()
+app.open_trash()
+root.update()
+check("置顶后，新开的回收站面板跟着置顶", is_top(app._trash_win),
+      "实际 %r" % (app._trash_win.attributes("-topmost"),))
+
+app.toggle_top()
+root.update_idletasks()
+check("关掉置顶后，已打开的面板也跟着降下来", not is_top(app._trash_win),
+      "实际 %r" % (app._trash_win.attributes("-topmost"),))
+app._trash_win.destroy()
+root.update()
+
+# 提醒窗是例外：它必须永远置顶，否则会被别人盖住导致提醒失效
+wr = tk.Toplevel(root)
+wr.title("提醒窗哨兵")
+wr.attributes("-topmost", True)
+app._remind_win = wr
+app.toggle_top()
+app.toggle_top()
+check("提醒窗不受主窗置顶开关影响（始终置顶）", is_top(wr),
+      "实际 %r" % (wr.attributes("-topmost"),))
+wr.destroy()
+app._remind_win = None
+root.update()
+
+app.topmost = False
+app._apply_topmost(announce=False)
+
+print("\n-- 备注 --")
+
+nt_ = mk("备注测试任务")
+app.redraw()
+root.update()
+box0 = region(app, "note", nt_["id"])
+check("空备注也画出了可点的备注区", box0 is not None,
+      "实际 %s" % (box0,))
+
+_texts = [app.cv.itemcget(i, "text")
+          for i in app.cv.find_withtag("card%s" % nt_["id"])
+          if app.cv.type(i) == "text"]
+check("空备注画出了「＋ 备注」入口文案",
+      any(sticky.NOTE_EMPTY in (x or "") for x in _texts), "实际 %s" % _texts[:6])
+
+app.set_note(nt_, "第一行\n第二行")
+check("set_note 能新增备注", nt_["note"] == "第一行\n第二行")
+app.redraw()
+root.update()
+box1 = region(app, "note", nt_["id"])
+check("有备注后备注区按文字行变高",
+      bool(box1) and box1 is not None and (box1[3] - box1[1]) > (box0[3] - box0[1]),
+      "%s -> %s" % (box0, box1))
+
+app.set_note(nt_, "改过的备注")
+check("set_note 能修改备注", nt_["note"] == "改过的备注")
+app.redraw()
+root.update()
+_texts2 = [app.cv.itemcget(i, "text")
+           for i in app.cv.find_withtag("card%s" % nt_["id"])
+           if app.cv.type(i) == "text"]
+check("有备注后就不再画那个占位入口",
+      not any(sticky.NOTE_EMPTY in (x or "") for x in _texts2), "实际 %s" % _texts2[:6])
+check("备注文字真的画到了卡面上", "改过的备注" in _texts2, "实际 %s" % _texts2[:6])
+
+# 单击空备注 = 弹编辑框这条路径，用一个假的 ask_edit 顶掉对话框，
+# 只验证 handle_click 确实把它调起来了（并且光标预置在备注那栏）。
+_calls = []
+app.set_note(nt_, "")
+_orig_ask = app.ask_edit
+app.ask_edit = lambda t, focus="title": _calls.append((t["id"], focus))
+app.handle_click("note", nt_["id"], E(0, 0))
+check("单击空备注会弹出编辑框（光标落在备注上）",
+      _calls == [(nt_["id"], "note")], "实际 %s" % _calls)
+_calls[:] = []
+app.set_note(nt_, "已有备注")
+app.handle_click("note", nt_["id"], E(0, 0))
+check("已有备注时单击不弹框（留给双击就地编辑）", _calls == [], "实际 %s" % _calls)
+app.ask_edit = _orig_ask
+
+# 就地编辑这条路（双击走的就是它）
+app.open_editor(nt_, "note")
+check("就地编辑器能找到备注区", app.editor is not None and app.editor["field"] == "note")
+app.editor["entry"].delete(0, "end")
+app.editor["entry"].insert(0, "就地改的备注")
+app._commit_editor()
+check("就地编辑提交进了 note 字段", nt_["note"] == "就地改的备注")
+
+app.del_note(nt_)
+check("del_note 能删除备注", nt_["note"] == "")
+check("删备注后挂了撤销入口", app._undo_cb is not None)
+app._do_undo()
+check("撤销能把删掉的备注捞回来", nt_["note"] == "就地改的备注")
+
+app.set_note(nt_, "")          # 先清空，再删（此时是「删一条本来就没有的备注」）
+check("备注本来就是空的时候删它，不报错也不挂撤销",
+      app.del_note(nt_) is None and nt_["note"] == "" and app._undo_cb is None)
+app.set_note(nt_, "跨重启的备注")
+
+print("\n-- 编辑任务（标题 + 备注）--")
+
+
+def dlg_find(title):
+    """找到标题为 title 的那个 Toplevel，并把里面的输入控件挑出来。"""
+    for w in root.winfo_children():
+        if not isinstance(w, tk.Toplevel) or not w.winfo_exists():
+            continue
+        if w.title() != title:
+            continue
+        out = {"dlg": w, "entry": None, "text": None, "btns": []}
+
+        def walk(p):
+            for c in p.winfo_children():
+                if isinstance(c, tk.Entry):
+                    out["entry"] = out["entry"] or c
+                elif isinstance(c, tk.Text):
+                    out["text"] = out["text"] or c
+                elif isinstance(c, tk.Button):
+                    out["btns"].append(c)
+                walk(c)
+
+        walk(w)
+        return out
+    return None
+
+
+def dlg_close(title):
+    w = dlg_find(title)
+    if w:
+        w["dlg"].destroy()
+        root.update()
+
+
+et = mk("编辑任务测试")
+root.update()
+
+app.set_title(et, "改过的标题")
+check("set_title 能改标题", et["title"] == "改过的标题")
+app.set_title(et, "   ")
+check("空标题会被忽略（卡片没标题就认不出来了）", et["title"] == "改过的标题")
+
+# 双击标题就地编辑走的就是 set_title
+app.redraw()
+root.update()
+app.open_editor(et, "title")
+check("就地编辑器能找到标题区",
+      app.editor is not None and app.editor["field"] == "title")
+app.editor["entry"].delete(0, "end")
+app.editor["entry"].insert(0, "就地改的标题")
+app._commit_editor()
+check("就地改标题落进 title 字段", et["title"] == "就地改的标题")
+
+# 对话框真实建一次：标题 + 备注 一次性提交
+app.ask_edit(et)
+root.update()
+_w = dlg_find("编辑任务")
+check("「编辑任务」对话框能建出来", _w is not None)
+if _w:
+    check("对话框里标题框带出了原标题",
+          _w["entry"] is not None and _w["entry"].get() == "就地改的标题",
+          "实际 %r" % (_w["entry"].get() if _w["entry"] else None))
+    _w["entry"].delete(0, "end")
+    _w["entry"].insert(0, "对话框改的标题")
+    _w["text"].insert("1.0", "对话框写的备注")
+    _w["entry"].event_generate("<Return>")
+    root.update_idletasks()
+    root.update()
+    check("对话框一次改好标题 + 备注",
+          et["title"] == "对话框改的标题" and et["note"] == "对话框写的备注",
+          "实际 %r / %r" % (et["title"], et["note"]))
+    check("提交后对话框自己关掉", dlg_find("编辑任务") is None)
+else:
+    check("对话框里标题框带出了原标题", False, "对话框没建出来")
+    check("对话框一次改好标题 + 备注", False, "对话框没建出来")
+    check("提交后对话框自己关掉", False, "对话框没建出来")
+
+# 标题留空 = 拒绝保存，内容留在框里让用户接着改
+app.ask_edit(et, focus="note")
+root.update()
+_w = dlg_find("编辑任务")
+if _w:
+    check("从「＋ 备注」进来时光标预置在备注框",
+          _w["dlg"].focus_get() is _w["text"],
+          "实际 %s" % (_w["dlg"].focus_get(),))
+    _w["entry"].delete(0, "end")
+    _w["entry"].event_generate("<Return>")
+    root.update_idletasks()
+    root.update()
+    check("标题留空时保存被拒绝、框不关", dlg_find("编辑任务") is not None)
+    check("标题留空时原标题不动", et["title"] == "对话框改的标题")
+    check("备注框不用再按 Ctrl+回车（普通回车就提交）",
+          "<Control-Key-Return>" not in _w["text"].bind()
+          and "<Key-Return>" in _w["text"].bind(),
+          "实际 %s" % list(_w["text"].bind()))
+    _w["text"].delete("1.0", "end")
+    # 用「保存」按钮提交（等价于用户点它）：tk 的合成按键必须控件先拿到焦点，
+    # 上面那次「拒绝保存」把焦点挪来挪去，再合成按键就不可靠了。
+    _save_btn = next((b for b in _w["btns"] if b.cget("text") == "保存"), None)
+    check("对话框里有「保存」按钮", _save_btn is not None,
+          "实际 %s" % [b.cget("text") for b in _w["btns"]])
+    # 标题还空着（上一步故意留空），所以这一下点保存【应该】还是被拒绝 ——
+    # 正好顺手验证「拒绝之后框不关、内容还在」。
+    if _save_btn:
+        _save_btn.invoke()
+    root.update_idletasks()
+    root.update()
+    check("标题还空着时点保存仍然被拒绝", dlg_find("编辑任务") is not None)
+    _w["entry"].insert(0, "对话框改的标题")      # 标题填回去，这次该成了
+    if _save_btn:
+        _save_btn.invoke()
+    root.update_idletasks()
+    root.update()
+    check("点保存后对话框自己关掉", dlg_find("编辑任务") is None)
+    check("备注清空再保存 = 删掉备注", et["note"] == "", "实际 %r" % et["note"])
+else:
+    check("从「＋ 备注」进来时光标预置在备注框", False, "对话框没建出来")
+    check("标题留空时保存被拒绝、框不关", False, "对话框没建出来")
+    check("标题留空时原标题不动", False, "对话框没建出来")
+    check("备注框绑了 Ctrl+回车提交", False, "对话框没建出来")
+    check("对话框里有「保存」按钮", False, "对话框没建出来")
+    check("标题还空着时点保存仍然被拒绝", False, "对话框没建出来")
+    check("点保存后对话框自己关掉", False, "对话框没建出来")
+    check("备注清空再保存 = 删掉备注", False, "对话框没建出来")
+
+dlg_close("编辑任务")
+
+# 「删除备注」按钮只在本来就有备注时出现
+et["note"] = "有备注"
+app.ask_edit(et)
+root.update()
+_w = dlg_find("编辑任务")
+check("有备注时对话框里多一个「删除备注」",
+      bool(_w) and any(b.cget("text") == "删除备注" for b in _w["btns"]),
+      "实际 %s" % ([b.cget("text") for b in _w["btns"]] if _w else None))
+dlg_close("编辑任务")
+et["note"] = ""
+app.ask_edit(et)
+root.update()
+_w = dlg_find("编辑任务")
+check("没备注时就没有「删除备注」（别让人点出空动作）",
+      bool(_w) and not any(b.cget("text") == "删除备注" for b in _w["btns"]),
+      "实际 %s" % ([b.cget("text") for b in _w["btns"]] if _w else None))
+dlg_close("编辑任务")
+
+print("\n-- 编辑任务：回车保存 / Shift+回车换行 / Esc 取消 --")
+
+
+def _all_labels(w):
+    """递归收集一个窗口里所有 Label 的文字（找提示行用）。"""
+    out = []
+
+    def walk(p):
+        for c in p.winfo_children():
+            if isinstance(c, tk.Label):
+                out.append(c.cget("text"))
+            walk(c)
+
+    walk(w)
+    return out
+
+
+_et = mk("回车保存测试")
+_et["note"] = "原来就有的备注"
+root.update()
+
+# 合成按键只发给「当前持有焦点」的控件，所以先把焦点硬塞进备注框。
+# 不这么做的话 event_generate("<Return>") 会被静默丢弃（实测）。
+app.ask_edit(_et, focus="note")
+root.update()
+_w = dlg_find("编辑任务")
+check("备注框绑了「回车 = 保存」",
+      bool(_w) and "<Key-Return>" in _w["text"].bind(),
+      "实际 %s" % (list(_w["text"].bind()) if _w else None))
+check("备注框绑了「Shift+回车 = 换行」",
+      bool(_w) and "<Shift-Key-Return>" in _w["text"].bind(),
+      "实际 %s" % (list(_w["text"].bind()) if _w else None))
+check("对话框绑了 Esc（取消）",
+      bool(_w) and "<Key-Escape>" in _w["dlg"].bind(),
+      "实际 %s" % (list(_w["dlg"].bind()) if _w else None))
+check("对话框里写明了这两个键",
+      bool(_w) and any("Shift" in s and "回车" in s for s in _all_labels(_w["dlg"])),
+      "找不到说明文字")
+
+if _w:
+    root.focus_force()
+    _w["dlg"].focus_force()
+    _w["text"].focus_set()
+    root.update()
+    _w["text"].delete("1.0", "end")
+    _w["text"].insert("1.0", "回车写的备注")
+    root.update()
+    _w["text"].event_generate("<Return>", when="now")
+    root.update_idletasks()
+    root.update()
+    check("备注框里按回车 = 保存（不用去点按钮）",
+          _et["note"] == "回车写的备注", "实际 %r" % _et["note"])
+    check("回车保存后对话框自己关掉", dlg_find("编辑任务") is None)
+else:
+    check("备注框里按回车 = 保存（不用去点按钮）", False, "对话框没建出来")
+    check("回车保存后对话框自己关掉", False, "对话框没建出来")
+
+# Shift+回车是真换行，不是保存
+app.ask_edit(_et, focus="note")
+root.update()
+_w = dlg_find("编辑任务")
+if _w:
+    root.focus_force()
+    _w["dlg"].focus_force()
+    _w["text"].focus_set()
+    root.update()
+    _w["text"].delete("1.0", "end")
+    _w["text"].insert("1.0", "第一行")
+    root.update()
+    _w["text"].event_generate("<Shift-Return>", when="now")
+    root.update()
+    _w["text"].insert("insert", "第二行")
+    root.update()
+    check("Shift+回车是换行，不是保存",
+          _w["text"].get("1.0", "end-1c") == "第一行\n第二行",
+          "实际 %r" % _w["text"].get("1.0", "end-1c"))
+    check("Shift+回车之后对话框还开着（没被提交掉）", dlg_find("编辑任务") is not None)
+    _sb = next((b for b in _w["btns"] if b.cget("text") == "保存"), None)
+    if _sb:
+        _sb.invoke()
+    root.update_idletasks()
+    root.update()
+    check("多行备注原样落库（换行没丢）", _et["note"] == "第一行\n第二行",
+          "实际 %r" % _et["note"])
+else:
+    check("Shift+回车是换行，不是保存", False, "对话框没建出来")
+    check("Shift+回车之后对话框还开着（没被提交掉）", False, "对话框没建出来")
+    check("多行备注原样落库（换行没丢）", False, "对话框没建出来")
+
+# Esc = 取消，不保存
+_before = _et["note"]
+app.ask_edit(_et, focus="note")
+root.update()
+_w = dlg_find("编辑任务")
+if _w:
+    _w["text"].delete("1.0", "end")
+    _w["text"].insert("1.0", "不该保存的内容")
+    root.focus_force()
+    _w["dlg"].focus_force()
+    _w["text"].focus_set()
+    root.update()
+    _w["text"].event_generate("<Escape>", when="now")
+    root.update_idletasks()
+    root.update()
+    check("Esc 关掉对话框且什么都没保存",
+          dlg_find("编辑任务") is None and _et["note"] == _before,
+          "实际 %r（应还是 %r）" % (_et["note"], _before))
+else:
+    check("Esc 关掉对话框且什么都没保存", False, "对话框没建出来")
+
+# 备注里混进来的 \r\n / \r 要统一成 \n：两版共用一份 tasks.json，
+# tk 侧留个看不见的 \r 会让 aardio 那边的卡片上多出一个方块。
+_nz = mk("换行归一化测试")
+app.set_note(_nz, "A\r\nB\rC\nD")
+check("备注里的 \\r\\n / \\r 统一成 \\n", _nz["note"] == "A\nB\nC\nD",
+      "实际 %r" % _nz["note"])
+
+# 就地编辑器改的是同一条落库出口
+_nz["note"] = ""
+root.update()
+app.redraw()
+root.update()
+app.open_editor(_nz, "note")
+if app.editor:
+    app.editor["entry"].delete(0, "end")
+    app.editor["entry"].insert(0, "就地改的备注")
+    app._commit_editor()
+root.update()
+check("就地编辑备注也走 set_note（同一个落库出口）",
+      _nz["note"] == "就地改的备注", "实际 %r" % _nz["note"])
+
+
+def count_win(title):
+    """当前存在几个标题为 title 的 Toplevel。"""
+    return sum(1 for x in root.winfo_children()
+               if isinstance(x, tk.Toplevel) and x.winfo_exists()
+               and x.title() == title)
+
+
+print("\n-- 使用帮助 --")
+check("顶栏有「? 帮助」按钮",
+      hasattr(app, "help_btn") and app.help_btn.cget("text") == "? 帮助",
+      "实际 %s" % (app.help_btn.cget("text") if hasattr(app, "help_btn") else None))
+check("F1 已经绑上（按了能打开帮助）", bool(root.bind("<F1>")),
+      "实际 %r" % root.bind("<F1>"))
+check("点开之前没有帮助窗", count_win("使用帮助") == 0)
+
+hw = app.open_help()
+root.update()
+_hw = dlg_find("使用帮助")
+check("打开后帮助窗出现了", _hw is not None)
+check("窗口标题是「使用帮助」", bool(_hw) and _hw["dlg"].title() == "使用帮助")
+# 只读：能选中复制，但改不动。别写成 state="normal"，否则帮助被人一敲就乱了
+check("正文是只读的（挡住误改）",
+      bool(_hw) and _hw["text"].cget("state") == "disabled",
+      "实际 %s" % (_hw["text"].cget("state") if _hw else None))
+body = _hw["text"].get("1.0", "end") if _hw else ""
+check("讲了「一分钟上手」", "一分钟上手" in body)
+check("逐个讲了顶栏按钮",
+      all(k in body for k in ("贴上", "四象限", "统计", "复盘", "置顶", "更多", "帮助")),
+      "缺 %s" % [k for k in ("贴上", "四象限", "统计", "复盘", "置顶", "更多", "帮助")
+                 if k not in body])
+check("讲了卡片上的操作", "卡片上能做的操作" in body and "编辑任务" in body)
+check("卡片左上角画的是方框，帮助里就写方框",
+      "方框" in body and "圆圈" not in body,
+      "含方框=%s 含圆圈=%s（写成圆圈用户会满屏找个不存在的圆圈）"
+      % ("方框" in body, "圆圈" in body))
+check("帮助里写了备注框的回车用法",
+      "Shift+回车" in body and "回车" in body,
+      "正文里没提 Shift+回车")
+check("帮助里说了就地编辑的 Esc 是取消",
+      "Esc" in body and "取消" in body)
+check("讲了拖拽能做哪几件事", "拖拽能做五件事" in body)
+check("讲了快捷键", "F1" in body and "Ctrl + Z" in body)
+check("讲了数据存在哪", "tasks.json" in body)
+check("文案里的样式只有约定那几种",
+      all(s[0] in ("h1", "h2", "p", "n", "k") for s in sticky.HELP_SECTIONS),
+      "实际 %s" % sorted({s[0] for s in sticky.HELP_SECTIONS}))
+check("「k」条目都带着「名字 + 解释」这一对",
+      all(len(s) == 2 and isinstance(s[1], tuple) and len(s[1]) == 2
+          for s in sticky.HELP_SECTIONS if s[0] == "k"))
+
+check("有个「关闭」按钮", bool(_hw) and any(
+    b.cget("text") == "关闭" for b in _hw["btns"]),
+    "实际 %s" % ([b.cget("text") for b in _hw["btns"]] if _hw else None))
+check("帮助窗绑了 Esc（不想去够「关闭」按钮时用）",
+      bool(_hw) and "<Key-Escape>" in _hw["dlg"].bind(),
+      "实际 %s" % (list(_hw["dlg"].bind()) if _hw else None))
+check("重复点开不会开出第二个窗",
+      app.open_help().winfo_exists() and count_win("使用帮助") == 1,
+      "实际 %d 个" % count_win("使用帮助"))
+
+# 关掉：走「关闭」按钮（Esc 那条路是绑在 Toplevel 上的，测试里焦点不稳）
+for _b in (_hw["btns"] if _hw else []):
+    if _b.cget("text") == "关闭":
+        _b.invoke()
+        break
+root.update()
+check("点「关闭」能把它关掉", count_win("使用帮助") == 0)
+check("关掉之后还能再打开（不会以为它还开着）",
+      app.open_help().winfo_exists() and count_win("使用帮助") == 1)
+dlg_close("使用帮助")
+count_win("使用帮助") and dlg_close("使用帮助")
+
+# 主窗置顶时帮助窗必须跟着，否则会被主窗压在后面（看着像「点了帮助没反应」）
+app.topmost = True
+app._apply_topmost(announce=False)
+_hv = app.open_help()
+root.update()
+check("主窗置顶时，帮助窗也跟着置顶",
+      bool(_hv.attributes("-topmost")),
+      "实际 %s" % _hv.attributes("-topmost"))
+app.topmost = False
+app._apply_topmost(announce=False)
+root.update()
+check("取消置顶后帮助窗也取消（不能赖在最前面）",
+      not _hv.attributes("-topmost"),
+      "实际 %s" % _hv.attributes("-topmost"))
+dlg_close("使用帮助")
+
+print("\n-- 多屏：弹出窗要跟着主窗走，别被拽回主屏 --")
+# 防的是这个坑：拿 winfo_screenwidth()（**主屏**尺寸）给弹出窗收边，
+# 主窗在副屏时会被判成"超出屏幕了"，窗口整个拽回主屏 ——
+# 真机表现就是「帮助没跟着软件走，跑到另一块屏上去了」。
+# 单屏机器上两种算法结果一样，测不出差别，所以下面把主窗挪到第二块屏去试；
+# 没有第二块屏就跳过（跳过不算失败）。
+_full, _work = sticky.screen_areas(root)
+check("screen_areas 给出 (整屏, 工作区) 两个矩形",
+      len(_full) == 4 and len(_work) == 4 and
+      all(isinstance(v, int) for v in tuple(_full) + tuple(_work)),
+      "实际 %s / %s" % (_full, _work))
+check("探测到的整屏矩形包住主窗中心",
+      _full[0] <= root.winfo_x() + root.winfo_width() // 2 <= _full[2] and
+      _full[1] <= root.winfo_y() + root.winfo_height() // 2 <= _full[3],
+      "整屏=%s 主窗@%d,%d" % (_full, root.winfo_x(), root.winfo_y()))
+
+_save_xy = (root.winfo_x(), root.winfo_y())
+root.geometry("+%d+%d" % (root.winfo_screenwidth() + 120, 140))
+root.update()
+root.update_idletasks()
+_mon2, _work2 = sticky.screen_areas(root)
+if _mon2[0] >= root.winfo_screenwidth():
+    check("主窗挪到副屏后，探测到的就是副屏",
+          _mon2[0] > 0 and _mon2[2] > root.winfo_screenwidth(),
+          "实际 %s（主屏宽 %d）" % (_mon2, root.winfo_screenwidth()))
+    _hh = app.open_help()
+    root.update()
+    check("帮助窗留在副屏，没被拽回主屏",
+          _mon2[0] <= _hh.winfo_x() < _mon2[2],
+          "帮助窗 x=%d，副屏 %s" % (_hh.winfo_x(), _mon2))
+    check("帮助窗纵向也在副屏里",
+          _mon2[1] <= _hh.winfo_y() < _mon2[3],
+          "帮助窗 y=%d，副屏 %s" % (_hh.winfo_y(), _mon2))
+    dlg_close("使用帮助")
+
+    # 提醒窗贴的是**整屏**右下角（和 aardio 版一致），同样得跟着主窗走
+    r_tmp = mk("副屏提醒用例", due=key_today)
+    app.ui["remind_on"] = True
+    app._maybe_remind()
+    root.update()
+    _rw = app._remind_win
+    check("提醒窗也落在副屏，没被拽回主屏",
+          _rw is not None and _rw.winfo_exists() and _rw.winfo_x() >= _mon2[0],
+          "提醒窗 x=%s，副屏 %s" % (_rw.winfo_x() if _rw else None, _mon2))
+    if _rw is not None and _rw.winfo_exists():
+        _rw.destroy()
+    root.update()
+    app.ui["remind_on"] = False
+    app.tasks.remove(r_tmp)
+else:
+    print("  [SKIP] 本机只有一块屏，副屏那 4 条用例跳过")
+
+root.geometry("+%d+%d" % _save_xy)
+root.update()
+
+print("\n-- 持久化 --")
+app.save()
+raw = json.load(open(sticky.DATA_FILE, encoding="utf-8"))
+check("JSON 已写出", len(raw["tasks"]) == len(app.tasks))
+check("界面状态已保存", raw["ui"]["mode"] == "matrix")
+check("数据版本号已升到 3", raw.get("v") == 3, "实际 %s" % raw.get("v"))
+check("回收站也写进了文件", isinstance(raw.get("trash"), list))
+check("备份配置写进了 ui 段",
+      raw["ui"]["backup_keep"] == 30 and "backup_on" in raw["ui"]
+      and "backup_dir" in raw["ui"])
+check("提醒开关写进了 ui 段", "remind_on" in raw["ui"])
+check("每个任务都带上了新字段",
+      all(set(("subs", "logs", "timer", "repeat", "done_at", "remind_key"))
+          <= set(t.keys()) for t in raw["tasks"]))
+
+app.tasks = []
+app.load()
+check("重新载入数据一致", len(app.tasks) == len(raw["tasks"]))
+rt = [t for t in app.tasks if t["title"] == "子任务测试任务"]
+check("重载后子任务完整保留", bool(rt) and len(rt[0]["subs"]) == 7,
+      "实际 %s" % (len(rt[0]["subs"]) if rt else "任务都没了"))
+tl = [t for t in app.tasks if t["title"] == "计时任务一"]
+check("重载后耗时流水完整保留", bool(tl) and tl[0]["logs"].get(key_today, 0) >= 85,
+      "实际 %s" % (tl[0]["logs"] if tl else "任务都没了"))
+check("重载后计时字段是数字",
+      all(isinstance(t.get("timer"), (int, float)) for t in app.tasks))
+_rn = [t for t in app.tasks if t["title"] == "备注测试任务"]
+check("重载后备注完整保留", bool(_rn) and _rn[0]["note"] == "跨重启的备注",
+      "实际 %s" % (_rn[0]["note"] if _rn else "任务都没了"))
+
+root.destroy()
+print("\n" + "=" * 46)
+print("通过 %d 项，失败 %d 项" % (OK, FAIL))
+sys.exit(1 if FAIL else 0)

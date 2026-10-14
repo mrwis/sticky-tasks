@@ -1,0 +1,3900 @@
+# -*- coding: utf-8 -*-
+"""
+便利贴 · 任务清单（原生轻量版）
+
+设计目标
+--------
+1. 极低内存占用：纯 Python 标准库 + Tk，实测常驻约 30 MB
+   （对比 Edge --app 方案冷启动 400~740 MB）
+2. 数据以 JSON 明文存放在程序同目录，可直接查看、复制、备份
+3. 四象限 + 拖拽改优先级，与网页版功能对齐
+
+依赖：仅 Python 标准库（tkinter），不需要 pip install 任何东西
+运行：双击本文件；想让窗口后面不出现黑色控制台，就用 pythonw.exe 启动
+
+
+================================================================
+  代码导读（写给要读它的人）
+================================================================
+
+整个程序就一个类 App，约 3750 行。别从头往下读，按「数据 → 界面 →
+渲染 → 交互」的顺序看，每一步都只依赖前面已经看懂的东西。
+
+  代码被「横幅注释」切成了若干块。在编辑器里按 Ctrl+F，搜索下面
+  括号里的那串汉字（不用带横线），就能跳到对应位置。
+
+  阅读顺序          Ctrl+F 搜这个      会看到什么
+  ------------      ----------------   ------------------------------
+  第 1 站 · 常量    路径与常量           配色、字号、卡片尺寸。改外观先来这
+  第 2 站 · 数据    小工具函数           日期/时长换算、卡片高度、重复周期推算
+  第 3 站 · 存储    数据持久化           load() 读盘 / _seed() 首次示例数据
+                                         / save() 存盘
+  第 4 站 · 备份    每日自动备份 + 导入   备份怎么写、旧备份怎么清、导入怎么救回来
+  第 5 站 · 骨架    界面骨架 + 顶栏行为   Tk 控件搭出顶部栏和中间画布
+  第 6 站 · 渲染    布局与绘制            见下方「渲染链」
+  第 7 站 · 交互    命中测试 + 鼠标事件   点击/拖拽怎么被识别，见下方「机制① ② ④」
+  第 8 站 · 操作    操作                 新增、改优先级、改日期、计时、子任务、删除
+  第 9 站 · 编辑    就地编辑             双击标题/子任务时盖一个输入框
+                                         （须延后一轮再建，见「机制⑨」）
+  第 10 站 · 统计   耗时统计面板         今日/本周/全部的时间去向
+  第 11 站 · 复盘   每日复盘面板         今天完成了什么 + 完成热力图
+  第 12 站 · 回收站 回收站               删掉的东西去哪了、怎么捞回来
+  第 13 站 · 提醒   到点提醒             今天到期/逾期的任务怎么主动弹出来
+  第 14 站 · 帮助   使用帮助             顶栏「? 帮助」那个窗，文案全在 HELP_SECTIONS
+
+  数据长什么样？看「数据持久化」里 load() 内部那行 out.append({...})。
+  一个任务就是一个字典：
+
+      id      唯一标识，形如 t123456780123
+      title   标题（不允许为空）
+      note    备注
+      p       优先级，0~3，对应 PRIOS 里的四个象限
+      due     截止日期 "2026-10-15"，空串表示没设
+      done    是否已完成
+      order   排序用的分数，越小越靠前；完成时会被刷新到最末
+      subs    子任务列表 [{"id":..., "text":..., "done":...}, ...]
+      logs    耗时流水 {"2026-10-11": 1500.0}  键是日期，值是当天累计秒数
+      timer   正在计时的起始时间戳；0 表示没在计时
+      repeat  重复周期 ""/"daily"/"weekly"/"monthly"/"yearly"，空串=不重复
+      done_at 完成时间戳；0 表示未完成。复盘面板的热力图靠它
+      remind_key  今天已经提醒过的那个日期；同一天不再重复弹提醒
+
+  数据文件顶层除了 tasks 还有两样东西：
+      ui      界面状态（窗口位置、当前筛选、备份设置、提醒开关…）
+      trash   回收站。删掉的任务整个搬进来，附带删除时间，所以删除可逆
+
+  为什么耗时用「按日期分桶」而不是一个总数？因为统计要支持
+  「今天 / 本周 / 全部」三个口径。只存一个总数就算不出「今天花了多久」。
+
+  为什么要单独存 done_at 而不是复用 order？order 会被拖拽排序反复改写，
+  拿它当完成时间算热力图会算错。老数据没有 done_at，done_day() 里做了回落。
+
+  渲染链（第 6 站展开）——这是全项目的主干，看懂它就看懂了一大半：
+      redraw()            总入口：筛出要显示的任务、按象限分组
+        └─ _draw_matrix() 摆四宫格（另一个入口 _draw_list 是列表视图）
+             └─ _draw_quad()   画一个格子（标题栏 + 格子背景）
+                  └─ _draw_card()   画一张便利贴
+   布局数字从哪来？_draw_matrix 顶部先算好每个格子的 (x, y, 宽, 高)，
+   存进 self._quad_rects，后面画卡片和判断拖拽落点都用它。
+   注意卡片是**不等高**的：有子任务的那张会更高，所以同一行的
+   卡片按「这一行最高的那张」对齐，行高由 row_heights() 算出来。
+
+
+----------------------------------------------------------------
+  常见改动：照着做就行（改完存盘，重开程序生效）
+----------------------------------------------------------------
+
+  · 换配色          → 改 C_BG / C_INK / C_LINE 等常量；
+                      四个象限的颜色在 PRIOS 列表的 bg 和 band 字段
+  · 换字号          → 改 F_TITLE / F_BODY 等。注意字号是负数（如 -14），
+                      负数表示"按像素算"，这样不受系统缩放影响
+  · 改卡片大小      → 改 CARD_W / CARD_H / GAP；
+                      子任务区的高度在 SUB_LINE / SUB_MAX / SUB_GAP
+  · 改象限名字      → 改 PRIOS 里的 name 和 act（如"立刻做"）
+  · 加一个字段      → ① load() 的 out.append({...}) 里加上默认值
+                      ② _draw_card() 里决定怎么显示它
+                      ③ 需要编辑的话，在 open_editor() 里加一种 field
+  · 改窗口标题      → 搜 "便利贴 · 任务清单"
+  · 改备份文件名    → 搜 "便利贴备份-"
+  · 改自动备份周期  → 现在是一天一次；搜 _maybe_daily_backup
+  · 改计时刷新频率  → 改 HEARTBEAT_MS（毫秒）
+  · 改提醒频率      → 改 REMIND_MS；想默认关掉就改 _maybe_remind 里的默认值
+  · 改回收站容量    → 改 TRASH_MAX
+  · 加一种重复周期  → ① 往 REPEATS 里加一行
+                      ② 往 next_date() 里加一个分支
+  · 改提醒窗样式    → 搜 show_reminder
+  · 改复盘热力图    → 搜 _draw_heatmap；格子大小在 HEAT_CELL / HEAT_GAP
+  · 改置顶按钮配色  → 改 C_PIN_ON_BG / C_PIN_ON_FG / C_PIN_OFF_* 四个常量
+  · 改"拖到卡片上算不算嵌套" → 改 _nest_zone 记的那块范围（在 _draw_card 里，
+                      下沿是 NEST_PAD）。想改成"整张卡片都能嵌套"，
+                      就把范围改成整卡 —— 但那样同组排序就没落点了
+  · 加一条子任务菜单项 → 搜 "提升成独立任务"，照着加
+  · 改拖拽时的提示语 → 改 DRAG_HINT / SUB_DRAG_HINT
+  · 改备注（增删改）→ 搜 set_note（唯一的落库出口，顺手把 \r\n 归一成 \n：
+                      两版共用一个 tasks.json，tk 侧留下 \r 会在 aardio 的
+                      卡片上画出一个方块）/ del_note（带撤销）；
+                      多行输入框在 ask_edit 里（和标题同一个对话框）；
+                      卡面上那段绘制在 _draw_card 的 "# 备注" 附近，
+                      空备注画的是 NOTE_EMPTY 那行浅灰字
+  · 改任务标题      → 搜 set_title（唯一的落库出口：双击就地编辑和「编辑任务」
+                      对话框都走它）；「编辑任务」对话框是 ask_edit（标题 +
+                      备注一起改，也是右键菜单的第一项）
+  · 改就地编辑器（双击标题/子任务盖出来的那个输入框）→ 搜 open_editor。
+                      两条进门路径：右键菜单是直接调用（立刻建），双击是
+                      on_double 里 after_idle 延后一轮。**别把延后去掉** ——
+                      同一次「按下」稍后还会跑到 _maybe_commit_editor，
+                      那时输入框还没映射，会被判成"点到别处"当场提交
+                      （表现：双击没反应，焦点掉回新增输入框）
+  · 让「编辑任务」里也能改优先级 / 日期 → 在 ask_edit 里加控件，落库仍走
+                      set_prio / set_due，别自己写字段
+  · 加 / 改键盘按键    → 两个框的按键绑在 ask_edit 末尾：回车 = 保存（Text 那边
+                      要 return "break" 挡掉自带的换行）、Shift+回车 = 换行、
+                      Esc = 取消。就地编辑的 Esc 在 open_editor 里直接绑在 Entry 上
+                      （tk 没有 aardio 那种「按键被上层先截走」的坑，绑上就生效）
+  · 卡片左上角那个是方框（不是圆圈），帮助里写的也是方框 ——
+                      真要改成圆圈就动 _draw_card 里 "复选框" 那段的
+                      create_rectangle，同时把 HELP_SECTIONS 两处跟着改
+  · 改"子任务拖到哪里算提升" → 改 _motion_sub 里那段（先 _in_board 判断还在不在
+                      板子里 —— 甩到顶栏上不算；再用 _quad_at 取象限号）
+  · 改使用帮助的文字  → 改 HELP_SECTIONS（一个 (样式, 内容) 的列表，往下加行就行，
+                      两版共用同一份文案；渲染在 open_help 里，不用动）。
+                      入口是顶栏最右边的「? 帮助」按钮和 F1。
+                      注：aardio 版内容一样，但两列条目写成「名字 —— 解释」——
+                      那边用的是真 edit 控件，没有自定义 Tab 位，对不齐两列
+  · 加一个"贴主窗边缘"的弹出窗 → 位置这么算：先 screen_areas(主窗) 拿到主窗
+                      所在那块显示器的 (整屏, 工作区)，**收边一律用工作区**。
+                      别拿 winfo_screenwidth/height 收边 —— 那是主屏尺寸，
+                      主窗拖到副屏后会把窗口拽回主屏（见「机制⑩」）。
+                      只按"主窗 + 相对偏移"摆、不收边的不用管，本来就跟着走
+  · 状态栏那行提示  → 改 HINT_TEXT。**改完先用 tkfont.measure() 量宽度**：
+                      窗口缩到最小（MIN_W=760）时，左边提示 + 右边统计数字
+                      + 撤销按钮要一起装得下
+
+
+----------------------------------------------------------------
+  十个值得单独弄懂的小机制
+----------------------------------------------------------------
+
+  ① regions 命中测试（self.regions）
+     画布上的图形画完就只是像素，不记得自己是谁。所以每画一个可点
+     区域就往 regions 里记一条 (类型, 任务id, 左上x, 左上y, 右下x, 右下y)。
+     点击时从后往前找第一条包含鼠标坐标的记录 —— 后画的在上层，
+     所以必须倒序找。理解这点，钩子/按钮类功能你都能自己加。
+
+     「类型」除了 chk / title / note / prio / due / timer，还有两种
+     带后缀的：子任务的复选框是 "sc:<子任务id>"，子任务的文字是
+     "st:<子任务id>"。这样不用把 regions 的元组加长，就能区分到
+     具体是哪个子任务 —— 这是个小技巧，看到 startswith("sc:") 别懵。
+
+  ② 拖拽改优先级（on_press / on_motion / on_release）
+     按下：记住起点和任务 id，但先不动（等超过 DRAG_TOL 像素才算拖拽，
+           否则算单击，避免手抖误触）。
+     移动：把卡片图形平移，同时判断鼠标落在哪个象限并高亮该象限。
+     松手：若象限变了，改任务的 p 字段并存盘重画。
+
+  ③ 计时器怎么做到"关掉程序也不丢"
+     开始计时 = 把当前时间戳写进任务的 timer 字段并立刻存盘。
+     显示时长 = logs 里已存的秒数 +（若在计时）现在 - timer。
+     停止计时 = 把这段时长按「起始那天的日期」加到 logs 里，timer 归零。
+     所以程序中途被关掉，下次打开时长照样接着算（见 commit_timers）。
+
+  ④ 拖拽不只改优先级，还能排序（看 on_motion 里的 idx）
+     "拖到哪个象限"用矩形包含判断（_quad_at）；
+     "插到第几位"用落点跟每张卡片矩形逐一比较（_insert_index）——
+     先比上下、再比左右，等价于"按阅读顺序，找第一个排在落点后面的卡片"。
+     松手时 _apply_drop 把这个象限重新编号 order，并始终让未完成在前、
+     已完成的沉底。想改排序规则，只看 sort_key 和 _apply_drop 这两处。
+
+  ⑤ 拖到别人卡片上 = 变成它的子任务（_nest_at / nest_task）
+     同一块画布要同时承载"排序落点"和"嵌套落点"，只能靠几何分工：
+     **卡片上半张**（标题 + 备注那一段，画的时候记进 self._nest_zone）
+     是嵌套区，下半张和卡片之间的空隙仍然归排序。
+     因为子任务只有一层，嵌套时被拖那张卡自己的子任务会被摊平成同级、
+     备注/计时记录会丢 —— 有这些信息时先弹确认框（nest_task 开头那段）。
+     反向操作是"提升成独立任务"（promote_sub），在子任务右键菜单里。
+
+  ⑥ 子任务自己也能拖（_motion_sub / _drop_sub）
+     子任务那一行按下的那一刻，drag 里带的是 {"sub":True, tid, sid} 而不是
+     卡片那套字段。拖动时不真的搬行、只画辅助线（被拖那行描虚线框 +
+     落点一条横线），松手才落库。
+     "插到第几条"看 self._sub_rows（画子任务时记下的每行 y 区间）——
+     注意卡面只画前 SUB_MAX 条，所以落点也只能在看得见的那几条之间。
+     没拖动就松手仍然算单击（勾选那条子任务），行为和以前一致。
+     落点在**卡片以外的空白**时是另一回事：那不是"搬走"而是"提升成独立
+     任务"（drag 里带 promote=<象限号>，松手走 _promote_drop）。判据就是
+     _card_under 找不到卡片 —— 右键菜单里那条"提升成独立任务"也能干这个，
+     区别是拖拽版的位置由落点决定，菜单版固定跟在父任务后面。
+
+  ⑦ 窗口置顶（toggle_top / _apply_topmost / _follow_top）
+     置顶就是给窗口设 -topmost 属性，之后它会盖在其他应用上面。
+     但有个容易踩的坑：设了 -topmost 的窗口会压住"普通窗口"，
+     所以统计 / 复盘 / 回收站这些 Toplevel 面板一旦不管层级，
+     就会被主窗口挡在背后 —— 用户表现为"点了按钮什么也没发生"。
+     解决办法是 _follow_top()：新建面板时登记并跟随主窗的置顶状态；
+     _apply_topmost() 则在切换时把已打开的面板一起同步过去。
+     提醒窗例外，它永远置顶（否则会被别人盖住，提醒就失效了）。
+
+     另外「置顶」是个开关，如果按下前后长得一样，用户根本看不出
+     当前置没置顶 —— 所以按钮有白底「置顶」/ 深底「已置顶」两种外观，
+     由 _paint_top_btn() 负责切换。按钮固定了 width=4，避免文字从
+            2 字变 3 字时工具栏左右抖动（实测 51px ↔ 62px）。
+
+  ⑧ 重复任务是怎么"续上"的
+     任务带 repeat 字段。勾完成时 _spawn_next() 复制一份新的出来：
+     标题/备注/象限/子任务结构照抄，子任务全部重置为未完成，
+     截止日期用 next_date() 往后推一轮（月末会自动对齐，1/31 → 2/28）。
+     原任务留在原地当"已完成"的历史记录，不会被删掉。
+
+  ⑨ 就地编辑器为什么要"延后一轮"才建（on_double → open_editor）
+     双击的**第二次按下**会同时发出 <Button-1> 和 <Double-Button-1> 两个事件，
+     而一次事件会沿着 bindtags 一路走完：画布上的 on_double（建输入框）
+     之后，还会走到 root 上那条 <Button-1>，也就是 _maybe_commit_editor
+     （点到输入框以外就提交）。就在这一瞬间输入框刚 create_window、
+     X 窗口还没映射，winfo_containing 查到的仍然是画布，于是被判成
+     "点到了别处"、当场提交 —— 表现是**双击标题毫无反应**，
+     焦点还掉回新增输入框（因为被销毁的正是焦点所在的那个控件）。
+     所以 on_double 里用 after_idle 把建框推到这次事件彻底走完之后。
+     排查这类"点了没反应"：先怀疑"是不是被自己后半截的检查吃掉了"。
+
+  ⑩ 弹出窗定位：收边要按"主窗在哪块屏"算（screen_areas）
+     winfo_screenwidth/height 报的是**主屏**尺寸，不是主窗当前所在那块屏。
+     单屏时看不出问题；主窗拖到副屏以后，拿主屏宽度去给弹出窗收边，
+     必然算出"超出屏幕了"，把窗口一把拽回主屏 —— 表现就是
+     「帮助 / 复盘 / 提醒没跟着软件走，跑到另一块屏上去了」。
+     所以凡是"贴主窗边缘 + 收边"的窗口，都先用 screen_areas(主窗) 拿
+     (整屏矩形, 工作区矩形)；收边用工作区（rcWork，已排除任务栏），
+     提醒窗按整屏（rcMonitor）贴右下角 —— 和 aardio 版的
+     win.getWorkArea / win.getMonitorInfo 一一对应。
+     注：只按"主窗 + 相对偏移"摆、不收边的窗口（统计 / 回收站 / 各对话框）
+     本来就跟着主窗走，不用管。
+
+  另外：数据存盘用"先写 .tmp 再 os.replace"的方式，避免中途断电
+  导致 tasks.json 被写坏 —— 这是个通用且值得记住的写法。
+"""
+
+import os
+import re
+import sys
+import json
+import shutil
+import calendar
+import datetime
+import tkinter as tk
+import tkinter.font as tkfont
+import tkinter.filedialog as tkfd
+import tkinter.messagebox as tkmb
+
+# ---------------------------------------------------------------- 路径与常量
+
+def _app_dir():
+    if getattr(sys, "frozen", False):
+        return os.path.dirname(os.path.abspath(sys.executable))
+    return os.path.dirname(os.path.abspath(__file__))
+
+APP_DIR = _app_dir()
+DATA_FILE = os.path.join(APP_DIR, "tasks.json")
+BACKUP_PREFIX = "便利贴备份-"
+APP_TITLE = "逍遥便利贴 · 任务清单"
+
+PRIOS = [
+    dict(p=0, key="P0", name="重要且紧急",   act="立刻做",   bg="#ffe2e4", band="#e5484d"),
+    dict(p=1, key="P1", name="重要不紧急",   act="计划做",   bg="#ffeed9", band="#ef8b0c"),
+    dict(p=2, key="P2", name="紧急不重要",   act="委托做",   bg="#deebff", band="#3b82f6"),
+    dict(p=3, key="P3", name="不紧急不重要", act="有空再做", bg="#e6ecf0", band="#64748b"),
+]
+PRIO_BY_P = {x["p"]: x for x in PRIOS}
+
+C_BG      = "#f3efe7"
+C_TOP     = "#f7f4ee"
+C_QUAD    = "#fbf9f5"
+C_LINE    = "#e3ded3"
+C_INK     = "#2e2b26"
+C_INK2    = "#6e675d"
+C_INK3    = "#a89f92"
+C_WHITE   = "#ffffff"
+C_SHADOW  = "#e2dcd1"
+C_HL      = "#fff6d8"
+C_DONE_BG = "#efede8"
+
+# 子任务 / 计时器 相关配色
+C_SUB_SEP  = "#ded8cb"      # 子任务区上方的细线
+C_SUB_MARK = "#b9b1a3"      # 子任务复选框描边
+C_SUB_DONE = "#a8a196"      # 子任务完成后的文字色
+C_TIME_IDLE = "#ffffff"     # 计时器：没计过时
+C_TIME_HAS  = "#eaeff5"     # 计时器：计过时
+C_TIME_INK  = "#5b6672"
+C_TIME_RUN  = "#2f6f4f"     # 计时器：正在计时（也用象限色填充）
+
+# 顶栏「置顶」开关的两种外观：关闭=白底深字，开启=深底白字。
+# 之所以要做成两种外观，是因为「置顶」是个开关：如果按下前后长得一样，
+# 用户没法从界面上看出当前到底置顶了没有。改这里就能换配色。
+C_PIN_OFF_BG = "#ffffff"
+C_PIN_OFF_FG = "#2e2b26"
+C_PIN_ON_BG  = "#2e2b26"
+C_PIN_ON_FG  = "#ffffff"
+
+# 字号使用负数 = 以「像素」为单位，从而不受系统 DPI 缩放影响，布局完全可控
+F_TITLE   = ("Microsoft YaHei UI", -14, "bold")
+F_BODY    = ("Microsoft YaHei UI", -12)
+F_SMALL   = ("Microsoft YaHei UI", -11)
+F_TINY    = ("Microsoft YaHei UI", -10, "bold")
+F_BRAND   = ("Microsoft YaHei UI", -15, "bold")
+F_HEAD    = ("Microsoft YaHei UI", -12, "bold")
+F_SUB     = ("Microsoft YaHei UI", -11)
+# 使用帮助窗里两级标题。比正文大一点、粗一点就够了，别用太大字号
+# （帮助正文行数多，字号一大就要频繁滚动，反而不好读）。
+F_H1      = ("Microsoft YaHei UI", -16, "bold")
+F_H2      = ("Microsoft YaHei UI", -13, "bold")
+
+PAD       = 13
+GAP       = 11
+INNER     = 11
+# CARD_W 是实测出来的：徽章行放「P0 立刻做 + 逾期 12 天 + 1时05分」
+# 最坏需要 255px，取 264 留一点余量，同时仍能保持每格 2 列。
+CARD_W    = 264
+CARD_H    = 140
+QHEAD     = 28
+QMIN_H    = 96
+DRAG_TOL  = 5
+
+# 子任务区的尺寸（卡片高度会随子任务条数增加，所以这三个值直接决定布局）
+SUB_MAX   = 3       # 卡面最多显示几条子任务，多出来的只看计数
+SUB_LINE  = 14      # 每条子任务的行高
+SUB_HEAD  = 13      # "子任务 1/3" 这一行的高度
+SUB_PAD   = 3       # 子任务区上下各留的空白
+SUB_BOX   = 11      # 子任务复选框边长
+
+# 拖拽时「卡片上半张 = 变成它的子任务」的判定区下沿：
+# 标题/备注画完之后再往下多算这么多像素（免得只差一两像素点不中）。
+NEST_PAD  = 12
+
+# 计时中心跳刷新的间隔（毫秒）。有任务在计时的时候，界面每隔这么久
+# 重绘一次，让卡片上的时长自己往上走。
+HEARTBEAT_MS = 15000
+
+WEEKDAYS = ["一", "二", "三", "四", "五", "六", "日"]
+
+# 筛选器：(内部名, 按钮上的文字)。加新筛选就加一行，其余地方自动生效。
+FILTERS = [
+    ("all",      "全部"),
+    ("open",     "未完成"),
+    ("due",      "今天要做"),
+    ("overdue",  "已逾期"),
+    ("running",  "计时中"),
+    ("done",     "已完成"),
+]
+
+# 耗时统计的口径
+PERIODS = [
+    ("today", "今天"),
+    ("week",  "本周"),
+    ("d7",    "近 7 天"),
+    ("all",   "全部"),
+]
+
+# 重复周期：(内部值, 菜单/徽章上的字)。加一种周期就往这里加一行，
+# 再去 next_date() 里补一个分支即可。
+REPEATS = [
+    ("",        "不重复", ""),
+    ("daily",   "每天",   "天"),
+    ("weekly",  "每周",   "周"),
+    ("monthly", "每月",   "月"),
+    ("yearly",  "每年",   "年"),
+]
+REPEAT_LABEL = {k: label for k, label, _ in REPEATS}
+REPEAT_BADGE = {k: badge for k, _, badge in REPEATS}
+
+# 回收站最多留多少条；超出的丢最旧的
+TRASH_MAX = 100
+IMPORT_BACKUP_PREFIX = "导入前备份-"
+
+# 到点提醒：多久检查一次（毫秒）。检查本身极轻，只是比一下日期。
+REMIND_MS = 10 * 60 * 1000
+
+# 复盘热力图的格子尺寸
+HEAT_CELL = 13
+HEAT_GAP  = 3
+HEAT_WEEKS = 12
+# 热力图的颜色分档，第 0 档是"这天没完成"。
+# 第一档必须比面板底色（C_BG = #f3efe7）明显深一点，否则空格子
+# 几乎看不见，整张热力图会显得缺了一块。
+HEAT_LEVELS = ["#e3ded3", "#cfe6d6", "#95cca6", "#5aa878", "#2f7f52"]
+
+# 状态栏的默认提示语。多处要「恢复默认」时都引用它，
+# 免得同一条提示在不同函数里各写一份、后来改了一处忘了另一处。
+# 状态栏那行提示。**长度是量过的**：F_SMALL 下这一版 408px，比原来那版
+# （667px）窄 259px，于是窗口缩到 MIN_W=760 时，左边提示 + 右边统计数字
+# （184px）+ 撤销按钮（约 66px）还能一起装下（734 - 408 - 264 = 62px 余量）。
+# 往这行加字之前先用 tkfont.measure() 量一遍，别拍脑袋。
+HINT_TEXT = ("双击改字 · 右键卡片改标题/备注 · 拖拽改优先级或变成子任务 · 点药丸计时 · F1 帮助")
+
+# 空备注时卡片上画的那行浅灰字。它同时是「加备注」的入口（单击就弹输入框），
+# 所以文案要像一个按钮，而不是一句说明。
+NOTE_EMPTY = "＋ 备注"
+NOTE_EMPTY_FG = "#bfb6a8"       # 比 C_INK3 再淡一点，免得抢过正文
+
+# 拖动过程中状态栏的提示语（松手后就恢复成 HINT_TEXT）
+DRAG_HINT     = "松手即改优先级；放到卡片之间可调同组顺序；拖到卡片上半张 = 变成它的子任务"
+SUB_DRAG_HINT = ("上下拖 = 调这条子任务的顺序；拖到别的卡片上 = 搬过去；"
+                 "拖到卡片以外的空白 = 提升成独立任务")
+
+
+# ============================================================ 使用帮助正文
+# 帮助窗里的全部内容，写成 (样式, 内容) 的列表。**Python 和 aardio 两版共用
+# 同一份文案**（aardio 侧叫 app.HELP_TEXT，结构一样），改一边记得同步另一边：
+#   ("h1", 大标题) / ("h2", 小节) / ("p", 段落) / ("n", 缩进条目)
+#   ("k", (左边的名字, 右边的解释))    ← 两列对齐，专门用来讲按钮
+# 想加内容就往下加一行，两边的渲染代码都不用动。
+HELP_SECTIONS = [
+    ("h1", "便利贴任务清单 · 使用帮助"),
+    ("p",  "第一次用建议先看「一分钟上手」；剩下的用到哪条再看哪条。"
+           "这页的文字可以选中复制，按 F1 随时再打开。"
+           "全部功能都不用联网，数据就存在你自己电脑上的 tasks.json 里。"),
+
+    ("h2", "一分钟上手"),
+    ("n",  "1. 在最上面的输入框里打字，按回车（或者点「贴上」），任务就贴在四象限里了"),
+    ("n",  "2. 双击卡片标题就能改字，回车确认、Esc 取消 —— 打错字不用删了重建"),
+    ("n",  "3. 点卡片左上角那个方框 = 完成，再点一次 = 取消完成"),
+    ("n",  "4. 右键卡片 → 「编辑任务…」，标题和备注一起改，回车就保存"),
+
+    ("h2", "顶栏按钮"),
+    ("k", ("P0 P1 P2 P3", "给新任务选优先级，决定它落进哪个象限。"
+                          "P0 重要且紧急·立刻做 / P1 重要不紧急·计划做 / "
+                          "P2 紧急不重要·委托做 / P3 不紧急不重要·有空再做")),
+    ("k", ("贴上",     "添加任务（等于在输入框里按回车）")),
+    ("k", ("四象限 / 列表", "切换视图：四象限按优先级分四块；列表把任务平铺开按时间排")),
+    ("k", ("全部 ▾",   "筛选：全部 / 未完成 / 今天要做 / 已逾期 / 计时中 / 已完成")),
+    ("k", ("搜索",     "按标题、备注、子任务文字实时过滤；清空输入框就恢复全部")),
+    ("k", ("统计",     "耗时统计面板（各象限投入、完成趋势、热力图）")),
+    ("k", ("复盘",     "每日复盘面板（今天做了什么、按天回看）")),
+    ("k", ("置顶",     "窗口总在最前、盖住别的窗口。变成深色的「已置顶」就是开着，再点一下取消")),
+    ("k", ("更多 ▾",   "回收站 / 导入恢复备份 / 立即备份 / 备份文件夹 / 备份保留天数 / "
+                        "到点提醒开关 / 打开数据文件夹 / 清空已完成")),
+    ("k", ("? 帮助",   "就是本窗口（快捷键 F1，随时可开）")),
+
+    ("h2", "卡片上能做的操作"),
+    ("k", ("单击方框",       "标记完成 / 取消完成（在左上角，打勾就是已完成）")),
+    ("k", ("双击标题",       "就地改字，回车提交、Esc 取消")),
+    ("k", ("双击备注文字",   "就地改备注")),
+    ("k", ("单击「＋ 备注」", "给这条加备注（还没备注时，卡片上会显示这行浅灰的字）")),
+    ("k", ("点右下角药丸",   "开始 / 暂停计时，药丸里显示累计投入的时间")),
+    ("k", ("右键卡片",       "编辑任务… / 删除备注 / 改优先级 / 设置截止日期 / 重复规则 / "
+                              "添加子任务 / 子任务批量操作 / 计时 / 标记完成 / 删除（进回收站）")),
+    ("k", ("右键子任务",     "编辑文字 / 标记完成 / 上移 / 下移 / 提升成独立任务 / 删除这条子任务")),
+    ("k", ("右键空白处",     "新建任务 / 耗时统计 / 每日复盘 / 回收站 / 清空已完成")),
+
+    ("h2", "拖拽能做五件事（最容易被忽略，也最省事）"),
+    ("n",  "1. 拖到别的象限 → 改优先级"),
+    ("n",  "2. 拖到同象限卡片之间 → 调顺序，插到哪儿就排哪儿"),
+    ("n",  "3. 拖到某张卡片的上半张 → 变成它的子任务（拖到下半张仍是普通排序）"),
+    ("n",  "4. 子任务上下拖 → 调子任务顺序"),
+    ("n",  "5. 子任务拖到卡片以外的空白 → 提升成独立任务，落进鼠标所在的象限"),
+    ("p",  "拖的过程中状态栏会实时告诉你「松手会发生什么」，不确定就先拖起来看一眼。"),
+
+    ("h2", "卡片上的小标签"),
+    ("k", ("P0 立刻做",   "优先级和它的行动建议")),
+    ("k", ("逾期 3 天",   "已经过了截止日期（红色）")),
+    ("k", ("今天",        "今天到期")),
+    ("k", ("每天 / 每周", "重复任务：标记完成后会自动排下一次")),
+    ("k", ("1时05分",     "累计投入的计时")),
+    ("k", ("2/5",         "子任务完成进度")),
+
+    ("h2", "键盘快捷键"),
+    ("k", ("回车",     "输入框里 = 添加任务；「编辑任务」框里 = 保存（Shift+回车 = 备注换行）")),
+    ("k", ("Esc",      "清空输入框 / 取消就地编辑 / 关闭对话框")),
+    ("k", ("Ctrl + N", "光标跳到输入框")),
+    ("k", ("Ctrl + T", "窗口置顶开关")),
+    ("k", ("Ctrl + B", "打开耗时统计")),
+    ("k", ("Ctrl + E", "打开每日复盘")),
+    ("k", ("Ctrl + Z", "撤销上一次删除（状态栏右侧会出现「撤销」按钮）")),
+    ("k", ("F5",       "重画界面")),
+    ("k", ("F1",       "打开本帮助")),
+
+    ("h2", "数据存在哪里"),
+    ("p",  "任务明文存在程序目录的 tasks.json 里 —— 不上传、不加密、随时能用记事本打开看。"),
+    ("n",  "· 「更多 ▾ → 设置自动备份文件夹」选个目录，之后每天自动存一份备份"),
+    ("n",  "· 「更多 ▾ → 打开数据文件夹」直接看到当前的数据文件"),
+    ("n",  "· 「更多 ▾ → 导入 / 恢复备份…」可以从任意一份备份恢复"),
+    ("p",  "换电脑只要把这个文件夹连同 tasks.json 一起拷过去就行。"),
+]
+
+
+def today():
+    return datetime.date.today()
+
+
+def d2s(d):
+    return d.strftime("%Y-%m-%d")
+
+
+def s2d(s):
+    try:
+        return datetime.datetime.strptime(s, "%Y-%m-%d").date()
+    except Exception:
+        return None
+
+
+def new_id():
+    return "t%d%04d" % (int(datetime.datetime.now().timestamp() * 1000) % 100000000,
+                        int.from_bytes(os.urandom(2), "big") % 10000)
+
+
+def new_sid():
+    """子任务 id（单独一个前缀，便于在数据里一眼区分）。"""
+    return "s" + new_id()[1:]
+
+
+# ---------------------------------------------------------------- 小工具函数
+
+def now_ts():
+    return datetime.datetime.now().timestamp()
+
+
+def ts_day(ts):
+    """某个时间戳属于哪一天。计时跨过午夜时，整段时长算在「开始那天」。"""
+    try:
+        return d2s(datetime.datetime.fromtimestamp(ts).date())
+    except Exception:
+        return d2s(today())
+
+
+def screen_areas(widget):
+    """widget 所在那块显示器的矩形 → ((整屏), (工作区))，都是 (left, top, right, bottom)。
+
+    **为什么不能直接用 winfo_screenwidth/height**：那报的是**主屏**尺寸。
+    主窗拖到副屏后，拿主屏宽度给弹出窗做「别超出屏幕」的收边，会算出"超出屏幕了"
+    而把窗口一把拽回主屏 —— 表现就是「帮助 / 复盘没跟着软件走，跑到另一块屏上去」。
+    实测：主窗在副屏 (2137,145)，winfo_screenwidth() 仍然给 1920。
+
+    所以这里问 Win32：MonitorFromWindow 拿 widget 当前所在的那块显示器，
+    GetMonitorInfoW 取它的 rcMonitor（整屏）和 rcWork（工作区，已排除任务栏）。
+    flag 用 _MONITOR_DEFAULTTONEAREST(2)：窗口正好卡在两屏之间时也给最近的一块。
+
+    非 Windows（没有 ctypes.windll）或调用失败时，退回主屏尺寸 —— 也就是从前的行为，
+    单屏环境两者本来就一样。
+    """
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        class RECT(ctypes.Structure):
+            _fields_ = [("left", wintypes.LONG), ("top", wintypes.LONG),
+                        ("right", wintypes.LONG), ("bottom", wintypes.LONG)]
+
+        class MONITORINFO(ctypes.Structure):
+            _fields_ = [("cbSize", wintypes.DWORD), ("rcMonitor", RECT),
+                        ("rcWork", RECT), ("dwFlags", wintypes.DWORD)]
+
+        u = ctypes.windll.user32
+        u.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+        u.MonitorFromWindow.restype = ctypes.c_void_p
+        u.GetMonitorInfoW.argtypes = [ctypes.c_void_p,
+                                      ctypes.POINTER(MONITORINFO)]
+        u.GetMonitorInfoW.restype = wintypes.BOOL
+
+        hm = u.MonitorFromWindow(wintypes.HWND(widget.winfo_id()), 2)
+        mi = MONITORINFO()
+        mi.cbSize = ctypes.sizeof(MONITORINFO)
+        if hm and u.GetMonitorInfoW(hm, ctypes.byref(mi)):
+            m, k = mi.rcMonitor, mi.rcWork
+            return ((m.left, m.top, m.right, m.bottom),
+                    (k.left, k.top, k.right, k.bottom))
+    except Exception:
+        pass
+
+    box = (0, 0, widget.winfo_screenwidth(), widget.winfo_screenheight())
+    return (box, box)
+
+
+def fmt_dur(sec):
+    """秒 → 紧凑时长文本：45秒 / 12分 / 1时05分"""
+    sec = int(max(0, sec or 0))
+    if sec < 60:
+        return "%d秒" % sec
+    m = sec // 60
+    if m < 60:
+        return "%d分" % m
+    h, m2 = divmod(m, 60)
+    return "%d时%02d分" % (h, m2)
+
+
+def ellipsis(s, n):
+    """超长文本截断加省略号（按字符数算，中英文都按一个字符，够用了）。"""
+    s = str(s)
+    return s if len(s) <= n else s[:max(1, n - 1)] + "…"
+
+
+def spent_of(t, now=None):
+    """这个任务一共花了多少秒 = 已记录的流水 + 正在计时的那一段。"""
+    s = 0.0
+    for v in (t.get("logs") or {}).values():
+        try:
+            s += float(v or 0)
+        except (TypeError, ValueError):
+            pass
+    st = t.get("timer") or 0
+    if st:
+        s += max(0.0, (now or now_ts()) - st)
+    return s
+
+
+def subs_of(t):
+    """任务的子任务列表。
+
+    注意：**必须返回任务里那个列表本身**，不能返回一个新造的空表。
+    以前写成 `t.get("subs") or []` —— 子任务为空时 `or` 会把右边那个
+    临时空表返回出去，于是"往没有子任务的任务里加一条子任务"就加进了
+    一个没人认领的临时表里，看起来什么都没发生（拖别的子任务过去时会
+    直接把它弄丢）。列表为空也要原样返回。
+    """
+    s = t.get("subs")
+    if not isinstance(s, list):
+        s = []
+        t["subs"] = s
+    return s
+
+
+def sub_done_n(t):
+    return len([s for s in subs_of(t) if s.get("done")])
+
+
+def sub_by_id(t, sid):
+    for s in subs_of(t):
+        if s.get("id") == sid:
+            return s
+    return None
+
+
+def block_h(t):
+    """卡片高度 = 基础高度 + 子任务区。
+    布局和绘制必须都调这个函数，否则高度算错就会出现卡片互相压住。"""
+    n = len(subs_of(t))
+    if not n:
+        return CARD_H
+    return CARD_H + SUB_PAD + SUB_HEAD + min(n, SUB_MAX) * SUB_LINE + SUB_PAD
+
+
+def row_heights(items, ncol):
+    """把卡片按 ncol 列切成若干行，返回每行的高度（取该行最高的一张）。"""
+    hs = []
+    for i in range(0, len(items), ncol):
+        hs.append(max(block_h(t) for t in items[i:i + ncol]))
+    return hs or [CARD_H]
+
+
+def _norm_num(v):
+    """把来路不明的值安全地变成浮点数（旧数据/手改 JSON 都不怕）。"""
+    try:
+        return float(v or 0) or 0.0
+    except (TypeError, ValueError):
+        return 0.0
+
+
+def _norm_subs(raw):
+    """把 subs 归一成 [{"id","text","done"}]，顺带容忍「纯字符串列表」这种简写。"""
+    out = []
+    if isinstance(raw, list):
+        for s in raw:
+            if isinstance(s, dict):
+                txt = str(s.get("text", "")).strip()
+                if txt:
+                    out.append({"id": s.get("id") or new_sid(),
+                                "text": txt, "done": bool(s.get("done"))})
+            elif isinstance(s, str) and s.strip():
+                out.append({"id": new_sid(), "text": s.strip(), "done": False})
+    return out
+
+
+def _norm_logs(raw):
+    """把 logs 归一成 {"YYYY-MM-DD": 秒}，非法键值直接丢掉。"""
+    out = {}
+    if isinstance(raw, dict):
+        for k, v in raw.items():
+            d = s2d(str(k))
+            sec = _norm_num(v)
+            if d and sec > 0:
+                key = d2s(d)
+                out[key] = out.get(key, 0.0) + sec
+    return out
+
+
+def _norm_task(t):
+    """把一条原始任务字典归一化。
+    load() 读盘、导入备份、回收站恢复都走这里 —— 规则只写一处，永远一致。"""
+    p = t.get("p", 2)
+    rp = str(t.get("repeat", "") or "")
+    return {
+        "id": t.get("id") or new_id(),
+        "title": str(t.get("title", "")),
+        "note": str(t.get("note", "")),
+        "p": p if p in (0, 1, 2, 3) else 2,
+        "due": t.get("due", "") if s2d(t.get("due", "")) else "",
+        "done": bool(t.get("done")),
+        "order": float(t.get("order", 0) or 0) or now_ts(),
+        "subs": _norm_subs(t.get("subs")),
+        "logs": _norm_logs(t.get("logs")),
+        "timer": _norm_num(t.get("timer")),
+        "repeat": rp if rp in REPEAT_LABEL else "",
+        "done_at": _norm_num(t.get("done_at")),
+        "remind_key": str(t.get("remind_key", "") or ""),
+    }
+
+
+def _norm_trash(raw):
+    """回收站归一化。每项是 {"deleted_at": 时间戳, "task": 任务字典}。"""
+    out = []
+    if isinstance(raw, list):
+        for it in raw:
+            if not isinstance(it, dict):
+                continue
+            t = it.get("task")
+            if not isinstance(t, dict) or not str(t.get("title", "")).strip():
+                continue
+            out.append({"deleted_at": _norm_num(it.get("deleted_at")),
+                        "task": _norm_task(t)})
+    return out[-TRASH_MAX:]
+
+
+def add_months(d, n):
+    """月份加减，自动处理月末对齐（1/31 加一个月 → 2/28 或 2/29）。"""
+    y, m = divmod(d.month - 1 + n, 12)
+    y, m = d.year + y, m + 1
+    return datetime.date(y, m, min(d.day, calendar.monthrange(y, m)[1]))
+
+
+def next_date(due_s, repeat, base=None):
+    """算出重复任务的「下一次」截止日期。
+
+    基准取原截止日期，没有就从今天算起，然后加一个周期。
+    若结果已经过去（任务拖了很久才被完成），就一直往后推，直到落在
+    今天之后 —— 这样不会一次补出一长串过期的重复任务。"""
+    if repeat not in ("daily", "weekly", "monthly", "yearly"):
+        return ""
+    T = base or today()
+    d = s2d(due_s) or T
+    for _ in range(4000):
+        if repeat == "daily":
+            d = d + datetime.timedelta(days=1)
+        elif repeat == "weekly":
+            d = d + datetime.timedelta(days=7)
+        elif repeat == "monthly":
+            d = add_months(d, 1)
+        else:
+            d = add_months(d, 12)
+        if d > T:
+            break
+    return d2s(d)
+
+
+def done_day(t):
+    """任务是在哪一天完成的（复盘热力图要用）。
+    优先取 done_at；老数据没有这个字段，就用 order 兜底 —— 但只在
+    order 看着确实像时间戳时才用，免得把「第 3 位」这种排序号当成 1970 年。"""
+    if not t.get("done"):
+        return ""
+    ts = _norm_num(t.get("done_at"))
+    if ts <= 0:
+        o = _norm_num(t.get("order"))
+        ts = o if o > 1e9 else 0
+    return ts_day(ts) if ts > 0 else ""
+
+
+def round_rect(cv, x1, y1, x2, y2, r, **kw):
+    r = min(r, (x2 - x1) / 2, (y2 - y1) / 2)
+    pts = [x1 + r, y1, x2 - r, y1, x2, y1, x2, y1 + r, x2, y2 - r, x2, y2,
+           x2 - r, y2, x1 + r, y2, x1, y2, x1, y2 - r, x1, y1 + r, x1, y1]
+    return cv.create_polygon(pts, smooth=True, **kw)
+
+
+class App:
+
+    # ============================================================ 初始化
+
+    def __init__(self, root):
+        self.root = root
+        self.tasks = []
+        self.mode = "matrix"
+        self.filter = "all"
+        self.q = ""
+        self.quick_p = 2
+        self.regions = []          # (kind, tid, x1, y1, x2, y2) 按绘制层次排列
+        self._quad_rects = {}      # p -> (x, y, w, h)
+        # 拖拽落点判定用的两份几何快照（每次重绘重算）：
+        #   _nest_zone：卡片上半张（标题+备注那一段）＝「变成它的子任务」落点
+        #   _sub_rows ：某张卡片里子任务行的 y 区间，按显示顺序 —— 子任务拖拽排序用
+        self._nest_zone = {}
+        self._sub_rows = {}
+        self.drag = None
+        self.editor = None
+        self.hover_tid = None
+        self._redraw_job = None
+        self._stats_win = None     # 耗时统计面板（Toplevel）
+        self._stats_period = "today"
+        self.trash = []            # 回收站：[{"deleted_at": 时间戳, "task": {...}}]
+        self._review_win = None    # 每日复盘面板
+        self._review_cv = None     # 复盘面板里那个可滚动的画布
+        self._review_win_id = None
+        self._trash_win = None     # 回收站面板
+        self._help_win = None      # 使用帮助窗
+        self._remind_win = None    # 到点提醒窗
+        self._undo_cb = None       # 状态栏「撤销」当前绑定的动作
+        self._undo_job = None
+        # 提醒节流的时间基准。这里初始化成"现在"而不是 0 ——
+        # 否则 __init__ 里第一次 _tick 就会立刻满足"距上次检查超过
+        # REMIND_MS"，主窗口还没显示就先蹦出一个提醒框。
+        # 启动时的那次检查交给下面单独的 after() 去做。
+        self._last_remind_check = now_ts()
+
+        self.load()
+        self.topmost = bool(self.ui.get("topmost"))
+
+        root.title(APP_TITLE)
+        root.configure(bg=C_BG)
+        root.minsize(760, 480)
+        self._place_window()
+
+        self._build_top()
+        self._build_board()
+        self._build_status()
+        self._apply_topmost(announce=False)   # 恢复上次的置顶状态，并点亮按钮
+
+        root.protocol("WM_DELETE_WINDOW", self.on_close)
+        root.bind("<F5>", lambda e: self.redraw())
+        root.bind("<Control-n>", lambda e: self.entry.focus_set())
+        root.bind("<Control-t>", lambda e: self.toggle_top())
+        root.bind("<Control-b>", lambda e: self.open_stats())
+        root.bind("<Control-e>", lambda e: self.open_review())     # e = 复盘
+        root.bind("<Control-z>", lambda e: self._do_undo())        # 撤销上一步删除
+        root.bind("<F1>", lambda e: self.open_help())              # 使用帮助
+        root.bind("<Escape>", lambda e: self.cancel_editor())
+        root.bind_all("<MouseWheel>", self._on_wheel)
+
+        self.refresh_quick()
+        self.refresh_view_btns()
+        self.redraw()
+        self.entry.focus_set()
+
+        # 启动时补一份今天的备份（如果今天还没备过）
+        p = self._maybe_daily_backup()
+        if p:
+            self.status.configure(text="已自动备份到 %s" % p)
+
+        self._tick()               # 开始心跳：计时中的卡片要持续刷新
+        # 稍等一下再检查提醒，免得窗口还没画完就先蹦出一个提示框
+        self.root.after(1500, self._maybe_remind)
+
+    def _place_window(self):
+        w, h = self.ui.get("w", 1180), self.ui.get("h", 820)
+        x, y = self.ui.get("x"), self.ui.get("y")
+        if x is None or y is None:
+            sw = self.root.winfo_screenwidth()
+            sh = self.root.winfo_screenheight()
+            x, y = max(0, (sw - w) // 2), max(0, (sh - h) // 3)
+        self.root.geometry("%dx%d+%d+%d" % (w, h, x, y))
+
+    # ============================================================ 数据持久化
+
+    def load(self):
+        self.ui = {}
+        self.trash = []
+        if not os.path.exists(DATA_FILE):
+            self.tasks = self._seed()
+            return
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            self.tasks = self._seed()
+            return
+
+        if isinstance(raw, list):
+            items, self.ui = raw, {}
+        else:
+            items = raw.get("tasks", [])
+            if not isinstance(items, list):
+                items = []
+            self.ui = raw.get("ui", {}) or {}
+
+        self.mode = self.ui.get("mode", "matrix")
+        self.filter = self.ui.get("filter", "all")
+        self.quick_p = self.ui.get("quick_p", 2)
+
+        out = []
+        for t in items:
+            if not isinstance(t, dict) or not str(t.get("title", "")).strip():
+                continue
+            out.append(_norm_task(t))
+        self.tasks = out
+        # 回收站（老数据没有这一段，取不到就是空的）
+        self.trash = _norm_trash(raw.get("trash") if isinstance(raw, dict) else [])
+
+    def _seed(self):
+        d = today()
+        return [
+            {"id": new_id(), "title": "把季度复盘 PPT 改完，明天下午 3 点前发出去",
+             "note": "重点补上留存率那一页", "p": 0, "due": d2s(d + datetime.timedelta(days=1)),
+             "done": False, "order": 1.0,
+             "subs": [{"id": new_sid(), "text": "补留存率那一页的数据", "done": True},
+                      {"id": new_sid(), "text": "改封面和字体统一", "done": False},
+                      {"id": new_sid(), "text": "发到评审群里", "done": False}],
+             "logs": {d2s(d - datetime.timedelta(days=1)): 2700.0,
+                      d2s(d): 1800.0},
+             "timer": 0},
+            {"id": new_id(), "title": "回复同事发来的报销单确认", "note": "十分钟的事，别拖着",
+             "p": 2, "due": d2s(d), "done": False, "order": 2.0,
+             "subs": [], "logs": {}, "timer": 0},
+            {"id": new_id(), "title": "梳理下季度产品路线图", "note": "不着急，但别拖成 P0",
+             "p": 1, "due": "", "done": False, "order": 3.0,
+             "subs": [], "logs": {d2s(d - datetime.timedelta(days=2)): 3600.0}, "timer": 0},
+            {"id": new_id(), "title": "整理桌面上那堆截图，归档到 NAS", "note": "有空再说",
+             "p": 3, "due": "", "done": False, "order": 4.0,
+             "subs": [], "logs": {}, "timer": 0},
+        ]
+
+    def _write_data(self):
+        """把当前状态写进 tasks.json。先写 .tmp 再 os.replace，避免写坏原文件。"""
+        data = {
+            "v": 3,
+            "ui": {
+                "mode": self.mode, "filter": self.filter,
+                "quick_p": self.quick_p, "topmost": bool(self.topmost),
+                "w": self.root.winfo_width(), "h": self.root.winfo_height(),
+                "x": self.root.winfo_x(), "y": self.root.winfo_y(),
+                "backup_dir": self.ui.get("backup_dir", ""),
+                "backup_on": bool(self.ui.get("backup_on", True)),
+                "backup_keep": self._keep_days(),
+                "last_backup": self.ui.get("last_backup", ""),
+                "remind_on": bool(self.ui.get("remind_on", True)),
+            },
+            "tasks": self.tasks,
+            "trash": self.trash,
+        }
+        try:
+            tmp = DATA_FILE + ".tmp"
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(data, f, ensure_ascii=False, indent=2)
+            os.replace(tmp, DATA_FILE)
+        except Exception:
+            pass
+
+    def save(self):
+        self._write_data()
+        self._maybe_daily_backup()
+
+    # ============================================================ 每日自动备份
+
+    def backup_dir(self):
+        return str(self.ui.get("backup_dir") or "")
+
+    def _keep_days(self):
+        """备份保留天数。0 或负数 = 永久保留。
+
+        注意别写成 `int(x or 30)` —— 那样 0 是假值会被替换成 30，
+        「永久保留」就悄悄退化成了「保留 30 天」。这个坑踩过一次。"""
+        try:
+            return int(self.ui.get("backup_keep", 30))
+        except (TypeError, ValueError):
+            return 30
+
+    def _maybe_daily_backup(self, force=False):
+        """每天往备份文件夹落一份快照。挂在 save() 上，但正常情况下只是一次
+        内存里的日期比对 —— 真正复制文件一天只发生一次，开销可以忽略。
+
+        返回写出的路径；没做事则返回 ""。"""
+        if not force and not self.ui.get("backup_on", True):
+            return ""
+        bd = self.backup_dir()
+        if not bd or not os.path.isdir(bd):
+            return ""
+        key = d2s(today())
+        dst = os.path.join(bd, BACKUP_PREFIX + key + ".json")
+        if not force and self.ui.get("last_backup") == key and os.path.exists(dst):
+            return ""
+        if force:
+            self._write_data()          # 手动备份时先把最新状态落盘
+        try:
+            shutil.copyfile(DATA_FILE, dst)
+        except Exception:
+            return ""
+        self.ui["last_backup"] = key
+        self._prune_backups()
+        return dst
+
+    def _prune_backups(self):
+        """按保留天数清理旧备份。只碰自己生成的文件（前缀 + 合法日期），
+        且日期一律从文件名解析，绝不按修改时间去猜。"""
+        bd = self.backup_dir()
+        keep = self._keep_days()
+        if keep <= 0:                   # 0 或负数 = 永久保留
+            return
+        cutoff = today() - datetime.timedelta(days=keep - 1)
+        try:
+            names = os.listdir(bd)
+        except Exception:
+            return
+        for n in names:
+            if not (n.startswith(BACKUP_PREFIX) and n.endswith(".json")):
+                continue
+            d = s2d(n[len(BACKUP_PREFIX):-5])
+            if d and d < cutoff:
+                try:
+                    os.remove(os.path.join(bd, n))
+                except Exception:
+                    pass
+
+    def do_export(self):
+        """手动导出一份到程序目录（不依赖备份文件夹的设置）。"""
+        self._write_data()
+        dst = os.path.join(APP_DIR, BACKUP_PREFIX + d2s(today()) + ".json")
+        try:
+            shutil.copyfile(DATA_FILE, dst)
+        except Exception:
+            self.status.configure(text="备份失败：数据文件还没生成")
+            return
+        self.status.configure(text="已备份到 %s" % dst)
+
+    def do_backup_now(self):
+        if not self.backup_dir():
+            self.status.configure(text="还没设自动备份文件夹，先选「设置自动备份文件夹…」")
+            return
+        p = self._maybe_daily_backup(force=True)
+        if p:
+            self.status.configure(text="已备份到 %s" % p)
+        else:
+            self.status.configure(text="备份失败：请检查备份文件夹是否存在且可写")
+
+    def pick_backup_dir(self):
+        bd = tkfd.askdirectory(title="选择自动备份文件夹",
+                               initialdir=self.backup_dir() or APP_DIR)
+        if not bd:
+            return
+        self.ui["backup_dir"] = os.path.normpath(bd)
+        self.ui["last_backup"] = ""     # 换了目录，今天该在新目录里补一份
+        self.save()
+        p = self._maybe_daily_backup(force=True)
+        self.status.configure(text="备份文件夹已设为 %s%s"
+                                   % (self.ui["backup_dir"],
+                                      "，已写入今日备份" if p else ""))
+
+    def open_backup_dir(self):
+        bd = self.backup_dir()
+        if not bd or not os.path.isdir(bd):
+            self.status.configure(text="还没设置自动备份文件夹")
+            return
+        self._open_path(bd)
+
+    def _open_path(self, path):
+        """用系统默认方式打开文件或文件夹。"""
+        try:
+            if hasattr(os, "startfile"):
+                os.startfile(path)
+                return
+            import subprocess
+            opener = "open" if sys.platform == "darwin" else "xdg-open"
+            subprocess.Popen([opener, path])
+        except Exception:
+            self.status.configure(text="打开失败：%s" % path)
+
+    def toggle_backup(self):
+        self.ui["backup_on"] = not bool(self.ui.get("backup_on", True))
+        if self.ui["backup_on"]:
+            self.ui["last_backup"] = ""     # 刚打开就立刻补一份
+        self.save()
+        self.status.configure(text="每日自动备份已%s"
+                                   % ("开启" if self.ui["backup_on"] else "关闭"))
+
+    def set_backup_keep(self, n):
+        self.ui["backup_keep"] = int(n)
+        self.save()
+        self.status.configure(text="备份保留：%s"
+                                   % ("永久" if int(n) <= 0 else "%d 天" % int(n)))
+
+    # -------- 导入 / 恢复 --------
+
+    def backup_before_import(self):
+        """导入会覆盖或追加数据，动手前先留一份"后悔药"。
+        返回写出的路径；失败返回 ""。"""
+        self._write_data()
+        name = (IMPORT_BACKUP_PREFIX
+                + datetime.datetime.now().strftime("%Y%m%d-%H%M%S") + ".json")
+        dst = os.path.join(APP_DIR, name)
+        try:
+            shutil.copyfile(DATA_FILE, dst)
+        except Exception:
+            return ""
+        return dst
+
+    def read_backup(self, path):
+        """读一个备份文件，返回 (任务列表, 错误信息)。
+
+        这个函数只读不写，所以可以被测试反复调用 —— 把"解析"和"落地"
+        分开，是让这类功能可测的关键。"""
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception as ex:
+            return None, "读不了这个文件：%s" % ex
+        if isinstance(raw, list):
+            items = raw
+        elif isinstance(raw, dict):
+            items = raw.get("tasks", [])
+        else:
+            items = None
+        if not isinstance(items, list):
+            return None, "这不像是一份便利贴备份（里面找不到任务列表）"
+        out = [_norm_task(t) for t in items
+               if isinstance(t, dict) and str(t.get("title", "")).strip()]
+        if not out:
+            return None, "文件里没有任何可用的任务"
+        return out, ""
+
+    def import_from(self, path, mode="merge"):
+        """真正执行导入。mode 取 "merge"（追加）或 "replace"（替换）。
+        返回 (导入条数, 错误信息)。"""
+        items, err = self.read_backup(path)
+        if err:
+            return 0, err
+        self.backup_before_import()
+
+        if mode == "replace":
+            self.tasks = items
+        else:
+            have = set(t["id"] for t in self.tasks)
+            for t in items:
+                if t["id"] in have:          # 同 id 的补一个新 id，免得互相顶掉
+                    t = dict(t, id=new_id())
+                self.tasks.append(t)
+        self.save()
+        self.redraw()
+        return len(items), ""
+
+    def do_import(self):
+        """菜单入口：选文件 → 问「替换还是合并」→ 执行。"""
+        path = tkfd.askopenfilename(
+            title="选择要导入的备份文件",
+            initialdir=self.backup_dir() or APP_DIR,
+            filetypes=[("便利贴备份", "*.json"), ("所有文件", "*.*")])
+        if not path:
+            return
+        items, err = self.read_backup(path)
+        if err:
+            tkmb.showerror("导入失败", err, parent=self.root)
+            return
+        ans = tkmb.askyesnocancel(
+            "导入方式",
+            "文件里有 %d 条任务。\n\n"
+            "「是」= 替换：清掉现在的全部任务，只保留文件里的\n"
+            "「否」= 合并：保留现有任务，把文件里的追加进来\n"
+            "「取消」= 什么都不做\n\n"
+            "无论选哪个，都会先自动留一份「%s…」以防万一。"
+            % (len(items), IMPORT_BACKUP_PREFIX),
+            parent=self.root)
+        if ans is None:
+            return
+        n, err = self.import_from(path, "replace" if ans else "merge")
+        if err:
+            tkmb.showerror("导入失败", err, parent=self.root)
+            return
+        self.status.configure(text="已导入 %d 条任务（%s）"
+                                   % (n, "替换" if ans else "合并"))
+
+    # ============================================================ 界面骨架
+
+    def _btn(self, parent, text, cmd, primary=False, width=None):
+        bg = C_INK if primary else C_WHITE
+        fg = "#ffffff" if primary else C_INK
+        b = tk.Button(parent, text=text, command=cmd, font=F_SMALL,
+                      bg=bg, fg=fg, activebackground=("#3d3830" if primary else "#f2eee6"),
+                      activeforeground=fg, relief="flat", bd=0, padx=13, pady=6,
+                      cursor="hand2", highlightthickness=0)
+        if width:
+            b.configure(width=width)
+        return b
+
+    def _build_top(self):
+        top = tk.Frame(self.root, bg=C_TOP, highlightbackground=C_LINE,
+                       highlightthickness=0)
+        top.pack(fill="x", side="top")
+        inner = tk.Frame(top, bg=C_TOP)
+        inner.pack(fill="x", padx=PAD, pady=(11, 10))
+
+        # --- 第一行：快速添加 ---
+        r1 = tk.Frame(inner, bg=C_TOP)
+        r1.pack(fill="x")
+
+        tk.Label(r1, text="● 便利贴", font=F_BRAND, bg=C_TOP, fg=C_INK).pack(side="left", padx=(0, 12))
+
+        self.entry = tk.Entry(r1, font=F_BODY, bg=C_WHITE, fg=C_INK, relief="flat",
+                              highlightthickness=1, highlightbackground=C_LINE,
+                              highlightcolor="#c0ae8e", insertbackground=C_INK)
+        self.entry.pack(side="left", fill="x", expand=True, ipady=5, padx=(0, 9))
+        self.entry.bind("<Return>", lambda e: self.do_add())
+        self.entry.bind("<Escape>", lambda e: self.entry.delete(0, "end"))
+
+        self.seg_btns = []
+        seg = tk.Frame(r1, bg=C_WHITE, highlightbackground=C_LINE, highlightthickness=1)
+        seg.pack(side="left", padx=(0, 9))
+        for pr in PRIOS:
+            b = tk.Button(seg, text=pr["key"], font=F_TINY, bd=0, relief="flat",
+                          padx=11, pady=5, cursor="hand2", highlightthickness=0,
+                          command=lambda i=pr["p"]: self.set_quick(i))
+            b.pack(side="left")
+            self.seg_btns.append(b)
+
+        self._btn(r1, "贴 上", self.do_add, primary=True).pack(side="left")
+
+        # --- 第二行：工具与统计 ---
+        r2 = tk.Frame(inner, bg=C_TOP)
+        r2.pack(fill="x", pady=(9, 0))
+
+        self.view_btn = self._btn(r2, "四象限", self.toggle_view)
+        self.view_btn.pack(side="left", padx=(0, 7))
+
+        self.filter_btn = self._btn(r2, "全部 ▾", self.show_filter_menu)
+        self.filter_btn.pack(side="left", padx=(0, 7))
+
+        tk.Label(r2, text="搜索", font=F_SMALL, bg=C_TOP, fg=C_INK3)\
+            .pack(side="left", padx=(0, 4))
+        self.search = tk.Entry(r2, font=F_SMALL, bg=C_WHITE, fg=C_INK, relief="flat",
+                               highlightthickness=1, highlightbackground=C_LINE,
+                               highlightcolor="#c0ae8e", insertbackground=C_INK, width=15)
+        self.search.pack(side="left", ipady=4, padx=(0, 7))
+        self.search.bind("<KeyRelease>", self.on_search)
+
+        self._btn(r2, "统计", self.open_stats).pack(side="left", padx=(0, 7))
+        self._btn(r2, "复盘", self.open_review).pack(side="left", padx=(0, 7))
+        # 固定 width=4：让「置顶 / 已置顶」两种文字占同样宽，切换时工具栏不抖
+        # （实测 width=None 时 51px↔62px 会左右晃，width=4 两者都是 56px）
+        self.top_btn = self._btn(r2, "置顶", self.toggle_top, width=4)
+        self.top_btn.pack(side="left", padx=(0, 7))
+        self.more_btn = self._btn(r2, "更多 ▾", self.show_more_menu)
+        self.more_btn.pack(side="left", padx=(0, 7))
+
+        # 帮助放**最右边**（side="right"）：既不挤现有的按钮，位置也符合习惯。
+        # 文案带个问号，是给第一次用的人（比如拷给朋友的电脑）一个明显的抓手。
+        self.help_btn = self._btn(r2, "? 帮助", self.open_help)
+        self.help_btn.pack(side="right")
+
+        tk.Frame(self.root, bg=C_LINE, height=1).pack(fill="x")
+
+    def _build_board(self):
+        wrap = tk.Frame(self.root, bg=C_BG)
+        wrap.pack(fill="both", expand=True)
+
+        self.cv = tk.Canvas(wrap, bg=C_BG, highlightthickness=0, bd=0)
+        self.cv.pack(side="left", fill="both", expand=True)
+
+        self.sb = tk.Scrollbar(wrap, orient="vertical", command=self.cv.yview,
+                               width=12, troughcolor=C_BG, bg="#d9d3c7",
+                               activebackground="#c4bdaf", relief="flat", bd=0)
+        self.sb.pack(side="right", fill="y")
+        self.cv.configure(yscrollcommand=self.sb.set)
+
+        self.cv.bind("<Configure>", self.on_configure)
+        self.cv.bind("<ButtonPress-1>", self.on_press)
+        self.cv.bind("<B1-Motion>", self.on_motion)
+        self.cv.bind("<ButtonRelease-1>", self.on_release)
+        self.cv.bind("<Double-Button-1>", self.on_double)
+        self.cv.bind("<Button-3>", self.on_right)
+        self.cv.bind("<Motion>", self.on_hover)
+        # 点到输入框以外的地方就提交就地编辑（代替不可靠的 FocusOut 提交）
+        self.root.bind_all("<Button-1>", self._maybe_commit_editor, add="+")
+
+    def _build_status(self):
+        bar = tk.Frame(self.root, bg=C_TOP, highlightbackground=C_LINE, highlightthickness=0)
+        bar.pack(fill="x", side="bottom")
+        tk.Frame(bar, bg=C_LINE, height=1).pack(fill="x")
+
+        # 用 grid 而不是 pack：撤销按钮要能反复隐藏/出现，而且不能把
+        # 右边的统计数字挤来挤去（pack 的 side="right" 顺序会变）。
+        row = tk.Frame(bar, bg=C_TOP)
+        row.pack(fill="x", padx=PAD, pady=5)
+        row.columnconfigure(0, weight=1)
+
+        self.status = tk.Label(row, font=F_SMALL, bg=C_TOP, fg=C_INK3,
+                               anchor="w", justify="left", text=HINT_TEXT)
+        self.status.grid(row=0, column=0, sticky="w")
+
+        self.undo_btn = self._btn(row, "撤销", self._do_undo)
+        self.undo_btn.grid(row=0, column=1, padx=(10, 0))
+        self.undo_btn.grid_remove()          # 平时藏起来，删除后才露面
+
+        # 统计数字挪到底部右侧，给顶栏腾出放按钮的地方
+        self.stat = tk.Label(row, text="", font=F_SMALL, bg=C_TOP, fg=C_INK2)
+        self.stat.grid(row=0, column=2, padx=(14, 0))
+
+    # ============================================================ 顶栏行为
+
+    def _popup(self, menu, widget=None, x=None, y=None):
+        """在某个控件正下方弹出菜单；也可以直接给坐标。"""
+        if x is None:
+            x = widget.winfo_rootx()
+            y = widget.winfo_rooty() + widget.winfo_height()
+        try:
+            menu.tk_popup(x, y)
+        finally:
+            menu.grab_release()
+
+    def build_more_menu(self):
+        """只负责把菜单拼出来，不负责弹出 —— 这样它就能被测试直接调用。
+
+        统计 / 复盘**不放在这里** —— 顶栏已经有专门的两个按钮了，
+        菜单里再来一份纯属重复。（卡片右键菜单里那一份保留：在小卡片上
+        右键时不用再跑去顶栏。）
+        """
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        m.add_command(label="回收站…", command=self.open_trash)
+        m.add_separator()
+
+        m.add_command(label="导入 / 恢复备份…", command=self.do_import)
+        bd = self.backup_dir()
+        if bd:
+            m.add_command(label="立即备份到现在的位置", command=self.do_backup_now)
+        else:
+            m.add_command(label="立即备份（暂存到程序目录）", command=self.do_export)
+        m.add_command(label="设置自动备份文件夹…", command=self.pick_backup_dir)
+        if bd:
+            m.add_command(label="打开备份文件夹", command=self.open_backup_dir)
+        m.add_command(label="每日自动备份：%s"
+                            % ("开" if self.ui.get("backup_on", True) else "关"),
+                      command=self.toggle_backup)
+
+        sub = tk.Menu(m, tearoff=0, font=F_SMALL)
+        cur = self._keep_days()
+        for n, label in [(7, "7 天"), (30, "30 天"), (90, "90 天"), (0, "永久保留")]:
+            sub.add_command(label=("● " if n == cur else "    ") + label,
+                            command=lambda nn=n: self.set_backup_keep(nn))
+        m.add_cascade(label="备份保留天数", menu=sub)
+        m.add_separator()
+        m.add_command(label="到点提醒：%s"
+                            % ("开" if self.ui.get("remind_on", True) else "关"),
+                      command=self.toggle_remind)
+        m.add_command(label="打开数据文件夹", command=lambda: self._open_path(APP_DIR))
+        m.add_command(label="清空已完成", command=self.do_clear_done)
+        return m
+
+    def show_more_menu(self):
+        self._popup(self.build_more_menu(), self.more_btn)
+
+    def set_quick(self, i):
+        self.quick_p = i
+        self.refresh_quick()
+        self.entry.focus_set()
+
+    def refresh_quick(self):
+        for b, pr in zip(self.seg_btns, PRIOS):
+            on = pr["p"] == self.quick_p
+            b.configure(bg=pr["band"] if on else C_WHITE,
+                        fg="#ffffff" if on else C_INK2,
+                        activebackground=pr["band"] if on else "#f4f1ea",
+                        activeforeground="#ffffff" if on else C_INK2)
+
+    def refresh_view_btns(self):
+        self.view_btn.configure(text="四象限" if self.mode == "matrix" else "列表")
+        self.filter_btn.configure(text=dict(FILTERS).get(self.filter, "全部") + " ▾")
+
+    def toggle_view(self):
+        self.mode = "list" if self.mode == "matrix" else "matrix"
+        self.refresh_view_btns()
+        self.save()
+        self.redraw()
+
+    def toggle_top(self):
+        """开关窗口置顶（覆盖其他应用）。Ctrl+T 等效。"""
+        self.topmost = not getattr(self, "topmost", False)
+        self._apply_topmost()
+        self.save()
+
+    def _apply_topmost(self, announce=True):
+        """把 self.topmost 落到窗口上，并同步按钮外观和已打开的子面板。
+
+        announce=False 用在启动时恢复状态：那时不需要弹一句状态提示。
+        """
+        try:
+            self.root.attributes("-topmost", bool(self.topmost))
+        except Exception:
+            pass
+        self._paint_top_btn()
+        self._sync_panel_topmost()
+        if announce and getattr(self, "status", None) is not None:
+            self.status.configure(
+                text=("窗口已置顶，会盖在其他应用上面；再点一次「已置顶」即可取消"
+                      if self.topmost else "已取消置顶，窗口恢复正常层级"))
+
+    def _paint_top_btn(self):
+        """让按钮自己显示当前状态：没置顶是白底「置顶」，置顶了是深底「已置顶」。"""
+        b = getattr(self, "top_btn", None)
+        if b is None:
+            return
+        on = bool(getattr(self, "topmost", False))
+        bg = C_PIN_ON_BG if on else C_PIN_OFF_BG
+        fg = C_PIN_ON_FG if on else C_PIN_OFF_FG
+        # 悬停色沿用 c_btn 的规则：亮色底就压暗一点，暗色底就提亮一点
+        hover = "#3d3830" if on else "#f2eee6"
+        try:
+            b.configure(text=("已置顶" if on else "置顶"),
+                        bg=bg, fg=fg, activebackground=hover, activeforeground=fg)
+        except Exception:
+            pass
+
+    def _follow_top(self, w):
+        """新建的子面板登记进来，并跟随主窗口当前的置顶状态。
+
+        为什么必须做：主窗口一旦设为 -topmost，它就压在普通窗口之上。
+        统计 / 复盘 / 回收站这些面板若不管层级，就会被主窗挡在背后 ——
+        表现为「点了按钮，界面什么也没发生」。
+        """
+        try:
+            w.transient(self.root)
+        except Exception:
+            pass
+        if getattr(self, "topmost", False):
+            try:
+                w.attributes("-topmost", True)
+            except Exception:
+                pass
+
+    def _sync_panel_topmost(self):
+        """主窗口切换置顶时，已打开的面板一起跟着变。
+
+        提醒窗不在此列：它必须始终置顶，否则会被别人盖住导致提醒失效。
+        """
+        for attr in ("_stats_win", "_review_win", "_trash_win", "_help_win"):
+            w = getattr(self, attr, None)
+            if w is None:
+                continue
+            try:
+                if w.winfo_exists():
+                    w.attributes("-topmost", bool(self.topmost))
+            except Exception:
+                pass
+
+    def show_filter_menu(self):
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        for k, label in FILTERS:
+            m.add_command(label=label, command=lambda kk=k: self.set_filter(kk))
+        self._popup(m, self.filter_btn)
+
+    def set_filter(self, k):
+        self.filter = k
+        self.refresh_view_btns()
+        self.save()
+        self.redraw()
+
+    def on_search(self, _e=None):
+        self.q = self.search.get().strip()
+        self.redraw()
+
+    # ============================================================ 过滤
+
+    def visible(self, t):
+        if self.q:
+            hay = " ".join([t["title"], t["note"]] + [s["text"] for s in subs_of(t)])
+            if self.q.lower() not in hay.lower():
+                return False
+        T = today()
+        due = s2d(t["due"]) if t["due"] else None
+        f = self.filter
+        if f == "open":
+            return not t["done"]
+        if f == "due":
+            return (not t["done"]) and due is not None and due <= T
+        if f == "overdue":
+            return (not t["done"]) and due is not None and due < T
+        if f == "running":
+            return bool(t.get("timer")) and not t["done"]
+        if f == "done":
+            return t["done"]
+        return True
+
+    def sort_key(self, t):
+        return (1 if t["done"] else 0, t["order"])
+
+    # ============================================================ 布局与绘制
+
+    def on_configure(self, e):
+        if self._redraw_job:
+            self.root.after_cancel(self._redraw_job)
+        self._redraw_job = self.root.after(60, self.redraw)
+
+    def redraw(self):
+        self._redraw_job = None
+        self.regions = []
+        self._quad_rects = {}
+        self._nest_zone = {}
+        self._sub_rows = {}
+        cv = self.cv
+        cv.delete("all")
+
+        W = cv.winfo_width()
+        if W <= 1:
+            self.root.after(80, self.redraw)
+            return
+
+        self._update_stats()
+        show = [t for t in self.tasks if self.visible(t)]
+
+        groups = []
+        for pr in PRIOS:
+            items = sorted([t for t in show if t["p"] == pr["p"]], key=self.sort_key)
+            groups.append((pr, items))
+
+        if not self.tasks:
+            cv.create_text(W // 2, 150, text="📌", font=("Segoe UI Emoji", 30), fill="#cfc7b8")
+            cv.create_text(W // 2, 200, text="还没有任务", font=("Microsoft YaHei UI", 13),
+                           fill=C_INK3)
+            cv.create_text(W // 2, 230, text="在上面的输入框写一句，按回车就贴上来了",
+                           font=F_BODY, fill=C_INK3)
+            cv.configure(scrollregion=(0, 0, W, 400))
+            return
+
+        if self.mode == "matrix":
+            total_h = self._draw_matrix(groups, W)
+        else:
+            total_h = self._draw_list(groups, W)
+
+        cv.configure(scrollregion=(0, 0, W, max(total_h, cv.winfo_height())))
+
+    # -------- 四象限布局 --------
+    def _draw_matrix(self, groups, W):
+        avail = W - PAD * 3
+        colw = avail / 2
+        rows = []
+        for r in range(2):
+            rows.append([groups[r * 2], groups[r * 2 + 1]])
+
+        # 先算每格需要的高度
+        def quad_metrics(pr, items):
+            inner_avail = colw - INNER * 2
+            ncol = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
+            cw = (inner_avail - (ncol - 1) * GAP) / ncol
+            rhs = row_heights(items, ncol)   # 每行的高度：卡片不等高，取行内最高那张
+            need = QHEAD + INNER + sum(rhs) + (len(rhs) - 1) * GAP + INNER
+            return ncol, cw, max(need, QMIN_H)
+
+        heights = []
+        metrics = {}
+        # 任务不多时让四个象限铺满窗口，避免下半屏大片留白
+        vis_h = self.cv.winfo_height()
+        min_row = max(QMIN_H, (vis_h - PAD * 3) / 2)
+        for row in rows:
+            hs, ms = [], []
+            for pr, items in row:
+                m = quad_metrics(pr, items)
+                ms.append(m)
+                hs.append(m[2])
+            h = max(max(hs), min_row)
+            heights.append(h)
+            for (pr, items), m in zip(row, ms):
+                metrics[pr["p"]] = m
+
+        y = PAD
+        for ri, row in enumerate(rows):
+            for ci, (pr, items) in enumerate(row):
+                x = PAD + ci * (colw + PAD)
+                self._draw_quad(pr, items, x, y, colw, heights[ri], metrics[pr["p"]])
+            y += heights[ri] + PAD
+        return y
+
+    # -------- 列表布局 --------
+    def _draw_list(self, groups, W):
+        inner_avail = W - PAD * 2 - INNER * 2
+        ncol = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
+        cw = (inner_avail - (ncol - 1) * GAP) / ncol
+        y = PAD
+        for pr, items in groups:
+            rhs = row_heights(items, ncol)
+            need = QHEAD + INNER + sum(rhs) + (len(rhs) - 1) * GAP + INNER
+            need = max(need, QMIN_H)
+            self._draw_quad(pr, items, PAD, y, W - PAD * 2, need, (ncol, cw, need))
+            y += need + PAD
+        return y
+
+    def _draw_quad(self, pr, items, x, y, w, h, metrics):
+        cv = self.cv
+        ncol, cw, _ = metrics
+        tag = "quad%d" % pr["p"]
+        self._quad_rects[pr["p"]] = (x, y, w, h)
+
+        hl = (self.drag and self.drag.get("target") == pr["p"])
+        round_rect(cv, x, y, x + w, y + h, 10,
+                   fill=(C_HL if hl else C_QUAD),
+                   outline=(pr["band"] if hl else C_LINE), width=(2 if hl else 1),
+                   tags=(tag, "qbg%d" % pr["p"]))
+
+        # 头部
+        dot = 5
+        cv.create_oval(x + INNER, y + 11 - dot, x + INNER + dot * 2, y + 11 + dot,
+                       fill=pr["band"], outline="", tags=(tag,))
+        cv.create_text(x + INNER + 17, y + 11, anchor="w", text=pr["name"],
+                       font=F_HEAD, fill=C_INK, tags=(tag,))
+        nm = tkfont.Font(font=F_HEAD).measure(pr["name"])
+        cv.create_text(x + INNER + 17 + nm + 8, y + 12, anchor="w",
+                       text="· " + pr["act"], font=F_SMALL, fill=C_INK3, tags=(tag,))
+        cv.create_text(x + w - INNER, y + 11, anchor="e", text=str(len(items)),
+                       font=F_TINY, fill=C_INK2, tags=(tag,))
+
+        if not items:
+            cv.create_text(x + w / 2, y + QHEAD + (h - QHEAD) / 2,
+                           text="把便利贴拖到这里" if self.mode == "matrix" else "暂无",
+                           font=F_SMALL, fill="#c3bbad", tags=(tag,))
+            return
+
+        rhs = row_heights(items, ncol)
+        for i, t in enumerate(items):
+            r, c = divmod(i, ncol)
+            cx = x + INNER + c * (cw + GAP)
+            cy = y + QHEAD + INNER + sum(rhs[:r]) + r * GAP
+            self._draw_card(t, cx, cy, cw)
+
+    # -------- 单张卡片 --------
+    def _draw_card(self, t, x, y, w):
+        cv = self.cv
+        pr = PRIO_BY_P[t["p"]]
+        tag = "card%s" % t["id"]
+        bg = C_DONE_BG if t["done"] else pr["bg"]
+        x2, y2 = x + w, y + block_h(t)      # 高度随子任务条数变化
+
+        # 命中测试是倒序查找：整张卡片作为兜底，必须最先登记，否则会盖住内部控件
+        self.regions.append(("card", t["id"], x, y, x2, y2))
+
+        # 阴影 + 主体
+        cv.create_rectangle(x + 2, y + 3, x2 + 2, y2 + 3, fill=C_SHADOW, outline="", tags=(tag,))
+        cv.create_rectangle(x, y, x2, y2, fill=bg, outline="#e7e1d6", width=1, tags=(tag,))
+        # 顶部色带
+        cv.create_rectangle(x + 1, y + 1, x2 - 1, y + 5,
+                            fill=(C_LINE if t["done"] else pr["band"]), outline="", tags=(tag,))
+
+        # 复选框
+        bx, by = x + 13, y + 17
+        bs = 15
+        cv.create_rectangle(bx, by, bx + bs, by + bs, fill=C_WHITE,
+                            outline=(C_INK3 if t["done"] else pr["band"]), width=2, tags=(tag,))
+        if t["done"]:
+            cv.create_rectangle(bx + 1, by + 1, bx + bs - 1, by + bs - 1,
+                                fill=pr["band"], outline="", tags=(tag,))
+            cv.create_line(bx + 3.5, by + 7.5, bx + 6.5, by + 10.5, bx + 11.5, by + 4.5,
+                           fill="#ffffff", width=2, capstyle="round", joinstyle="round", tags=(tag,))
+
+        self.regions.append(("chk", t["id"], bx - 4, by - 4, bx + bs + 4, by + bs + 4))
+
+        # 重复标记：标题左边一个 18px 的小徽章。
+        # 这里用 Canvas 画方块 + 一个字，而不是直接打 ↻ ——
+        # 打符号要赌字体里有那个字形，缺了就是豆腐块；画方块永远稳。
+        tx = bx + bs + 10
+        rp = t.get("repeat") or ""
+        if rp:
+            rw = 18
+            round_rect(cv, tx, y + 16, tx + rw, y + 16 + rw, 5,
+                       fill=(C_LINE if t["done"] else pr["band"]),
+                       outline="", tags=(tag,))
+            cv.create_text(tx + rw / 2, y + 16 + rw / 2,
+                           text=REPEAT_BADGE.get(rp, "循"), font=F_TINY,
+                           fill="#ffffff", tags=(tag,))
+            self.regions.append(("rep", t["id"], tx - 2, y + 14,
+                                 tx + rw + 2, y + 18 + rw))
+            tx += rw + 6
+
+        # 标题
+        tw = (x2 - 13) - tx
+        lines = self._wrap(t["title"], F_TITLE, tw, 2)
+        ty = y + 17
+        for ln in lines:
+            cv.create_text(tx, ty, anchor="nw", text=ln, font=F_TITLE,
+                           fill=(C_INK3 if t["done"] else C_INK), tags=(tag,))
+            ty += 18
+        if t["done"] and lines:
+            fm = tkfont.Font(font=F_TITLE)
+            for i, ln in enumerate(lines):
+                ly = y + 17 + i * 18 + 8
+                cv.create_line(tx, ly, tx + fm.measure(ln), ly, fill="#a8a196", tags=(tag,))
+        self.regions.append(("title", t["id"], tx - 3, y + 14, tx + tw + 3, ty + 2))
+
+        # 备注
+        ny = ty + 4
+        if t["note"]:
+            nlines = self._wrap(t["note"], F_BODY, tw, 2)
+            top = ny
+            for ln in nlines:
+                cv.create_text(tx, ny, anchor="nw", text=ln, font=F_BODY,
+                               fill="#8a8377", tags=(tag,))
+                ny += 16
+            self.regions.append(("note", t["id"], tx - 3, top - 2, tx + tw + 3, ny + 2))
+        else:
+            # 空备注：画一行浅灰的「＋ 备注」当入口。
+            # 以前这里什么都不画，只登记了一条看不见的热区 —— 新建的任务
+            # 卡片上没有任何能加备注的地方，等于按钮藏起来了，用户根本找不到。
+            cv.create_text(tx, ny, anchor="nw", text=NOTE_EMPTY, font=F_BODY,
+                           fill=NOTE_EMPTY_FG, tags=(tag,))
+            self.regions.append(("note", t["id"], tx - 3, ny - 2, tx + tw + 3, ny + 16))
+
+        # 拖拽落点区：卡片**上半张**（标题 + 备注那一段）＝「变成它的子任务」。
+        # 下半张（子任务 + 徽章行）和卡片之间的空隙仍然留给「插到第几位」，
+        # 否则同组排序就没地方可放了。这里记的是画布坐标，拖拽时直接比即可
+        # （拖拽过程中只有被拖那张卡在动，别人这份快照是准的）。
+        self._nest_zone[t["id"]] = (x, y, x2, ny + NEST_PAD)
+
+        # 子任务区（只有真的有子任务时才画；高度已在 block_h() 里预留）
+        if subs_of(t):
+            self._draw_subs(t, x, ny + SUB_PAD, w, pr, tag)
+
+        # 底部分隔
+        fy = y2 - 34
+        cv.create_line(x + 12, fy, x2 - 12, fy, fill="#d8d2c6", dash=(3, 3), tags=(tag,))
+
+        # ---- 徽章行：左边是优先级 + 日期，右边是计时器 ----
+        ry = fy + 8
+        coin_x = self._draw_timer(t, x2, ry, pr, tag)
+
+        # 优先级徽章
+        label = "%s %s" % (pr["key"], pr["act"])
+        bw = tkfont.Font(font=F_TINY).measure(label) + 20
+        px1 = x + 12
+        round_rect(cv, px1, ry, px1 + bw, ry + 18, 9,
+                   fill=(C_INK3 if t["done"] else pr["band"]), outline="", tags=(tag,))
+        cv.create_text(px1 + bw / 2, ry + 9, text=label, font=F_TINY,
+                       fill="#ffffff", tags=(tag,))
+        self.regions.append(("prio", t["id"], px1, ry - 2, px1 + bw, ry + 20))
+
+        # 截止日期：只有在「不跟计时器打架」时才画，否则宁可不画也不许溢出
+        dx = px1 + bw + 8
+        dtext, dcls = self._due_text(t)
+        if not dtext:
+            dtext, dcls = "+ 日期", "empty"
+        dwn = tkfont.Font(font=F_SMALL).measure(dtext) + 18
+        if dx + dwn <= coin_x - 8:
+            fill = {"overdue": "#ffd9d9", "today": "#fff0ce",
+                    "soon": "#e4eeff", "empty": "#ffffff"}.get(dcls, "#ffffff")
+            ink = {"overdue": "#b4242a", "today": "#8a5200",
+                   "soon": "#2c5c9e", "empty": "#bdb6a9"}.get(dcls, C_INK2)
+            round_rect(cv, dx, ry, dx + dwn, ry + 18, 9, fill=fill, outline="", tags=(tag,))
+            cv.create_text(dx + dwn / 2, ry + 9, text=dtext, font=F_SMALL,
+                           fill=ink, tags=(tag,))
+            self.regions.append(("due", t["id"], dx, ry - 2, dx + dwn, ry + 20))
+
+    def _draw_subs(self, t, x, y, w, pr, tag):
+        """画卡片里的子任务区。返回画完后的 y（方便以后往下面接着加东西）。"""
+        cv = self.cv
+        subs = subs_of(t)
+        n, done = len(subs), sub_done_n(t)
+
+        cv.create_line(x + 12, y, x + w - 12, y, fill=C_SUB_SEP, tags=(tag,))
+        y += SUB_PAD
+        head = "子任务 %d/%d" % (done, n)
+        if n > SUB_MAX:
+            head += "  ·  还有 %d 条" % (n - SUB_MAX)
+        cv.create_text(x + 13, y, anchor="nw", text=head, font=F_SUB,
+                       fill=C_INK3, tags=(tag,))
+        y += SUB_HEAD
+
+        for s in subs[:SUB_MAX]:
+            sd = bool(s.get("done"))
+            bx, by = x + 14, y + 1
+            cv.create_rectangle(bx, by, bx + SUB_BOX, by + SUB_BOX, fill=C_WHITE,
+                                outline=(pr["band"] if sd else C_SUB_MARK),
+                                width=1, tags=(tag,))
+            if sd:
+                cv.create_line(bx + 2, by + SUB_BOX / 2, bx + 4.5, by + SUB_BOX - 3,
+                               bx + SUB_BOX - 2, by + 2.5,
+                               fill=pr["band"], width=2, capstyle="round",
+                               joinstyle="round", tags=(tag,))
+            self.regions.append(("sc:" + s["id"], t["id"],
+                                 bx - 3, by - 3, bx + SUB_BOX + 3, by + SUB_BOX + 3))
+
+            sx = bx + SUB_BOX + 6
+            ln = self._wrap(s["text"], F_SUB, (x + w - 10) - sx, 1)
+            txt = ln[0] if ln else ""
+            cv.create_text(sx, y, anchor="nw", text=txt, font=F_SUB,
+                           fill=(C_SUB_DONE if sd else C_INK2), tags=(tag,))
+            if sd and txt:
+                cv.create_line(sx, y + 8, sx + tkfont.Font(font=F_SUB).measure(txt), y + 8,
+                               fill=C_SUB_DONE, tags=(tag,))
+            self.regions.append(("st:" + s["id"], t["id"], sx - 3, y - 2, x + w - 8, y + 15))
+            # 子任务行的 y 区间（按显示顺序）—— 子任务拖拽排序时用来算落点
+            self._sub_rows.setdefault(t["id"], []).append((s["id"], y - 2, y + 13))
+            y += SUB_LINE
+        return y
+
+    def _draw_timer(self, t, x2, y, pr, tag):
+        """画右下角的计时药丸：点它就切换计时（见 handle_click 的 timer 分支）。
+        返回它的左边界 x，好让左边的日期徽章知道还剩多少空间。"""
+        cv = self.cv
+        sec = spent_of(t)
+        run = bool(t.get("timer"))
+        txt = fmt_dur(sec) if (sec > 0 or run) else "计时"
+        fw = tkfont.Font(font=F_TINY).measure(txt)
+        # 圆点只在「正在计时」时出现，表示"在录"。不加别的小圆点 ——
+        # 空心圈挨着数字会被误读成 0，比如「01时15分」。
+        w = 6 + (9 if run else 0) + fw + 7
+        x1 = x2 - 12 - w
+
+        if run:
+            bg, ink = pr["band"], "#ffffff"
+        elif sec > 0:
+            bg, ink = C_TIME_HAS, C_TIME_INK
+        else:
+            bg, ink = C_TIME_IDLE, C_INK3
+        round_rect(cv, x1, y, x1 + w, y + 18, 9, fill=bg,
+                   outline=("" if run or sec > 0 else C_LINE), width=1, tags=(tag,))
+        if run:
+            cv.create_oval(x1 + 6, y + 6, x1 + 12, y + 12, fill="#ffffff",
+                           outline="", tags=(tag,))
+        cv.create_text(x1 + 6 + (9 if run else 0), y + 9, anchor="w",
+                       text=txt, font=F_TINY, fill=ink, tags=(tag,))
+        self.regions.append(("timer", t["id"], x1 - 3, y - 3, x1 + w + 3, y + 21))
+        return x1
+
+    def _due_text(self, t):
+        if t["done"] or not t["due"]:
+            return "", ""
+        d = s2d(t["due"])
+        if not d:
+            return "", ""
+        delta = (d - today()).days
+        if delta < 0:
+            return "逾期 %d 天" % (-delta), "overdue"
+        if delta == 0:
+            return "今天", "today"
+        if delta == 1:
+            return "明天", "soon"
+        if delta <= 7:
+            return "%d 天后" % delta, "soon"
+        return d.strftime("%m/%d"), ""
+
+    def _wrap(self, text, font, maxw, maxlines):
+        """按像素宽度折行。英文/数字单词整体处理，避免把 NAS 拆成 N / AS。"""
+        f = tkfont.Font(font=font)
+        tokens = re.findall(r"[A-Za-z0-9][A-Za-z0-9\-_.]*|[ \t]+|\r|\n|.", str(text))
+        lines, cur = [], ""
+        for tk_ in tokens:
+            if tk_ == "\r":               # 容错：\r\n 里的 \r 直接丢掉
+                continue
+            if tk_ == "\n":
+                lines.append(cur)
+                cur = ""
+                if len(lines) > maxlines:
+                    break
+                continue
+            cand = cur + tk_
+            if f.measure(cand) > maxw and cur:
+                lines.append(cur)
+                cur = tk_.lstrip() if tk_.strip() else ""
+            else:
+                cur = cand
+            if len(lines) > maxlines:
+                break
+        if cur and len(lines) <= maxlines:
+            lines.append(cur)
+        if len(lines) > maxlines:
+            lines = lines[:maxlines]
+            last = lines[-1]
+            while last and f.measure(last + "…") > maxw:
+                last = last[:-1]
+            lines[-1] = last + "…"
+        return lines
+
+    def _update_stats(self):
+        T = today()
+        all_ = self.tasks
+        open_ = [t for t in all_ if not t["done"]]
+        hot = [t for t in open_ if t["due"] and s2d(t["due"]) and s2d(t["due"]) <= T]
+        late = [t for t in open_ if t["due"] and s2d(t["due"]) and s2d(t["due"]) < T]
+        run = [t for t in open_ if t.get("timer")]
+        # 这段文字现在显示在底部状态栏右侧，所以尽量短；
+        # 完整的数字（总数、已完成、子任务进度）在统计面板里。
+        s = "未完成 %d" % len(open_)
+        if hot:
+            s += " · 今天 %d" % len(hot)
+        if late:
+            s += " · 逾期 %d" % len(late)
+        if run:
+            s += " · 计时中 %d" % len(run)
+        s += " · 已完成 %d" % (len(all_) - len(open_))
+        self.stat.configure(text=s)
+
+    # ============================================================ 命中测试
+
+    def hit(self, cx, cy):
+        for kind, tid, x1, y1, x2, y2 in reversed(self.regions):
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return kind, tid
+        return None, None
+
+    def task_by_id(self, tid):
+        for t in self.tasks:
+            if t["id"] == tid:
+                return t
+        return None
+
+    def _canvas_xy(self, e):
+        return self.cv.canvasx(e.x), self.cv.canvasy(e.y)
+
+    # ============================================================ 鼠标事件
+
+    def on_press(self, e):
+        # 若正在就地编辑，先把内容落盘，再继续处理这次点击
+        if self.editor:
+            self._commit_editor()
+        cx, cy = self._canvas_xy(e)
+        kind, tid = self.hit(cx, cy)
+        if not tid:
+            return
+        t = self.task_by_id(tid)
+        if not t:
+            return
+        # 子任务那一行也能拖：上下拖 = 调它在卡片里的顺序，拖到别的卡片上 = 搬过去。
+        # 没拖动就松手仍然走原来的单击逻辑（勾选 / 不做事），见 on_release。
+        if kind and (kind.startswith("sc:") or kind.startswith("st:")):
+            sid = kind[3:]
+            if sub_by_id(t, sid):
+                self.drag = {"sub": True, "tid": tid, "sid": sid, "kind": kind,
+                             "x0": cx, "y0": cy, "moved": False,
+                             "target": tid, "idx": None, "promote": None,
+                             "last_x": cx, "last_y": cy}
+                return
+        self.drag = {"tid": tid, "x0": cx, "y0": cy, "kind": kind,
+                     "moved": False, "target": t["p"], "start_p": t["p"],
+                     "idx": None, "nest": None, "last_x": cx, "last_y": cy}
+
+    def on_motion(self, e):
+        d = self.drag
+        if not d:
+            return
+        cx, cy = self._canvas_xy(e)
+
+        if not d["moved"]:
+            if abs(cx - d["x0"]) < DRAG_TOL and abs(cy - d["y0"]) < DRAG_TOL:
+                d["last_x"], d["last_y"] = cx, cy
+                return
+            d["moved"] = True
+            if d.get("sub"):
+                self.status.configure(text=SUB_DRAG_HINT)
+            else:
+                self.cv.tag_raise("card" + d["tid"])
+                self.status.configure(text=DRAG_HINT)
+
+        if d.get("sub"):
+            self._motion_sub(d, cx, cy)
+            return
+
+        dx, dy = cx - d["last_x"], cy - d["last_y"]
+        d["last_x"], d["last_y"] = cx, cy
+
+        self.cv.move("card" + d["tid"], dx, dy)
+        self.cv.tag_raise("card" + d["tid"])
+
+        # 落到别人卡片的**上半张** → 变成它的子任务（优先于排序落点）
+        nest = self._nest_at(cx, cy, d["tid"])
+        if nest:
+            if d.get("nest") != nest:
+                d["nest"], d["target"], d["idx"] = nest, None, None
+                self._show_nest(nest)
+            return
+        d["nest"] = None
+
+        # 既要判断"落到哪个象限"，也要判断"插到第几位"
+        prev_p, prev_i = d["target"], d["idx"]
+        tgt_p = self._quad_at(cx, cy, prev_p if prev_p is not None else d["start_p"])
+        tgt_i = self._insert_index(tgt_p, cx, cy, d["tid"])
+        if (tgt_p, tgt_i) != (prev_p, prev_i):
+            d["target"], d["idx"] = tgt_p, tgt_i
+            self._show_target(tgt_p, tgt_i)
+            self.cv.tag_raise("card" + d["tid"])
+
+    def on_release(self, e):
+        d, self.drag = self.drag, None
+        if not d:
+            return
+        self.cv.delete("hl")
+        if not d["moved"]:
+            self.handle_click(d["kind"], d["tid"], e)
+            return
+        if not self._undo_cb:            # 撤销提示还挂着的时候别把它顶掉
+            self.status.configure(text=HINT_TEXT)
+
+        if d.get("sub"):
+            self._drop_sub(d)
+            return
+
+        t = self.task_by_id(d["tid"])
+        if not t:
+            self.redraw()
+            return
+        if d.get("nest"):
+            tgt = self.task_by_id(d["nest"])
+            self.redraw()                # 先把被拖走的卡片放回去，再谈嵌套
+            if tgt:
+                self.nest_task(t, tgt)
+            return
+        idx = d["idx"]
+        if idx is None:                  # 没移动够距离就松手，落到该象限末尾
+            idx = len([x for x in self.tasks
+                       if x["p"] == d["target"] and x["id"] != t["id"]])
+        self._apply_drop(t, d["target"], idx)
+        self.save()
+        self.redraw()
+
+    def _card_region(self, tid):
+        """某张卡片当前画在哪。取自 regions 快照 —— 拖拽过程中其他卡片没动，
+        所以这份坐标是准的（被拖那张要先排除掉，见 _insert_index）。"""
+        for kind, i, x1, y1, x2, y2 in self.regions:
+            if kind == "card" and i == tid:
+                return (x1, y1, x2, y2)
+        return None
+
+    def _insert_index(self, p, cx, cy, exclude_id):
+        """落点若要落在象限 p，应该插到第几位。
+
+        做法：把该象限的卡片按显示顺序排好，逐个和落点比 ——
+        落点在卡片上方 → 插到它前面；纵向落在它身上 → 再比左右。
+        合起来就是「按阅读顺序，找第一张排在落点后面的卡片」。"""
+        items = sorted([t for t in self.tasks
+                        if t["p"] == p and t["id"] != exclude_id],
+                       key=self.sort_key)
+        for i, t in enumerate(items):
+            r = self._card_region(t["id"])
+            if not r:
+                continue
+            x1, y1, x2, y2 = r
+            if cy < y1:
+                return i
+            if cy <= y2 and cx < (x1 + x2) / 2:
+                return i
+        return len(items)
+
+    def _apply_drop(self, t, p, idx):
+        """把任务 t 落到象限 p 的第 idx 位，然后给这个象限重新编号。
+
+        编号规则：未完成的按新顺序排在前面，已完成的按原顺序沉底 ——
+        这样「完成即沉底」的既有行为不会被手动排序破坏。"""
+        t["p"] = p
+        others = [x for x in self.tasks if x["p"] == p and x["id"] != t["id"]]
+        opens = sorted([x for x in others if not x["done"]], key=lambda x: x["order"])
+        dones = sorted([x for x in others if x["done"]], key=lambda x: x["order"])
+        idx = max(0, min(int(idx), len(opens)))
+        if t["done"]:
+            seq = opens + dones + [t]          # 已完成的任务只能垫底
+        else:
+            seq = opens[:idx] + [t] + opens[idx:] + dones
+        for i, x in enumerate(seq):
+            x["order"] = float(i)
+
+    def _quad_at(self, cx, cy, fallback):
+        """根据坐标判断落在哪个象限；找不到则沿用当前。"""
+        coords = self._quad_rects
+        for p, (x, y, w, h) in coords.items():
+            if x <= cx <= x + w and y <= cy <= y + h:
+                return p
+        # 横向仍在本列、纵向落在象限之间的缝隙时，取最近的一个
+        best, bd = fallback, 1e9
+        for p, (x, y, w, h) in coords.items():
+            if x - 30 <= cx <= x + w + 30:
+                d = min(abs(cy - y), abs(cy - (y + h)))
+                if d < bd:
+                    best, bd = p, d
+        return best
+
+    def _show_target(self, p, idx=None):
+        """拖拽落点提示（只画辅助线，不重绘整块画布，免得打断拖拽）。
+
+        跨象限：给目标象限描一圈虚线框，表示"会换到这一类"。
+        同象限：在将要插入的位置画一条竖线，表示"会插到这里"。"""
+        self.cv.delete("hl")
+        if not self._quad_rects.get(p):
+            return
+        if self.drag and p == self.drag.get("start_p"):
+            self._draw_insert_line(p, idx, self.drag["tid"])
+            return
+        x, y, w, h = self._quad_rects[p]
+        self.cv.create_rectangle(x + 2, y + 2, x + w - 2, y + h - 2,
+                                 outline=PRIO_BY_P[p]["band"], width=2,
+                                 dash=(7, 5), tags="hl")
+        # 抬到该象限背景之上，但仍位于卡片之下
+        self.cv.tag_raise("hl", "qbg%d" % p)
+
+    def _draw_insert_line(self, p, idx, exclude_id):
+        """同象限排序时，在将要插入的位置画一条竖线。
+
+        exclude_id 是要从这一列里排除掉的任务（卡片拖拽时就是被拖那张 ——
+        它正悬在半空，坐标不算数）。子任务提升成独立任务时传 None，
+        因为那时候画布上所有卡片都是老老实实待在原位的。"""
+        items = sorted([t for t in self.tasks
+                        if t["p"] == p and t["id"] != exclude_id],
+                       key=self.sort_key)
+        if not items:
+            return
+        idx = 0 if idx is None else max(0, min(int(idx), len(items)))
+        if idx < len(items):
+            r = self._card_region(items[idx]["id"])
+            lx = (r[0] - 6) if r else None
+        else:
+            r = self._card_region(items[-1]["id"])
+            lx = (r[2] + 6) if r else None
+        if not r or lx is None:
+            return
+        self.cv.create_line(lx, r[1], lx, r[3], fill=PRIO_BY_P[p]["band"],
+                            width=3, capstyle="round", tags="hl")
+
+    # -------- 拖拽：变成子任务 / 子任务排序 --------
+
+    def _nest_at(self, cx, cy, exclude_id):
+        """落点是否压在别人卡片的「上半张」；是就返回那张卡片的 id。
+
+        只认上半张（标题 + 备注那一段），下半张和卡片之间的空隙仍然归「插到第几位」——
+        两件事挤在同一块画布上，只能靠几何分工。判定区在 _draw_card 里记进
+        self._nest_zone（拖拽时只有被拖那张卡在动，别人这份快照是准的）。
+        """
+        for tid, (x1, y1, x2, y2) in self._nest_zone.items():
+            if tid == exclude_id:
+                continue
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return tid
+        return None
+
+    def _card_under(self, cx, cy, exclude=None):
+        """落点在哪张卡片上（整张卡片，不分上下半张）。子任务拖拽用。"""
+        for kind, tid, x1, y1, x2, y2 in self.regions:
+            if kind != "card" or tid == exclude:
+                continue
+            if x1 <= cx <= x2 and y1 <= cy <= y2:
+                return tid
+        return None
+
+    def _show_nest(self, tid):
+        """拖拽提示：目标卡片描一圈实线，上半张盖一层网点（假装半透明）。"""
+        self.cv.delete("hl")
+        t = self.task_by_id(tid)
+        zone = self._nest_zone.get(tid)
+        r = self._card_region(tid)
+        if not t or not zone or not r:
+            return
+        band = PRIO_BY_P[t["p"]]["band"]
+        self.cv.create_rectangle(r[0] + 1, r[1] + 1, r[2] - 1, r[3] - 1,
+                                 outline=band, width=2, tags="hl")
+        # tkinter 画不了半透明，用 stipple 网点凑一个「淡淡地刷了一层」的效果。
+        # gray12 就够了：gray25 太密，压在标题文字上会有点糊。
+        self.cv.create_rectangle(zone[0] + 1, zone[1] + 1, zone[2] - 1, zone[3],
+                                 fill=band, stipple="gray12", outline="", tags="hl")
+        self.cv.tag_raise("hl")
+        # 被拖的那张卡片要浮在最上面 —— 不然网点会盖在它脸上
+        if self.drag:
+            self.cv.tag_raise("card" + self.drag["tid"])
+        self.status.configure(text="松手：把这张卡片变成「%s」的子任务"
+                                   % ellipsis(t["title"], 12))
+
+    def _sub_insert_index(self, tid, cy):
+        """子任务拖拽：落点该插到第几条。只看卡面上画出来的那几条
+        （超过 SUB_MAX 的本来就看不见，没法当落点）。"""
+        rows = self._sub_rows.get(tid) or []
+        for i, (_sid, y1, y2) in enumerate(rows):
+            if cy < (y1 + y2) / 2.0:
+                return i
+        return len(rows)
+
+    def _motion_sub(self, d, cx, cy):
+        """子任务拖拽：不真的搬行，只画辅助线；松手才落库。
+
+        两种落点：压在卡片上 = 搬进那张卡（或在本卡里调顺序）；
+        落在卡片以外的空白 = 提升成独立任务，落进鼠标所在的那个象限。
+        """
+        tgt = self._card_under(cx, cy)
+        if tgt is None and self._in_board(cy):
+            p = self._quad_at(cx, cy, None)
+            if p is not None:
+                d["promote"] = p
+                d["target"], d["idx"] = None, None
+                self._show_promote(d, p, cx, cy)
+                return
+        if tgt is None:
+            # 不在卡片上、也不在某个象限里（板子外面 / 顶栏、状态栏上）：
+            # 当作还在原卡里 —— 白拖一场，总比"莫名其妙多出一张卡"安全
+            tgt = d["tid"]
+        if d.get("promote") is not None:
+            self.status.configure(text=SUB_DRAG_HINT)   # 从"提升"模式退回来
+        d["promote"] = None
+        idx = self._sub_insert_index(tgt, cy)
+        d["target"], d["idx"] = tgt, idx
+        self._show_sub_target(d, tgt, idx)
+
+    def _in_board(self, cy):
+        """落点还在不在四象限那块板子里（上下各给一点余量）。
+
+        拖拽时鼠标可能被甩到顶栏 / 状态栏上 —— 那里不该被当成"拖到了某个
+        象限的空白处"，否则一松手就冒出一张新卡片。判定就用现有象限矩形
+        的上下边界，不额外依赖画布控件的几何。"""
+        if not self._quad_rects:
+            return False
+        tops = [y for (_x, y, _w, _h) in self._quad_rects.values()]
+        bots = [y + h for (_x, y, _w, h) in self._quad_rects.values()]
+        return min(tops) - 4 <= cy <= max(bots) + 4
+
+    def _show_promote(self, d, p, cx, cy):
+        """子任务落到空白处的提示：给目标象限描虚线框 + 在插入位置画一条竖线。
+
+        视觉上跟"把整张卡片拖到这个象限"是同一套语言，用户一眼能看出
+        "松手会多出一张独立卡片"。"""
+        self.cv.delete("hl")
+        if not self._quad_rects.get(p):
+            return
+        x, y, w, h = self._quad_rects[p]
+        band = PRIO_BY_P[p]["band"]
+        self.cv.create_rectangle(x + 2, y + 2, x + w - 2, y + h - 2,
+                                 outline=band, width=2, dash=(7, 5), tags="hl")
+        self.cv.tag_raise("hl", "qbg%d" % p)
+        # 被拖的那条子任务还在原卡里躺着（没有跟着鼠标飘），所以谁也不用排除
+        self._draw_insert_line(p, self._insert_index(p, cx, cy, None), None)
+        self.status.configure(text="松手：把这条子任务提升成独立任务 → %s %s"
+                                   % (PRIO_BY_P[p]["key"], PRIO_BY_P[p]["act"]))
+
+    def _show_sub_target(self, d, tid, idx):
+        """画两样东西：被拖那一行的虚线框（搬的是它）+ 落点那条横线。"""
+        self.cv.delete("hl")
+        r0 = self._card_region(d["tid"])
+        if r0:
+            for sid, y1, y2 in (self._sub_rows.get(d["tid"]) or []):
+                if sid == d["sid"]:
+                    self.cv.create_rectangle(r0[0] + 10, y1, r0[2] - 10, y2,
+                                             outline="#9c9384", width=1,
+                                             dash=(3, 3), tags="hl")
+                    break
+        r = self._card_region(tid)
+        if not r:
+            return
+        t = self.task_by_id(tid)
+        band = PRIO_BY_P[t["p"]]["band"] if t else "#9c9384"
+        rows = self._sub_rows.get(tid) or []
+        if rows:
+            idx = max(0, min(int(idx), len(rows)))
+            ly = rows[idx][1] - 1 if idx < len(rows) else rows[-1][2] + 1
+            self.cv.create_line(r[0] + 14, ly, r[2] - 14, ly,
+                                fill=band, width=3, capstyle="round", tags="hl")
+        else:
+            # 目标卡片还没有子任务 —— 描一圈，表示「会在这张卡里新建一行」
+            self.cv.create_rectangle(r[0] + 1, r[1] + 1, r[2] - 1, r[3] - 1,
+                                     outline=band, width=2, tags="hl")
+        if t and t["id"] != d["tid"]:
+            self.status.configure(text="松手：把这条子任务挪到「%s」"
+                                       % ellipsis(t["title"], 12))
+
+    def _drop_sub(self, d):
+        """子任务松手：在源卡片里摘掉、插到目标卡片（或同一张卡的另一处）；
+        落点在卡片以外的空白时走提升，变成一张独立任务。"""
+        src = self.task_by_id(d["tid"])
+        sub = sub_by_id(src, d["sid"]) if src else None
+        if not src or not sub:
+            self.redraw()
+            return
+        if d.get("promote") is not None:
+            self._promote_drop(src, sub, d)
+            return
+        tgt = self.task_by_id(d["target"]) if d["target"] else None
+        if not tgt:
+            tgt = src
+        src_subs = subs_of(src)
+        dst_subs = subs_of(tgt)
+        old = src_subs.index(sub)
+        idx = len(dst_subs) if d["idx"] is None else int(d["idx"])
+        idx = max(0, min(idx, len(dst_subs)))
+        if src is tgt:
+            if old < idx:
+                idx -= 1                        # 先摘后插，下标要往回收一格
+            if idx == old:
+                self.redraw()                   # 位置没变，白拖一场
+                return
+        snap = self._snapshot()
+        src_subs.pop(old)
+        dst_subs.insert(idx, sub)
+        self.save()
+        self.redraw()
+        if src is tgt:
+            self._flash_undo("子任务顺序已调整", lambda: self._restore_snapshot(snap))
+        else:
+            self._flash_undo("已把子任务「%s」挪到「%s」"
+                             % (ellipsis(sub["text"], 8), ellipsis(tgt["title"], 10)),
+                             lambda: self._restore_snapshot(snap))
+
+    def _promote_drop(self, src, sub, d):
+        """子任务拖到卡片以外的空白：提升成独立任务，落进鼠标所在的那个象限。
+
+        和右键菜单里的 promote_sub 是同一件事，区别在位置 —— 拖拽版按落点算，
+        菜单版固定"紧跟父任务后面"。子任务身上没有备注 / 计时 / 重复这些字段，
+        所以这次搬运不会丢任何东西，直接做、给撤销入口就够了。
+        """
+        p = d["promote"]
+        # 落点位置要在改动之前量好：源卡片摘掉一条子任务后会变矮，
+        # 之后卡片会重新排布，那时候再算就对不上了。
+        idx = self._insert_index(p, d["last_x"], d["last_y"], None)
+        snap = self._snapshot()
+        done = bool(sub.get("done"))
+        nt = {"id": new_id(), "title": sub["text"], "note": "", "p": p,
+              "due": "", "done": done, "order": now_ts(),
+              "subs": [], "logs": {}, "timer": 0, "repeat": "",
+              "done_at": now_ts() if done else 0, "remind_key": ""}
+        subs_of(src).remove(sub)
+        self.tasks.append(nt)
+        self._apply_drop(nt, p, idx)      # 顺便把那个象限重新编号
+        self.save()
+        self.redraw()
+        self._flash_undo("已把子任务「%s」提升成独立任务（%s %s）"
+                         % (ellipsis(nt["title"], 8),
+                            PRIO_BY_P[p]["key"], PRIO_BY_P[p]["act"]),
+                         lambda: self._restore_snapshot(snap))
+        return nt
+
+    def handle_click(self, kind, tid, e):
+        t = self.task_by_id(tid)
+        if not t:
+            return
+        if kind == "chk":
+            self.toggle_done(t)
+        elif kind == "prio":
+            self.popup_prio(t, e)
+        elif kind == "due":
+            self.ask_due(t)
+        elif kind == "timer":
+            self.toggle_timer(t)
+        elif kind == "rep":
+            self.popup_repeat(t, e)
+        elif kind == "note":
+            # 备注是空的：卡片上那行「＋ 备注」当按钮用，单击直接弹编辑框
+            # （光标预置在备注那栏）。已经有备注就不再抢单击了 —— 那一块归
+            # 双击就地编辑。
+            if not t["note"]:
+                self.ask_edit(t, focus="note")
+        elif kind and kind.startswith("sc:"):
+            self.toggle_sub(t, kind[3:])
+        # kind == "st:xxx" 是子任务文字：单击不做事，留给双击去编辑
+
+    def on_double(self, e):
+        cx, cy = self._canvas_xy(e)
+        kind, tid = self.hit(cx, cy)
+        if not kind:
+            return
+        # 子任务的文字区域用 "st:<子任务id>" 作为类型去找，见 open_editor
+        if kind in ("title", "note") or kind.startswith("st:"):
+            t = self.task_by_id(tid)
+            if t:
+                # 【必须等这次双击事件彻底走完，再建那个输入框】
+                # 双击的第二次「按下」会同时发出 <Button-1> 和 <Double-Button-1>。
+                # 在这里就把输入框建好的话，同一次按下还会继续沿着 bindtags 走到
+                # root 上那条 <Button-1>（_maybe_commit_editor：点别处就提交），
+                # 而那一刻输入框刚 create_window、X 窗口还没映射，
+                # winfo_containing 查到的仍然是画布 —— 于是被判成"点到了别处"，
+                # 当场提交：编辑器一闪就没，看着像双击没反应，焦点还会掉回新增输入框。
+                # 甩到下一轮空闲（after_idle）再建，这次事件就再也碰不到它了。
+                self.root.after_idle(lambda: self.open_editor(t, kind))
+
+    def on_hover(self, e):
+        cx, cy = self._canvas_xy(e)
+        kind, tid = self.hit(cx, cy)
+        self.cv.configure(cursor="hand2" if tid else "")
+
+    def on_right(self, e):
+        cx, cy = self._canvas_xy(e)
+        kind, tid = self.hit(cx, cy)
+        t = self.task_by_id(tid) if tid else None
+        if not t:
+            self.show_canvas_menu(e)        # 点在空白处
+            return
+
+        # 点在子任务那一行上，弹子任务自己的菜单
+        if kind and (kind.startswith("sc:") or kind.startswith("st:")):
+            sid = kind[3:]
+            s = sub_by_id(t, sid)
+            if s:
+                subs = subs_of(t)
+                i = next((k for k, x in enumerate(subs) if x["id"] == sid), 0)
+                # 已经在头 / 尾的那一条，对应的方向就没得移了
+                up = "normal" if i > 0 else "disabled"
+                dn = "normal" if i < len(subs) - 1 else "disabled"
+                m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+                m.add_command(label="编辑文字…",
+                              command=lambda: self.open_editor(t, "st:" + sid))
+                m.add_command(label="标记完成 / 取消",
+                              command=lambda: self.toggle_sub(t, sid))
+                m.add_separator()
+                m.add_command(label="上移", state=up,
+                              command=lambda: self.move_sub(t, sid, -1))
+                m.add_command(label="下移", state=dn,
+                              command=lambda: self.move_sub(t, sid, +1))
+                m.add_command(label="提升成独立任务",
+                              command=lambda: self.promote_sub(t, sid))
+                m.add_separator()
+                m.add_command(label="删除这条子任务",
+                              command=lambda: self.del_sub(t, sid))
+                self._popup(m, x=e.x_root, y=e.y_root)
+                return
+
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        # 「编辑任务」放最前面：改标题（错别字）/ 备注是这条任务自己的内容，
+        # 和标题一样属于「第一层」信息，也是最高频的操作。
+        # 备注的编辑并进这个对话框了，菜单里只留一个「删除备注」的快手。
+        m.add_command(label="编辑任务…", command=lambda: self.ask_edit(t))
+        if t["note"]:
+            m.add_command(label="删除备注", command=lambda: self.del_note(t))
+        m.add_separator()
+        sub = tk.Menu(m, tearoff=0, font=F_SMALL)
+        for pr in PRIOS:
+            sub.add_command(label="%s %s · %s" % (pr["key"], pr["name"], pr["act"]),
+                            command=lambda i=pr["p"]: self.set_prio(t, i))
+        m.add_cascade(label="改优先级", menu=sub)
+        m.add_command(label="设置截止日期…", command=lambda: self.ask_due(t))
+        m.add_command(label="清除截止日期", command=lambda: self.set_due(t, ""))
+
+        rsub = tk.Menu(m, tearoff=0, font=F_SMALL)
+        for k, label, _badge in REPEATS:
+            rsub.add_command(
+                label=("● " if (t.get("repeat") or "") == k else "    ") + label,
+                command=lambda kk=k: self.set_repeat(t, kk))
+        m.add_cascade(label="重复：%s" % REPEAT_LABEL.get(t.get("repeat") or "", "不重复"),
+                      menu=rsub)
+
+        m.add_separator()
+        m.add_command(label="添加子任务…", command=lambda: self.ask_add_sub(t))
+        if subs_of(t):
+            s2 = tk.Menu(m, tearoff=0, font=F_SMALL)
+            s2.add_command(label="全部标记完成", command=lambda: self.set_all_subs(t, True))
+            s2.add_command(label="全部取消完成", command=lambda: self.set_all_subs(t, False))
+            s2.add_separator()
+            s2.add_command(label="清空子任务", command=lambda: self.clear_subs(t))
+            m.add_cascade(label="子任务 %d/%d" % (sub_done_n(t), len(subs_of(t))), menu=s2)
+
+        m.add_separator()
+        m.add_command(label=("暂停计时 · %s" % fmt_dur(spent_of(t))) if t.get("timer")
+                            else "开始计时",
+                      command=lambda: self.toggle_timer(t))
+        if spent_of(t) > 0:
+            m.add_command(label="清零耗时记录", command=lambda: self.reset_timer(t))
+
+        m.add_separator()
+        m.add_command(label="标记完成 / 取消", command=lambda: self.toggle_done(t))
+        m.add_command(label="删除（进回收站）", command=lambda: self.delete_task(t))
+        self._popup(m, x=e.x_root, y=e.y_root)
+
+    def show_canvas_menu(self, e):
+        """右键点在空白处。"""
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        m.add_command(label="新建任务（跳到输入框）", command=self.entry.focus_set)
+        m.add_command(label="耗时统计…", command=self.open_stats)
+        m.add_command(label="每日复盘…", command=self.open_review)
+        m.add_command(label="回收站…", command=self.open_trash)
+        m.add_separator()
+        m.add_command(label="清空已完成", command=self.do_clear_done)
+        self._popup(m, x=e.x_root, y=e.y_root)
+
+    # ============================================================ 操作
+
+    def do_add(self):
+        title = self.entry.get().strip()
+        if not title:
+            return
+        self.tasks.append({
+            "id": new_id(), "title": title, "note": "", "p": self.quick_p,
+            "due": "", "done": False, "order": now_ts(),
+            "subs": [], "logs": {}, "timer": 0,
+            "repeat": "", "done_at": 0, "remind_key": "",
+        })
+        self.entry.delete(0, "end")
+        self.save()
+        self.redraw()
+
+    def toggle_done(self, t):
+        t["done"] = not t["done"]
+        nxt = None
+        if t["done"]:
+            t["done_at"] = now_ts()
+            t["order"] = now_ts()
+            if t.get("timer"):          # 勾上完成就顺手停表，免得一直空转
+                self._stop_timer_data(t)
+            nxt = self._spawn_next(t)   # 重复任务：顺手把下一次排上
+        else:
+            t["done_at"] = 0
+        self.save()
+        self.redraw()
+        if nxt:
+            self.status.configure(
+                text="已完成「%s」，下一次已排到 %s"
+                     % (ellipsis(t["title"], 10), nxt["due"] or "（未设日期）"))
+
+    def set_repeat(self, t, r):
+        t["repeat"] = r if r in REPEAT_LABEL else ""
+        self.save()
+        self.redraw()
+        self.status.configure(text="重复：%s"
+                                   % REPEAT_LABEL.get(t["repeat"], "不重复"))
+
+    def _spawn_next(self, t):
+        """重复任务被勾完成时，复制一份「下一次」出来。
+
+        子任务结构照抄但全部重置为未完成；截止日期往后推一个周期。
+        原任务留在原地，当"这一轮已经做完"的历史记录。"""
+        rp = t.get("repeat") or ""
+        if not rp:
+            return None
+        nxt = {
+            "id": new_id(), "title": t["title"], "note": t["note"], "p": t["p"],
+            "due": next_date(t["due"], rp), "done": False,
+            "order": self._order_end(t["p"]),
+            "subs": [{"id": new_sid(), "text": s["text"], "done": False}
+                     for s in subs_of(t)],
+            "logs": {}, "timer": 0, "repeat": rp, "done_at": 0, "remind_key": "",
+        }
+        self.tasks.append(nxt)
+        return nxt
+
+    def _order_end(self, p):
+        """某个象限里「排到最后」用的 order。"""
+        xs = [x["order"] for x in self.tasks if x["p"] == p]
+        return (max(xs) + 1.0) if xs else 1.0
+
+    def set_prio(self, t, p):
+        t["p"] = p
+        t["order"] = now_ts()
+        self.save()
+        self.redraw()
+
+    def set_due(self, t, s):
+        if s:
+            if not s2d(s):
+                return                      # 非法格式直接忽略，保持原值
+            t["due"] = s
+        else:
+            t["due"] = ""
+        self.save()
+        self.redraw()
+
+    def delete_task(self, t, quiet=False):
+        """删除 = 移进回收站。所以删错了随时能捞回来（Ctrl+Z 或打开回收站）。"""
+        try:
+            self.tasks.remove(t)
+        except ValueError:
+            return
+        self._to_trash(t)
+        self.save()
+        self.redraw()
+        if not quiet:
+            self._flash_undo("已把「%s」移入回收站" % ellipsis(t["title"], 12),
+                             self.undo_delete)
+
+    def _to_trash(self, t):
+        """把任务整条搬进回收站，附上删除时间。超出上限就丢最旧的。"""
+        self.trash.append({"deleted_at": now_ts(), "task": t})
+        if len(self.trash) > TRASH_MAX:
+            self.trash = self.trash[-TRASH_MAX:]
+
+    def undo_delete(self):
+        """把回收站里最新的一条捞回来。"""
+        if not self.trash:
+            self.status.configure(text="没有可撤销的删除")
+            return None
+        t = self.trash.pop()["task"]
+        self.tasks.append(t)
+        self.save()
+        self.redraw()
+        self.status.configure(text="已恢复「%s」" % ellipsis(t["title"], 12))
+        return t
+
+    def undo_batch(self, n):
+        """一次捞回 n 条（撤销「清空已完成」用）。"""
+        got = 0
+        for _ in range(int(n)):
+            if not self.trash:
+                break
+            self.tasks.append(self.trash.pop()["task"])
+            got += 1
+        if got:
+            self.save()
+            self.redraw()
+            self.status.configure(text="已恢复 %d 条" % got)
+        return got
+
+    def do_clear_done(self):
+        gone = [x for x in self.tasks if x["done"]]
+        if not gone:
+            self.status.configure(text="没有已完成的条目")
+            return
+        for t in gone:
+            self.tasks.remove(t)
+            self._to_trash(t)
+        self.save()
+        self.redraw()
+        self._flash_undo("已把 %d 条已完成任务移入回收站" % len(gone),
+                         lambda n=len(gone): self.undo_batch(n))
+
+    # -------- 状态栏那个会自己消失的「撤销」按钮 --------
+
+    def _flash_undo(self, text, cb, ms=6000):
+        """在状态栏显示一条提示 + 一个「撤销」按钮，过一会儿自动收起。"""
+        self._undo_cb = cb
+        self.status.configure(text=text)
+        self.undo_btn.grid()
+        if self._undo_job:
+            try:
+                self.root.after_cancel(self._undo_job)
+            except Exception:
+                pass
+        self._undo_job = self.root.after(ms, self._clear_undo)
+
+    def _clear_undo(self):
+        self._undo_job = None
+        self._undo_cb = None
+        try:
+            self.undo_btn.grid_remove()
+        except Exception:
+            pass
+
+    def _do_undo(self):
+        cb = self._undo_cb
+        self._clear_undo()
+        if cb:
+            cb()
+
+    # -------- 计时 --------
+
+    def _stop_timer_data(self, t):
+        """把正在计时的那一段记账进 logs，并把 timer 归零。
+        只动数据，不存盘也不重绘 —— 方便被别的操作（比如勾完成）顺手调用。"""
+        st = t.get("timer") or 0
+        if not st:
+            return 0.0
+        el = max(0.0, now_ts() - st)
+        t["timer"] = 0
+        if el >= 1:
+            key = ts_day(st)        # 记在「开始那天」，跨午夜也不会算错日子
+            logs = t.setdefault("logs", {})
+            logs[key] = logs.get(key, 0.0) + el
+        return el
+
+    def toggle_timer(self, t):
+        if t.get("timer"):
+            el = self._stop_timer_data(t)
+            self.save()
+            self.redraw()
+            self.status.configure(text="已暂停：本次 %s · 累计 %s"
+                                       % (fmt_dur(el), fmt_dur(spent_of(t))))
+        else:
+            t["timer"] = now_ts()
+            self.save()
+            self.redraw()
+            self.status.configure(text="开始计时：%s" % t["title"])
+
+    def reset_timer(self, t):
+        t["timer"] = 0
+        t["logs"] = {}
+        self.save()
+        self.redraw()
+        self.status.configure(text="已清零该任务的耗时记录")
+
+    def commit_timers(self):
+        """退出前把所有还在跑的计时落账，免得白计。"""
+        n = 0
+        for t in self.tasks:
+            if t.get("timer"):
+                self._stop_timer_data(t)
+                n += 1
+        return n
+
+    def _tick(self):
+        """心跳：有任务在计时时，每 HEARTBEAT_MS 刷一次界面让时长往上走。
+        编辑中和拖拽中必须跳过 —— redraw 会清空画布，把输入框和
+        被托起来的卡片一起抹掉。"""
+        try:
+            live = [t for t in self.tasks if t.get("timer")]
+            if live and not self.drag and not self.editor:
+                self.redraw()
+            w = self._stats_win
+            if live and w is not None and w.winfo_exists():
+                self._render_stats()
+            # 顺便看看有没有到点的任务。这一步极轻（只比日期），
+            # 但也没必要每 15 秒做一次，按 REMIND_MS 节流。
+            if now_ts() - self._last_remind_check >= REMIND_MS / 1000.0:
+                self._last_remind_check = now_ts()
+                self._maybe_remind()
+        except Exception:
+            pass
+        self.root.after(HEARTBEAT_MS, self._tick)
+
+    # -------- 子任务 --------
+
+    def toggle_sub(self, t, sid):
+        s = sub_by_id(t, sid)
+        if not s:
+            return
+        s["done"] = not s["done"]
+        self.save()
+        self.redraw()
+        self.status.configure(text="子任务 %d/%d 已完成"
+                                   % (sub_done_n(t), len(subs_of(t))))
+
+    def add_subs(self, t, lines):
+        """lines 可以是多行文本，一行算一条子任务。"""
+        subs = t.setdefault("subs", [])
+        added = 0
+        for ln in lines:
+            txt = str(ln).strip()
+            if txt:
+                subs.append({"id": new_sid(), "text": txt, "done": False})
+                added += 1
+        if added:
+            self.save()
+            self.redraw()
+            self.status.configure(text="已添加 %d 条子任务" % added)
+        return added
+
+    def del_sub(self, t, sid):
+        subs = t.setdefault("subs", [])
+        for i, s in enumerate(subs):
+            if s["id"] == sid:
+                subs.pop(i)
+                break
+        self.save()
+        self.redraw()
+
+    def nest_task(self, t, target, ask=True):
+        """把任务 t 变成 target 的子任务（把卡片拖到别人卡片上半张就会走这里）。
+
+        子任务只有一层，所以 t 自己带的子任务会被**摊平成同级**、备注和计时记录
+        会丢 —— 这些信息一旦有，就先弹个确认框问一句，别默默吃掉。
+        """
+        if not t or not target or t is target:
+            return False
+        subs = subs_of(t)
+        lost = []
+        if subs:
+            lost.append("%d 条子任务会摊平成同级" % len(subs))
+        if t.get("note"):
+            lost.append("备注会丢掉")
+        if spent_of(t) > 0 or t.get("timer"):
+            lost.append("计时记录会丢掉")
+        if t.get("repeat"):
+            lost.append("重复设置会丢掉")
+        if lost and ask:
+            if not tkmb.askyesno(
+                    "变成子任务",
+                    "把「%s」变成「%s」的子任务？\n\n%s。"
+                    % (ellipsis(t["title"], 12), ellipsis(target["title"], 12),
+                       "、".join(lost)),
+                    parent=self.root):
+                return False
+        snap = self._snapshot()
+        self._stop_timer_data(t)               # 先把计时收掉，别留个孤儿 timer
+        dst = target.setdefault("subs", [])
+        dst.append({"id": new_sid(), "text": t["title"], "done": bool(t["done"])})
+        for s in subs:
+            dst.append({"id": new_sid(), "text": s["text"],
+                        "done": bool(s.get("done"))})
+        try:
+            self.tasks.remove(t)
+        except ValueError:
+            return False
+        self.save()
+        self.redraw()
+        more = ("（卡面只显示前 %d 条，其余看计数）" % SUB_MAX) if len(dst) > SUB_MAX else ""
+        self._flash_undo("已把「%s」变成「%s」的子任务%s"
+                         % (ellipsis(t["title"], 10), ellipsis(target["title"], 10), more),
+                         lambda: self._restore_snapshot(snap))
+        return True
+
+    def promote_sub(self, t, sid):
+        """把子任务提升成独立任务，落在父任务那个象限、紧跟父任务后面。
+
+        嵌套是单向门的话就太坑了（进得去出不来），所以必须有这一条。
+        """
+        subs = subs_of(t)
+        s = sub_by_id(t, sid)
+        if not s:
+            return None
+        snap = self._snapshot()
+        done = bool(s.get("done"))
+        nt = {"id": new_id(), "title": s["text"], "note": "", "p": t["p"],
+              "due": "", "done": done, "order": t["order"] + 0.5,
+              "subs": [], "logs": {}, "timer": 0, "repeat": "",
+              "done_at": now_ts() if done else 0, "remind_key": ""}
+        subs.remove(s)
+        self.tasks.append(nt)
+        # 重新编号这一组：+0.5 这种插法越用越密，顺手平一次
+        for i, x in enumerate(sorted([x for x in self.tasks if x["p"] == t["p"]],
+                                     key=self.sort_key)):
+            x["order"] = float(i)
+        self.save()
+        self.redraw()
+        self._flash_undo("已把「%s」提升成独立任务" % ellipsis(nt["title"], 10),
+                         lambda: self._restore_snapshot(snap))
+        return nt
+
+    def move_sub(self, t, sid, delta):
+        """子任务上移 / 下移一格（右键菜单用的，比拖拽稳）。"""
+        subs = subs_of(t)
+        i = next((k for k, s in enumerate(subs) if s["id"] == sid), None)
+        if i is None:
+            return
+        j = i + delta
+        if not (0 <= j < len(subs)):
+            return
+        snap = self._snapshot()
+        subs[i], subs[j] = subs[j], subs[i]
+        self.save()
+        self.redraw()
+        self._flash_undo("子任务顺序已调整", lambda: self._restore_snapshot(snap))
+
+    def _snapshot(self):
+        """改动前的整份任务列表。嵌套 / 提升 / 重排这类结构性改动整体还原最稳
+        —— 逐条记「删了什么、加了什么」太容易漏。任务本来就是纯 JSON，
+        round-trip 一下就得到互不干扰的深拷贝。"""
+        return json.loads(json.dumps(self.tasks))
+
+    def _restore_snapshot(self, snap):
+        self.tasks = json.loads(json.dumps(snap))
+        self.save()
+        self.redraw()
+        self.status.configure(text="已撤销")
+
+    def set_all_subs(self, t, val):
+        for s in subs_of(t):
+            s["done"] = bool(val)
+        self.save()
+        self.redraw()
+
+    def clear_subs(self, t):
+        t["subs"] = []
+        self.save()
+        self.redraw()
+
+    def ask_add_sub(self, t):
+        """多行输入，方便一次把几件事粘进来。"""
+        dlg = tk.Toplevel(self.root)
+        dlg.title("添加子任务")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        self._follow_top(dlg)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="一行一条；也可以从别处复制多行直接粘进来",
+                 font=F_SMALL, bg=C_BG, fg=C_INK2).pack(anchor="w", padx=18, pady=(16, 5))
+        txt = tk.Text(dlg, font=F_BODY, width=36, height=6, bg=C_WHITE, fg=C_INK,
+                      relief="flat", highlightthickness=1, highlightbackground=C_LINE,
+                      highlightcolor="#c0ae8e", insertbackground=C_INK, wrap="word")
+        txt.pack(padx=18)
+        txt.focus_set()
+
+        def ok(_e=None):
+            lines = txt.get("1.0", "end").splitlines()
+            dlg.destroy()
+            self.add_subs(t, lines)
+
+        tk.Label(dlg, text="Ctrl+回车 提交", font=F_SMALL, bg=C_BG, fg=C_INK3)\
+            .pack(anchor="w", padx=18, pady=(5, 0))
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18, pady=(8, 16))
+        self._btn(bar, "添加", ok, primary=True).pack(side="right")
+        self._btn(bar, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
+        txt.bind("<Control-Return>", ok)
+
+        dlg.update_idletasks()
+        px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        py = self.root.winfo_y() + 140
+        dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
+
+    def popup_prio(self, t, e):
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        for pr in PRIOS:
+            m.add_command(label="%s %s · %s" % (pr["key"], pr["name"], pr["act"]),
+                          command=lambda i=pr["p"]: self.set_prio(t, i))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def popup_repeat(self, t, e):
+        """点卡片上那个重复小徽章时弹出来。"""
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        for k, label, _badge in REPEATS:
+            m.add_command(label=("● " if (t.get("repeat") or "") == k else "    ") + label,
+                          command=lambda kk=k: self.set_repeat(t, kk))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+
+    def ask_due(self, t):
+        dlg = tk.Toplevel(self.root)
+        dlg.title("设置截止日期")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        self._follow_top(dlg)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="日期格式  2026-10-15", font=F_SMALL, bg=C_BG, fg=C_INK2)\
+            .pack(anchor="w", padx=18, pady=(16, 4))
+        ent = tk.Entry(dlg, font=F_BODY, width=22, bg=C_WHITE, relief="flat",
+                       highlightthickness=1, highlightbackground=C_LINE,
+                       highlightcolor="#c0ae8e", insertbackground=C_INK)
+        ent.pack(padx=18, ipady=5)
+        ent.insert(0, t.get("due", ""))
+        ent.focus_set()
+        ent.select_range(0, "end")
+
+        err = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
+        err.pack(anchor="w", padx=18)
+
+        def apply(val):
+            if val and not s2d(val):
+                err.configure(text="格式不对，应为 2026-10-15")
+                return
+            self.set_due(t, val)
+            dlg.destroy()
+
+        def quick(days):
+            apply(d2s(today() + datetime.timedelta(days=days)))
+
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18, pady=(8, 4))
+        self._btn(bar, "今天", lambda: quick(0)).pack(side="left", padx=(0, 6))
+        self._btn(bar, "明天", lambda: quick(1)).pack(side="left", padx=(0, 6))
+        self._btn(bar, "本周末", lambda: quick((5 - today().weekday()) % 7 or 7)).pack(side="left", padx=(0, 6))
+        self._btn(bar, "清除", lambda: apply("")).pack(side="left")
+
+        bar2 = tk.Frame(dlg, bg=C_BG)
+        bar2.pack(fill="x", padx=18, pady=(4, 16))
+        self._btn(bar2, "确定", lambda: apply(ent.get().strip()), primary=True).pack(side="right")
+        self._btn(bar2, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
+        ent.bind("<Return>", lambda e: apply(ent.get().strip()))
+
+        dlg.update_idletasks()
+        px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        py = self.root.winfo_y() + 160
+        dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
+
+    def set_title(self, t, txt):
+        """改标题。空标题会被忽略 —— 卡片没了标题就没法认了。
+        就地编辑（双击）和「编辑任务」对话框都走这里，标题只有一个落库出口。"""
+        txt = (txt or "").strip()
+        if not txt or txt == t["title"]:
+            return
+        t["title"] = txt
+        self.save()
+        self.redraw()
+
+    def ask_edit(self, t, focus="title"):
+        """编辑一条任务：标题 + 备注 一起改。
+
+        `focus` 决定光标先落在哪个框 —— 卡片上点那行「＋ 备注」时传 "note"，
+        从右键菜单进来就落在标题上（错别字是第一诉求）。
+
+        按键：回车 = 保存（两个框都是），Shift+回车 = 备注换行，Esc = 取消。
+
+        这里【不】单独做「改优先级 / 截止日期」，那些卡片上有更快的入口
+        （拖拽换象限、点药丸、右键各自的菜单），塞进这个框反而绕远。
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("编辑任务")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        self._follow_top(dlg)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="标题", font=F_SMALL, bg=C_BG, fg=C_INK2)\
+            .pack(anchor="w", padx=18, pady=(16, 3))
+        ent = tk.Entry(dlg, font=F_BODY, width=40, bg=C_WHITE, fg=C_INK, relief="flat",
+                       highlightthickness=1, highlightbackground=C_LINE,
+                       highlightcolor="#c0ae8e", insertbackground=C_INK)
+        ent.pack(padx=18, ipady=5, fill="x")
+        ent.insert(0, t["title"])
+
+        tk.Label(dlg, text="备注", font=F_SMALL, bg=C_BG, fg=C_INK2)\
+            .pack(anchor="w", padx=18, pady=(10, 3))
+        txt = tk.Text(dlg, font=F_BODY, width=40, height=4, bg=C_WHITE, fg=C_INK,
+                      relief="flat", highlightthickness=1, highlightbackground=C_LINE,
+                      highlightcolor="#c0ae8e", insertbackground=C_INK, wrap="word")
+        txt.pack(padx=18)
+        if t["note"]:
+            txt.insert("1.0", t["note"])
+
+        err = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
+        err.pack(anchor="w", padx=18)
+        tk.Label(dlg, text="回车 = 保存 · Shift+回车 = 换行 · 备注留空则删除",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18)
+
+        def save(_e=None):
+            title = ent.get().strip()
+            if not title:                 # 标题不允许为空，留在框里让用户改
+                err.configure(text="标题不能为空")
+                ent.focus_set()
+                return
+            note = txt.get("1.0", "end").strip()
+            dlg.destroy()
+            self.set_title(t, title)
+            self.set_note(t, note)
+            self.status.configure(text="已保存「%s」的修改" % ellipsis(title, 12))
+
+        def drop():
+            dlg.destroy()
+            self.del_note(t)
+
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18, pady=(8, 16))
+        self._btn(bar, "保存", save, primary=True).pack(side="right")
+        self._btn(bar, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
+        if t["note"]:
+            self._btn(bar, "删除备注", drop).pack(side="left")
+        def save_ret(_e=None):
+            """备注框里按回车 = 保存。返回 "break" 挡掉 Text 自带的换行行为。"""
+            save()
+            return "break"
+
+        def newline(_e=None):
+            """Shift+回车 = 真换行。备注还是得多行才够用，不能只会保存。"""
+            txt.insert("insert", "\n")
+            return "break"
+
+        ent.bind("<Return>", save)            # 标题框：回车保存
+        txt.bind("<Return>", save_ret)        # 备注框：回车也保存（只有按钮太别扭）
+        txt.bind("<Shift-Return>", newline)   # 备注框：Shift+回车换行
+        dlg.bind("<Escape>", lambda e: dlg.destroy())   # Esc = 取消，不保存
+
+        dlg.update_idletasks()
+        px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        py = self.root.winfo_y() + 110
+        dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
+        if focus == "note":
+            txt.focus_set()
+            txt.mark_set("insert", "end-1c")
+        else:
+            ent.focus_set()
+            ent.select_range(0, "end")
+
+    def set_note(self, t, txt):
+        """改备注（空字符串就是删掉）。保存 / 重画都走这里，和就地编辑同一个出口。
+
+        换行统一成 \\n：aardio 的 edit 交出来的是 \\r\\n，而两版共用一份
+        tasks.json —— 不统一的话对面的卡片上会多出一个看不见的 \\r。
+        """
+        old = t["note"]
+        txt = (txt or "").replace("\r\n", "\n").replace("\r", "\n")
+        if txt == old:
+            return
+        t["note"] = txt
+        self.save()
+        self.redraw()
+        if txt:
+            self.status.configure(text="已保存「%s」的备注" % ellipsis(t["title"], 10))
+        else:
+            self.status.configure(text="已删除「%s」的备注" % ellipsis(t["title"], 10))
+
+    def del_note(self, t):
+        """删备注，并留一个撤销入口 —— 备注是手写的内容，误删了要能马上捞回来。"""
+        tid, old = t["id"], t["note"]
+        if not old:
+            return
+        t["note"] = ""
+        self.save()
+        self.redraw()
+
+        def undo():
+            tt = self.task_by_id(tid)      # 任务对象可能已被替换，按 id 现取
+            if tt:
+                self.set_note(tt, old)
+        self._flash_undo("已删除「%s」的备注" % ellipsis(t["title"], 10), undo)
+
+    # ============================================================ 就地编辑
+
+    def open_editor(self, t, field):
+        if self.editor:
+            self._commit_editor()
+
+        # field 同时也是 regions 里的「类型」：
+        #   "title" / "note"        → 任务自己的字段
+        #   "st:<子任务id>"          → 某一条子任务的文字
+        box, font, val = None, F_BODY, t["note"]
+        for kind, tid, x1, y1, x2, y2 in reversed(self.regions):
+            if kind == field and tid == t["id"]:
+                box = (x1, y1, x2, y2)
+                break
+        if not box:
+            return
+        if field == "title":
+            font, val = F_TITLE, t["title"]
+        elif field.startswith("st:"):
+            s = sub_by_id(t, field[3:])
+            if not s:
+                return
+            font, val = F_SUB, s["text"]
+
+        x1, y1, x2, y2 = box
+        h = max(24, y2 - y1)
+        ent = tk.Entry(self.cv, font=font, bg=C_WHITE, fg=C_INK, relief="flat",
+                       highlightthickness=2, highlightbackground="#c0ae8e",
+                       highlightcolor="#a9967a", insertbackground=C_INK)
+        win = self.cv.create_window(x1 + 2, y1 + 1, window=ent, anchor="nw",
+                                    width=max(40, x2 - x1 - 4), height=h, tags="editor")
+        ent.insert(0, val)
+        ent.focus_set()
+        ent.select_range(0, "end")
+        self.editor = {"t": t, "field": field, "entry": ent, "win": win}
+
+        ent.bind("<Return>", lambda e: self._commit_editor())
+        ent.bind("<Escape>", lambda e: self.cancel_editor())
+        # 注意：这里故意【不】绑 FocusOut 来提交。
+        # 实测发现：当窗口本身还没拿到系统焦点时（比如程序刚启动、或者被
+        # 别的窗口压着），输入框一建好就会收到一次「假的」FocusOut，于是
+        # 编辑器刚打开就被自动提交，闪一下就没了。改成「点到输入框以外的
+        # 地方就提交」，见 _maybe_commit_editor —— 行为可预测，也测得住。
+        #
+        # 另外：进门的路有两条。菜单点进来的是直接调用，立刻建；
+        # 双击卡片进来的由 on_double 用 after_idle 延后一轮 —— 那是为了躲开
+        # 同一次「按下」里的那条提交检查，原因写在那个 after_idle 上面。
+
+    def _maybe_commit_editor(self, e):
+        """点到输入框以外的任何地方，就把就地编辑的内容提交掉。"""
+        if not self.editor:
+            return
+        try:
+            under = self.root.winfo_containing(e.x_root, e.y_root)
+        except Exception:
+            under = None
+        if under is not None and under is self.editor["entry"]:
+            return                      # 点在输入框自己身上，继续编辑
+        self._commit_editor()
+
+    def _commit_editor(self):
+        """保存并关闭就地编辑器。返回 True 表示确实提交了内容。"""
+        ed = self.editor
+        if not ed:
+            return False
+        txt = ed["entry"].get().strip()
+        t, field = ed["t"], ed["field"]
+        self.editor = None
+        self.cv.delete("editor")
+        if field == "title":
+            self.set_title(t, txt)        # 空标题会被忽略，保持原样
+            return True                   # set_title 里已经 save + redraw 过了
+        if field == "note":
+            self.set_note(t, txt)         # 备注只走这一个落库出口（含换行归一化）
+            return True
+        if field.startswith("st:"):
+            s = sub_by_id(t, field[3:])
+            if s:
+                if txt:
+                    s["text"] = txt
+                else:                     # 子任务文字清空 = 删掉这条
+                    subs = t.setdefault("subs", [])
+                    for i, x in enumerate(subs):
+                        if x["id"] == s["id"]:
+                            subs.pop(i)
+                            break
+        self.save()
+        self.redraw()
+        return True
+
+    def cancel_editor(self):
+        if self.editor:
+            self.editor = None
+            self.cv.delete("editor")
+            self.cv.focus_set()
+
+    # ============================================================ 回收站
+
+    def trash_text(self, i):
+        """把回收站第 i 条渲染成一行文字。"""
+        it = self.trash[i]
+        t = it["task"]
+        ts = _norm_num(it.get("deleted_at"))
+        when = datetime.datetime.fromtimestamp(ts).strftime("%m-%d %H:%M") if ts else "  --  "
+        return "  %s   %s%s" % (when, ellipsis(t["title"], 20),
+                                "   （已完成）" if t.get("done") else "")
+
+    def open_trash(self):
+        w = self._trash_win
+        if w is not None and w.winfo_exists():
+            w.lift()
+            self._fill_trash()
+            return
+        w = tk.Toplevel(self.root)
+        w.title("回收站")
+        w.configure(bg=C_BG)
+        self._follow_top(w)
+        w.minsize(380, 320)
+        w.geometry("430x420")
+        self._trash_win = w
+
+        tk.Label(w, text="删掉的任务先放进这里，随时能捞回来。",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3, anchor="w")\
+            .pack(fill="x", padx=16, pady=(14, 6))
+
+        wrap = tk.Frame(w, bg=C_BG)
+        wrap.pack(fill="both", expand=True, padx=16)
+        self._trash_list = tk.Listbox(
+            wrap, font=F_BODY, bg=C_WHITE, fg=C_INK, relief="flat",
+            highlightthickness=1, highlightbackground=C_LINE,
+            selectbackground="#dcd3c2", selectforeground=C_INK,
+            activestyle="none", bd=0)
+        self._trash_list.pack(side="left", fill="both", expand=True)
+        sb = tk.Scrollbar(wrap, orient="vertical", command=self._trash_list.yview,
+                          width=12, troughcolor=C_BG, relief="flat", bd=0)
+        sb.pack(side="right", fill="y")
+        self._trash_list.configure(yscrollcommand=sb.set)
+        self._trash_list.bind("<Double-Button-1>", lambda e: self.trash_restore())
+
+        bar = tk.Frame(w, bg=C_BG)
+        bar.pack(fill="x", padx=16, pady=(10, 14))
+        self._btn(bar, "恢复选中", self.trash_restore).pack(side="left", padx=(0, 7))
+        self._btn(bar, "彻底删除", self.trash_purge).pack(side="left", padx=(0, 7))
+        self._btn(bar, "清空回收站", self.trash_empty).pack(side="left")
+        self._btn(bar, "关闭", w.destroy).pack(side="right")
+
+        self._fill_trash()
+        w.update_idletasks()
+        px = self.root.winfo_x() + self.root.winfo_width() - w.winfo_reqwidth() - 40
+        py = self.root.winfo_y() + 130
+        w.geometry("+%d+%d" % (max(0, px), max(0, py)))
+
+    def _fill_trash(self):
+        lb = getattr(self, "_trash_list", None)
+        if lb is None or not lb.winfo_exists():
+            return
+        lb.delete(0, "end")
+        if not self.trash:
+            lb.insert("end", "   （回收站是空的）")
+            return
+        for i in range(len(self.trash)):
+            lb.insert("end", self.trash_text(i))
+
+    def _trash_sel(self):
+        lb = getattr(self, "_trash_list", None)
+        if lb is None or not lb.winfo_exists():
+            return []
+        return [i for i in lb.curselection() if 0 <= i < len(self.trash)]
+
+    def trash_restore(self):
+        sel = self._trash_sel()
+        if not sel:
+            self.status.configure(text="先在列表里点一条，再点「恢复选中」")
+            return 0
+        for i in sorted(sel, reverse=True):
+            self.tasks.append(self.trash.pop(i)["task"])
+        self.save()
+        self.redraw()
+        self._fill_trash()
+        self.status.configure(text="已恢复 %d 条" % len(sel))
+        return len(sel)
+
+    def trash_purge(self):
+        """彻底删除 —— 到这一步才真的不可挽回，所以要问一句。"""
+        sel = self._trash_sel()
+        if not sel:
+            self.status.configure(text="先在列表里选要彻底删除的条目")
+            return
+        if not tkmb.askyesno("彻底删除",
+                             "这 %d 条会被真正删掉，之后无法恢复。\n继续吗？" % len(sel),
+                             parent=self._trash_win):
+            return
+        for i in sorted(sel, reverse=True):
+            self.trash.pop(i)
+        self.save()
+        self._fill_trash()
+
+    def trash_empty(self):
+        if not self.trash:
+            self.status.configure(text="回收站本来就是空的")
+            return
+        if not tkmb.askyesno("清空回收站",
+                             "回收站里的 %d 条会被真正删掉，之后无法恢复。\n继续吗？"
+                             % len(self.trash), parent=self._trash_win):
+            return
+        self.trash = []
+        self.save()
+        self._fill_trash()
+        self.status.configure(text="回收站已清空")
+
+    # ============================================================ 使用帮助
+
+    def open_help(self):
+        """使用帮助窗。第一次用的人（比如拷给朋友的电脑）得有个地方能自学。
+
+        做成**可滚动的只读 Text**，不画在画布上：文案有 70 多行，Text 自带
+        换行 / 滚动 / 选中复制 —— 别人问「怎么备份」时能直接把那段复制给他。
+        只读（state="disabled"）不影响选中和复制，但挡住误改。
+        """
+        w = self._help_win
+        if w is not None and w.winfo_exists():
+            w.deiconify()          # 可能被最小化过
+            w.lift()
+            w.focus_set()
+            return w
+
+        w = tk.Toplevel(self.root)
+        w.title("使用帮助")
+        w.configure(bg=C_BG)
+        self._follow_top(w)        # 主窗置顶时它得跟着，否则会被压在后面
+        w.minsize(520, 400)
+        self._help_win = w
+        w.protocol("WM_DELETE_WINDOW", w.destroy)
+
+        head = tk.Frame(w, bg=C_TOP)
+        head.pack(fill="x")
+        tk.Label(head, text="照着自己的需要看就行，不用一次读完",
+                 font=F_SMALL, bg=C_TOP, fg=C_INK3)\
+            .pack(side="left", padx=14, pady=9)
+        tk.Frame(w, bg=C_LINE, height=1).pack(fill="x")
+
+        body = tk.Frame(w, bg=C_WHITE)
+        body.pack(fill="both", expand=True)
+
+        sb = tk.Scrollbar(body, orient="vertical", width=12, troughcolor=C_WHITE,
+                          bg="#d9d3c7", activebackground="#c4bdaf",
+                          relief="flat", bd=0)
+        sb.pack(side="right", fill="y")
+
+        # tabs=(150,) 是给 "k" 那种两列条目对齐用的：左边名字从 18px 起，
+        # Tab 跳到 150px，右列再长也会在 166px 处折行对齐。
+        txt = tk.Text(body, font=F_BODY, bg=C_WHITE, fg=C_INK, relief="flat", bd=0,
+                      wrap="word", padx=18, pady=14, cursor="arrow",
+                      highlightthickness=0, spacing1=1, spacing3=4,
+                      yscrollcommand=sb.set, tabs=(150,))
+        txt.pack(side="left", fill="both", expand=True)
+        sb.configure(command=txt.yview)
+        self._help_text = txt
+
+        txt.tag_configure("h1", font=F_H1, foreground=C_INK, spacing1=2, spacing3=14)
+        txt.tag_configure("h2", font=F_H2, foreground=C_INK, spacing1=16, spacing3=6)
+        txt.tag_configure("p",  font=F_BODY, foreground=C_INK2, spacing1=2, spacing3=6)
+        txt.tag_configure("n",  font=F_BODY, foreground=C_INK,
+                          lmargin1=18, lmargin2=30, spacing3=3)
+        txt.tag_configure("k",  font=F_BODY, foreground=C_INK2,
+                          lmargin1=18, lmargin2=166, spacing3=3)
+        txt.tag_configure("kb", font=F_TINY, foreground=C_INK)
+
+        for sec in HELP_SECTIONS:
+            kind = sec[0]
+            if kind == "k":
+                name, desc = sec[1]          # "k" 带的是 (名字, 解释) 这一对
+                txt.insert("end", name, ("k", "kb"))
+                txt.insert("end", "\t" + desc + "\n", "k")
+            else:
+                txt.insert("end", sec[1] + "\n", kind)
+
+        txt.configure(state="disabled")    # 只读，但照样能选中复制
+        txt.see("1.0")
+
+        foot = tk.Frame(w, bg=C_TOP)
+        foot.pack(fill="x", side="bottom")
+        tk.Frame(foot, bg=C_LINE, height=1).pack(fill="x")
+        bar = tk.Frame(foot, bg=C_TOP)
+        bar.pack(fill="x", padx=14, pady=8)
+        tk.Label(bar, text="数据文件：%s" % DATA_FILE, font=F_SMALL,
+                 bg=C_TOP, fg=C_INK3, anchor="w").pack(side="left")
+        self._btn(bar, "关闭", w.destroy).pack(side="right")
+
+        w.bind("<Escape>", lambda e: w.destroy())
+
+        # 弹在右上角：不挡住卡片区，也不跟统计 / 复盘面板叠在同一条竖线上。
+        # **必须收一下边**：主窗最大化时它可比屏幕还宽，直接按公式放会把帮助窗
+        # 推出屏幕外（右半截看不见）。
+        # ★ 收边要用**主窗所在那块显示器**的工作区（screen_areas），不是
+        #   winfo_screenwidth —— 那报的是主屏尺寸。主窗在副屏时，按主屏宽度收边
+        #   会把帮助窗整个拽回主屏：看着就是「帮助没跟着软件走，跑到另一块屏上」。
+        w.update_idletasks()
+        rx = self.root.winfo_x() + self.root.winfo_width()
+        _full, (wl, wt, wr, wb) = screen_areas(self.root)
+        pw, ph = w.winfo_reqwidth(), w.winfo_reqheight()
+        px = min(rx - pw - 40, wr - pw - 16)
+        py = min(self.root.winfo_y() + 70, wb - ph - 56)
+        w.geometry("+%d+%d" % (max(wl + 8, px), max(wt + 8, py)))
+        w.focus_set()
+        return w
+
+    # ============================================================ 耗时统计面板
+
+    def _period_keys(self, period):
+        """这个口径包含哪些日期。返回 None 表示「全部，不做日期过滤」。"""
+        T = today()
+        if period == "today":
+            return {d2s(T)}
+        if period == "week":
+            mon = T - datetime.timedelta(days=T.weekday())
+            return {d2s(mon + datetime.timedelta(days=i))
+                    for i in range((T - mon).days + 1)}
+        if period == "d7":
+            return {d2s(T - datetime.timedelta(days=i)) for i in range(7)}
+        return None
+
+    def _secs_of(self, t, keys, now=None):
+        """任务在指定日期集合里花了多少秒。计时中的那段按「开始那天」归入。"""
+        now = now or now_ts()
+        sec = 0.0
+        for k, v in (t.get("logs") or {}).items():
+            if keys is None or k in keys:
+                sec += _norm_num(v)
+        st = t.get("timer") or 0
+        if st and (keys is None or ts_day(st) in keys):
+            sec += max(0.0, now - st)
+        return sec
+
+    def _day_totals(self, now=None):
+        """按日期汇总所有任务的耗时。正在计时的那一段也要算进来（归入
+        开始那天），否则「按天分布」的合计会和上面的「总投入」对不上。"""
+        now = now or now_ts()
+        day = {}
+        for t in self.tasks:
+            for k, v in (t.get("logs") or {}).items():
+                day[k] = day.get(k, 0.0) + _norm_num(v)
+            st = t.get("timer") or 0
+            if st:
+                k = ts_day(st)
+                day[k] = day.get(k, 0.0) + max(0.0, now - st)
+        return day
+
+    def open_stats(self):
+        w = self._stats_win
+        if w is not None and w.winfo_exists():
+            w.lift()
+            self._render_stats()
+            return
+
+        w = tk.Toplevel(self.root)
+        w.title("耗时统计")
+        w.configure(bg=C_BG)
+        self._follow_top(w)
+        w.minsize(410, 400)
+        self._stats_win = w
+
+        bar = tk.Frame(w, bg=C_TOP)
+        bar.pack(fill="x")
+        inner = tk.Frame(bar, bg=C_TOP)
+        inner.pack(fill="x", padx=14, pady=10)
+        tk.Label(inner, text="口径", font=F_SMALL, bg=C_TOP, fg=C_INK3)\
+            .pack(side="left", padx=(0, 8))
+        self._pbtns = {}
+        for k, label in PERIODS:
+            b = self._btn(inner, label, lambda kk=k: self.set_stats_period(kk))
+            b.pack(side="left", padx=(0, 6))
+            self._pbtns[k] = b
+        tk.Frame(w, bg=C_LINE, height=1).pack(fill="x")
+
+        self._stats_body = tk.Frame(w, bg=C_BG)
+        self._stats_body.pack(fill="both", expand=True)
+        self._render_stats()
+
+        w.update_idletasks()
+        px = self.root.winfo_x() + self.root.winfo_width() - w.winfo_reqwidth() - 40
+        py = self.root.winfo_y() + 90
+        w.geometry("+%d+%d" % (max(0, px), max(0, py)))
+
+    def set_stats_period(self, k):
+        self._stats_period = k
+        self._render_stats()
+
+    def _render_stats(self):
+        body = getattr(self, "_stats_body", None)
+        if body is None or not body.winfo_exists():
+            return
+        for c in body.winfo_children():
+            c.destroy()
+        for k, b in getattr(self, "_pbtns", {}).items():     # 高亮当前口径
+            on = (k == self._stats_period)
+            b.configure(bg=(C_INK if on else C_WHITE),
+                        fg=("#ffffff" if on else C_INK),
+                        activebackground=(C_INK if on else "#f2eee6"),
+                        activeforeground=("#ffffff" if on else C_INK))
+
+        now = now_ts()
+        keys = self._period_keys(self._stats_period)
+        per = [self._secs_of(t, keys, now) for t in self.tasks]
+        total = sum(per)
+
+        pad = tk.Frame(body, bg=C_BG)
+        pad.pack(fill="both", expand=True, padx=16, pady=(14, 16))
+
+        # ---- 总览 ----
+        head = tk.Frame(pad, bg=C_BG)
+        head.pack(fill="x")
+        tk.Label(head, text=fmt_dur(total), font=("Microsoft YaHei UI", -30, "bold"),
+                 bg=C_BG, fg=C_INK).pack(side="left")
+        info = tk.Frame(head, bg=C_BG)
+        info.pack(side="left", padx=(12, 0), pady=(10, 0))
+        tk.Label(info, text="总投入", font=F_SMALL, bg=C_BG, fg=C_INK3, anchor="w")\
+            .pack(anchor="w")
+        tk.Label(info, text="%d 个任务有记录" % len([x for x in per if x > 0]),
+                 font=F_SMALL, bg=C_BG, fg=C_INK2, anchor="w").pack(anchor="w")
+
+        done_n = len([t for t in self.tasks if t["done"]])
+        tk.Label(pad, text="整体：已完成 %d · 未完成 %d · 子任务 %d/%d"
+                           % (done_n, len(self.tasks) - done_n,
+                              sum(sub_done_n(t) for t in self.tasks),
+                              sum(len(subs_of(t)) for t in self.tasks)),
+                 font=F_SMALL, bg=C_BG, fg=C_INK3, anchor="w")\
+            .pack(fill="x", pady=(10, 0))
+        tk.Frame(pad, bg=C_LINE, height=1).pack(fill="x", pady=(12, 0))
+
+        # ---- 按象限 ----
+        q_sec = [sum(per[i] for i, t in enumerate(self.tasks) if t["p"] == pr["p"])
+                 for pr in PRIOS]
+        qmax = max([0.0001] + q_sec)
+        self._stats_title(pad, "时间花在哪一类")
+        self._stats_rows(pad, [("%s · %s" % (pr["key"], pr["act"]),
+                                fmt_dur(q_sec[i]) if q_sec[i] else "—",
+                                q_sec[i] / qmax, pr["band"])
+                               for i, pr in enumerate(PRIOS)])
+
+        # ---- 最花时间的任务 ----
+        ranked = sorted([(per[i], t) for i, t in enumerate(self.tasks) if per[i] >= 1],
+                        key=lambda x: -x[0])[:5]
+        if ranked:
+            tmax = ranked[0][0]
+            self._stats_title(pad, "最花时间的任务")
+            self._stats_rows(pad, [(ellipsis(t["title"], 12), fmt_dur(sec),
+                                    sec / tmax, PRIO_BY_P[t["p"]]["band"])
+                                   for sec, t in ranked])
+
+        # ---- 按天分布 ----
+        day = self._day_totals(now)
+        days = sorted(day)[-7:] if keys is None else sorted(keys)
+        if any(day.get(k, 0) > 0 for k in days):
+            dmax = max([0.0001] + [day.get(k, 0.0) for k in days])
+            self._stats_title(pad, "按天分布")
+            rows = []
+            for k in days:
+                sec = day.get(k, 0.0)
+                lv = k[5:].replace("-", "/")
+                if k == d2s(today()):
+                    lv += " 今天"
+                rows.append((lv, fmt_dur(sec) if sec >= 1 else "—",
+                             sec / dmax, "#8a9bb0"))
+            self._stats_rows(pad, rows)
+
+        tk.Label(pad, text="点任务卡片右下角的「计时」药丸开始/暂停计时",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3, anchor="w")\
+            .pack(fill="x", pady=(14, 0))
+
+    def _stats_title(self, parent, text):
+        tk.Frame(parent, bg=C_LINE, height=1).pack(fill="x", pady=(12, 0))
+        tk.Label(parent, text=text, font=F_TINY, bg=C_BG, fg=C_INK3, anchor="w")\
+            .pack(fill="x", pady=(8, 4))
+
+    def _stats_rows(self, parent, rows, barw=190):
+        """一组「标签 + 数值 + 横条」，全部放进同一个 grid 才能对齐。"""
+        g = tk.Frame(parent, bg=C_BG)
+        g.pack(fill="x")
+        for r, (label, value, frac, color) in enumerate(rows):
+            tk.Label(g, text=label, font=F_SMALL, bg=C_BG, fg=C_INK, anchor="w")\
+                .grid(row=r, column=0, sticky="w", pady=2)
+            tk.Label(g, text=value, font=F_TINY, bg=C_BG, fg=C_INK2, anchor="e")\
+                .grid(row=r, column=1, sticky="e", padx=(10, 10), pady=2)
+            holder = tk.Frame(g, bg="#e7e2d7", height=8, width=barw)
+            holder.grid(row=r, column=2, sticky="w", pady=2)
+            holder.pack_propagate(False)
+            if frac > 0:
+                tk.Frame(holder, bg=color, height=8).place(
+                    x=0, y=0, width=max(3, int(barw * min(1.0, frac))), height=8)
+
+    # ============================================================ 每日复盘面板
+
+    def _heat_data(self, weeks=HEAT_WEEKS):
+        """返回 (起始日期, {日期: 当天完成数})。起始日对齐到那一周的周一。"""
+        T = today()
+        start = T - datetime.timedelta(days=T.weekday() + (weeks - 1) * 7)
+        data = {}
+        for t in self.tasks:
+            k = done_day(t)
+            if k:
+                data[k] = data.get(k, 0) + 1
+        return start, data
+
+    def _heat_color(self, n):
+        if n <= 0:
+            return HEAT_LEVELS[0]
+        return HEAT_LEVELS[min(int(n), len(HEAT_LEVELS) - 1)]
+
+    def open_review(self):
+        w = self._review_win
+        if w is not None and w.winfo_exists():
+            w.lift()
+            self._render_review()
+            return
+        w = tk.Toplevel(self.root)
+        w.title("每日复盘")
+        w.configure(bg=C_BG)
+        self._follow_top(w)
+        w.minsize(430, 480)
+        self._review_win = w
+
+        bar = tk.Frame(w, bg=C_TOP)
+        bar.pack(fill="x")
+        inner = tk.Frame(bar, bg=C_TOP)
+        inner.pack(fill="x", padx=14, pady=10)
+        tk.Label(inner, text="每日复盘", font=F_BRAND, bg=C_TOP, fg=C_INK)\
+            .pack(side="left")
+        self._btn(inner, "刷新", self._render_review).pack(side="right")
+        tk.Frame(w, bg=C_LINE, height=1).pack(fill="x")
+
+        # 复盘内容长短不定（今天完成得多就长），所以放进可滚动区域，
+        # 不然下面的内容会被窗口边缘直接切掉、又够不着。
+        wrap = tk.Frame(w, bg=C_BG)
+        wrap.pack(fill="both", expand=True)
+        cv = tk.Canvas(wrap, bg=C_BG, highlightthickness=0, bd=0)
+        cv.pack(side="left", fill="both", expand=True)
+        sb = tk.Scrollbar(wrap, orient="vertical", command=cv.yview,
+                          width=12, troughcolor=C_BG, bg="#d9d3c7",
+                          activebackground="#c4bdaf", relief="flat", bd=0)
+        sb.pack(side="right", fill="y")
+        cv.configure(yscrollcommand=sb.set)
+        self._review_cv = cv
+        self._review_body = tk.Frame(cv, bg=C_BG)
+        self._review_win_id = cv.create_window((0, 0), window=self._review_body,
+                                               anchor="nw")
+        self._review_body.bind(
+            "<Configure>", lambda e: cv.configure(scrollregion=cv.bbox("all")))
+        cv.bind("<Configure>",
+                lambda e: cv.itemconfigure(self._review_win_id, width=e.width))
+        cv.bind("<MouseWheel>", self._on_review_wheel)
+        self._render_review()
+
+        w.update_idletasks()
+        # 收边用主窗所在那块显示器的工作区（跟帮助窗同一个道理，见 screen_areas）
+        _full, (wl, wt, wr, wb) = screen_areas(self.root)
+        px = min(self.root.winfo_x() + 60, wr - 470 - 40)
+        py = min(self.root.winfo_y() + 110, wb - 640 - 60)
+        w.geometry("470x640+%d+%d" % (max(wl, px), max(wt, py)))
+
+    def _on_review_wheel(self, e):
+        """复盘面板自己的滚轮。主窗口也挂了 bind_all 的滚轮，
+        所以 _on_wheel 那边要认得这是别人的事件、别乱动主画布。"""
+        try:
+            self._review_cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        except Exception:
+            pass
+
+    def _render_review(self):
+        body = getattr(self, "_review_body", None)
+        if body is None or not body.winfo_exists():
+            return
+        for c in body.winfo_children():
+            c.destroy()
+
+        T = today()
+        key = d2s(T)
+        pad = tk.Frame(body, bg=C_BG)
+        pad.pack(fill="both", expand=True, padx=16, pady=(14, 16))
+
+        # ---- 今天的两个数字 ----
+        done_today = [t for t in self.tasks if done_day(t) == key]
+        sec_today = sum(self._secs_of(t, {key}) for t in self.tasks)
+        tk.Label(pad, text="%s  周%s" % (key, WEEKDAYS[T.weekday()]),
+                 font=F_SMALL, bg=C_BG, fg=C_INK3, anchor="w").pack(fill="x")
+        head = tk.Frame(pad, bg=C_BG)
+        head.pack(fill="x", pady=(4, 0))
+        big = ("Microsoft YaHei UI", -30, "bold")
+        tk.Label(head, text=str(len(done_today)), font=big, bg=C_BG, fg=C_INK)\
+            .pack(side="left")
+        tk.Label(head, text="条完成", font=F_SMALL, bg=C_BG, fg=C_INK3)\
+            .pack(side="left", padx=(3, 20), pady=(14, 0))
+        tk.Label(head, text=fmt_dur(sec_today) if sec_today >= 1 else "—",
+                 font=big, bg=C_BG, fg=C_INK).pack(side="left")
+        tk.Label(head, text="投入", font=F_SMALL, bg=C_BG, fg=C_INK3)\
+            .pack(side="left", padx=(3, 0), pady=(14, 0))
+
+        # ---- 热力图 ----
+        self._stats_title(pad, "最近 %d 周的完成情况" % HEAT_WEEKS)
+        self._draw_heatmap(pad)
+        tk.Label(pad, text="颜色越深 = 那天完成的条数越多",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3, anchor="w")\
+            .pack(fill="x", pady=(6, 0))
+
+        # ---- 今天完成的 ----
+        self._stats_title(pad, "今天完成的")
+        if done_today:
+            for t in done_today[:8]:
+                tk.Label(pad, text="· " + ellipsis(t["title"], 26), font=F_SMALL,
+                         bg=C_BG, fg=C_INK, anchor="w").pack(fill="x", pady=1)
+        else:
+            tk.Label(pad, text="—  今天还没勾掉任何一条", font=F_SMALL, bg=C_BG,
+                     fg=C_INK3, anchor="w").pack(fill="x", pady=1)
+
+        # ---- 今天花时间的 ----
+        spent = sorted([(self._secs_of(t, {key}), t) for t in self.tasks],
+                       key=lambda x: -x[0])
+        spent = [x for x in spent if x[0] >= 1][:6]
+        self._stats_title(pad, "今天时间花在")
+        if spent:
+            mx = spent[0][0]
+            self._stats_rows(pad, [(ellipsis(t["title"], 12), fmt_dur(s),
+                                    s / mx, PRIO_BY_P[t["p"]]["band"])
+                                   for s, t in spent])
+        else:
+            tk.Label(pad, text="—  今天还没有计时记录", font=F_SMALL, bg=C_BG,
+                     fg=C_INK3, anchor="w").pack(fill="x", pady=1)
+
+        # ---- 还没做完 ----
+        open_n = len([t for t in self.tasks if not t["done"]])
+        late = len([t for t in self.tasks if not t["done"] and t["due"]
+                    and s2d(t["due"]) and s2d(t["due"]) < T])
+        self._stats_title(pad, "还没做完")
+        tk.Label(pad, text="未完成 %d 条%s"
+                           % (open_n, ("，其中 %d 条已逾期" % late) if late else ""),
+                 font=F_SMALL, bg=C_BG, fg=C_INK, anchor="w")\
+            .pack(fill="x", pady=1)
+
+    def _draw_heatmap(self, parent):
+        """画最近 HEAT_WEEKS 周的完成热力图。一列一周，从上到下是周一到周日。"""
+        start, data = self._heat_data()
+        step = HEAT_CELL + HEAT_GAP
+        cv = tk.Canvas(parent, width=HEAT_WEEKS * step, height=7 * step,
+                       bg=C_BG, highlightthickness=0, bd=0)
+        cv.pack(anchor="w")
+        T = today()
+        for i in range(HEAT_WEEKS):
+            for j in range(7):
+                d = start + datetime.timedelta(days=i * 7 + j)
+                if d > T:               # 未来的日子不画
+                    continue
+                n = data.get(d2s(d), 0)
+                x, y = i * step, j * step
+                round_rect(cv, x, y, x + HEAT_CELL, y + HEAT_CELL, 3,
+                           fill=self._heat_color(n), outline="")
+        return cv
+
+    # ============================================================ 到点提醒
+
+    def due_reminders(self):
+        """今天该提醒的任务：今天到期或已经逾期、还没做完、今天还没提醒过。"""
+        T = today()
+        key = d2s(T)
+        out = []
+        for t in self.tasks:
+            if t["done"] or not t["due"]:
+                continue
+            d = s2d(t["due"])
+            if not d or d > T:                  # 还没到期的不打扰
+                continue
+            if t.get("remind_key") == key:      # 今天已经弹过就不再烦人
+                continue
+            out.append(t)
+        out.sort(key=lambda t: (s2d(t["due"]), t["order"]))
+        return out
+
+    def _maybe_remind(self, force=False):
+        """挂在启动和心跳上。到点了就弹一次提醒窗，每个任务每天只弹一次。"""
+        if not force and not self.ui.get("remind_on", True):
+            return 0
+        w = self._remind_win
+        if w is not None and w.winfo_exists():   # 已经开着一个就别再开
+            return 0
+        items = self.due_reminders()
+        if not items:
+            return 0
+        key = d2s(today())
+        for t in items:
+            t["remind_key"] = key               # 先记上，免得反复弹
+        self.show_reminder(items)
+        self.save()
+        return len(items)
+
+    def show_reminder(self, items):
+        w = tk.Toplevel(self.root)
+        w.title("到点提醒")
+        w.configure(bg=C_BG)
+        w.attributes("-topmost", True)
+        w.transient(self.root)
+        self._remind_win = w
+
+        T = today()
+        pad = tk.Frame(w, bg=C_BG)
+        pad.pack(fill="both", expand=True, padx=18, pady=(16, 14))
+        tk.Label(pad, text="有 %d 件事到点了" % len(items), font=F_BRAND,
+                 bg=C_BG, fg=C_INK, anchor="w").pack(fill="x")
+        tk.Label(pad, text="点某一条可以直接跳过去", font=F_SMALL, bg=C_BG,
+                 fg=C_INK3, anchor="w").pack(fill="x", pady=(2, 10))
+
+        for t in items[:8]:
+            d = s2d(t["due"])
+            days = (d - T).days
+            tag = ("逾期 %d 天" % -days) if days < 0 else "今天到期"
+            row = tk.Frame(pad, bg=C_BG, cursor="hand2")
+            row.pack(fill="x", pady=2)
+            tk.Label(row, text=tag, font=F_TINY,
+                     bg=("#ffd9d9" if days < 0 else "#fff0ce"),
+                     fg=("#b4242a" if days < 0 else "#8a5200"), padx=6, pady=1)\
+                .pack(side="left")
+            lb = tk.Label(row, text=ellipsis(t["title"], 24), font=F_BODY,
+                          bg=C_BG, fg=C_INK, anchor="w")
+            lb.pack(side="left", padx=(8, 0))
+            for wid in (row, lb):
+                wid.bind("<Button-1>", lambda e, tt=t: self._jump_to(tt))
+        if len(items) > 8:
+            tk.Label(pad, text="…还有 %d 条" % (len(items) - 8), font=F_SMALL,
+                     bg=C_BG, fg=C_INK3, anchor="w").pack(fill="x", pady=(2, 0))
+
+        bar = tk.Frame(pad, bg=C_BG)
+        bar.pack(fill="x", pady=(12, 0))
+        self._btn(bar, "知道了", w.destroy, primary=True).pack(side="right")
+        self._btn(bar, "稍后再说", lambda: self._snooze_remind(w))\
+            .pack(side="right", padx=(0, 8))
+
+        # 贴**主窗所在那块显示器**的右下角，用整屏尺寸（rcMonitor，不是工作区）——
+        # 和 aardio 版保持一致（那边是 win.getMonitorInfo(hwnd).rcMonitor）。
+        # 用 winfo_screenwidth/height 的话主窗在副屏时提醒会弹到主屏去，
+        # 人正看着软件呢，反而容易错过。
+        w.update_idletasks()
+        (ml, mt, mr, mb), _work = screen_areas(self.root)
+        px = mr - w.winfo_reqwidth() - 60
+        py = mb - w.winfo_reqheight() - 160
+        w.geometry("+%d+%d" % (max(ml, px), max(mt, py)))
+
+    def _snooze_remind(self, w):
+        """清掉"今天已提醒"的标记，下一个检查周期还会再弹一次。"""
+        key = d2s(today())
+        for t in self.tasks:
+            if t.get("remind_key") == key and not t["done"]:
+                t["remind_key"] = ""
+        self.save()
+        try:
+            w.destroy()
+        except Exception:
+            pass
+        self.status.configure(text="好，过一会儿再提醒你一次")
+
+    def _jump_to(self, t):
+        """把画布滚到某个任务并闪一下红色边框（提醒窗里点条目用）。"""
+        w = self._remind_win
+        if w is not None and w.winfo_exists():
+            w.destroy()
+        self.redraw()
+        self.root.update_idletasks()
+        r = self._card_region(t["id"])
+        if not r:
+            return
+        box = self.cv.bbox("all")
+        total = max(1, box[3] if box else 1)
+        self.cv.yview_moveto(max(0.0, (r[1] - 80) / total))
+        self.root.after(100, lambda: self._flash_card(t["id"]))
+
+    def _flash_card(self, tid):
+        r = self._card_region(tid)
+        if not r:
+            return
+        self.cv.delete("flash")
+        self.cv.create_rectangle(r[0] - 2, r[1] - 2, r[2] + 2, r[3] + 2,
+                                 outline="#e5484d", width=3, tags="flash")
+        self.cv.tag_raise("flash")
+        self.root.after(1200, lambda: self.cv.delete("flash"))
+
+    def toggle_remind(self):
+        self.ui["remind_on"] = not bool(self.ui.get("remind_on", True))
+        self.save()
+        self.status.configure(text="到点提醒已%s"
+                                   % ("开启" if self.ui["remind_on"] else "关闭"))
+
+    # ============================================================ 滚动 / 导出 / 关闭
+
+    def _on_wheel(self, e):
+        """滚轮只驱动主画布。
+
+        这里必须判断鼠标下是谁：入口在 root 上挂了 bind_all，
+        统计/复盘/回收站这些子窗口里滚动时事件也会冒泡到这里，
+        不判断就会"滚子窗口、主窗口跟着一起跑"。"""
+        try:
+            w = self.root.winfo_containing(e.x_root, e.y_root)
+        except Exception:
+            return
+        if w is None or not str(w).startswith(str(self.cv)):
+            return                      # 不在主画布上（输入框、子窗口…）就不管
+        try:
+            self.cv.yview_scroll(-1 if e.delta > 0 else 1, "units")
+        except Exception:
+            pass
+
+    def on_close(self):
+        self.cancel_editor()
+        self.commit_timers()
+        self.save()
+        self.root.destroy()
+
+
+def main():
+    root = tk.Tk()
+    App(root)
+    root.mainloop()
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,303 @@
+{
+  "v": 3,
+  "ui": {
+    "mode": "matrix",
+    "filter": "all",
+    "quick_p": 1,
+    "topmost": true,
+    "w": 1180,
+    "h": 820,
+    "x": 2015,
+    "y": 86,
+    "backup_dir": "",
+    "backup_on": true,
+    "backup_keep": 30,
+    "last_backup": "",
+    "remind_on": true
+  },
+  "tasks": [
+    {
+      "id": "t847619091864",
+      "title": "把季度复盘 PPT 改完，明天下午 3 点前发出去",
+      "note": "重点补上留存率那一页",
+      "p": 0,
+      "due": "2026-10-12",
+      "done": false,
+      "order": 1.0,
+      "subs": [
+        {
+          "id": "s847619097955",
+          "text": "补留存率那一页的数据",
+          "done": true
+        },
+        {
+          "id": "s847619095447",
+          "text": "改封面和字体统一",
+          "done": false
+        },
+        {
+          "id": "s847619099382",
+          "text": "发到评审群里",
+          "done": false
+        },
+        {
+          "id": "st23729000656890",
+          "text": "将便利贴分享给朋友",
+          "done": false
+        }
+      ],
+      "logs": {
+        "2026-10-10": 2700.0,
+        "2026-10-11": 1800.0
+      },
+      "timer": 0.0,
+      "repeat": "",
+      "done_at": 0.0,
+      "remind_key": "2026-10-12"
+    },
+    {
+      "id": "t847619090171",
+      "title": "回复同事发来的报销单确认",
+      "note": "十分钟的事，别拖着",
+      "p": 2,
+      "due": "2026-10-11",
+      "done": false,
+      "order": 1.0,
+      "subs": [],
+      "logs": {},
+      "timer": 0.0,
+      "repeat": "",
+      "done_at": 0.0,
+      "remind_key": "2026-10-12"
+    },
+    {
+      "id": "t847619095064",
+      "title": "梳理下季度产品路线图",
+      "note": "不着急，但别拖成 P0",
+      "p": 1,
+      "due": "",
+      "done": false,
+      "order": 1.0,
+      "subs": [],
+      "logs": {
+        "2026-10-09": 3600.0
+      },
+      "timer": 0.0,
+      "repeat": "",
+      "done_at": 0.0,
+      "remind_key": ""
+    },
+    {
+      "id": "t847619099470",
+      "title": "整理桌面上那堆截图，归档到 NAS",
+      "note": "有空再说",
+      "p": 3,
+      "due": "",
+      "done": false,
+      "order": 1.0,
+      "subs": [],
+      "logs": {},
+      "timer": 0.0,
+      "repeat": "",
+      "done_at": 0.0,
+      "remind_key": ""
+    },
+    {
+      "id": "t200060000859",
+      "title": "日常工具配置优化",
+      "note": "ai套件环境配置",
+      "p": 0,
+      "due": "",
+      "done": false,
+      "order": 3.0,
+      "subs": [],
+      "logs": {},
+      "timer": 0.0,
+      "repeat": "",
+      "done_at": 0.0,
+      "remind_key": ""
+    },
+    {
+      "id": "t710210004607",
+      "title": "分享便利贴软件给朋友",
+      "note": "收集使用反馈",
+      "p": 0,
+      "due": "",
+      "done": false,
+      "order": 1791771021.0,
+      "subs": [],
+      "logs": {},
+      "timer": 0.0,
+      "repeat": "",
+      "done_at": 0.0,
+      "remind_key": ""
+    }
+  ],
+  "trash": [
+    {
+      "deleted_at": 1791790469.760757,
+      "task": {
+        "id": "t847619091864",
+        "title": "把季度复盘 PPT 改完，明天下午 3 点前发出去",
+        "note": "重点补上留存率那一页",
+        "p": 0,
+        "due": "2026-10-12",
+        "done": false,
+        "order": 2.0,
+        "subs": [
+          {
+            "id": "s847619097955",
+            "text": "补留存率那一页的数据",
+            "done": true
+          },
+          {
+            "id": "s235674668714",
+            "text": "将便利贴分享给朋友",
+            "done": false
+          },
+          {
+            "id": "s625786657048",
+            "text": "改封面和字体统一",
+            "done": false
+          }
+        ],
+        "logs": {
+          "2026-10-10": 2700.0,
+          "2026-10-11": 1800.0
+        },
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": "2026-10-12"
+      }
+    },
+    {
+      "deleted_at": 1791790471.547433,
+      "task": {
+        "id": "t847619095064",
+        "title": "梳理下季度产品路线图",
+        "note": "不着急，但别拖成 P0",
+        "p": 1,
+        "due": "",
+        "done": false,
+        "order": 1.0,
+        "subs": [],
+        "logs": {
+          "2026-10-09": 3600.0
+        },
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": ""
+      }
+    },
+    {
+      "deleted_at": 1791790473.058963,
+      "task": {
+        "id": "t199940009228",
+        "title": "图传修复",
+        "note": "",
+        "p": 1,
+        "due": "",
+        "done": false,
+        "order": 1791719994.0,
+        "subs": [],
+        "logs": {},
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": ""
+      }
+    },
+    {
+      "deleted_at": 1791790474.616946,
+      "task": {
+        "id": "t249399611152",
+        "title": "日常应用工具配置优化",
+        "note": "",
+        "p": 0,
+        "due": "",
+        "done": false,
+        "order": 1791764571.469144,
+        "subs": [],
+        "logs": {},
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": ""
+      }
+    },
+    {
+      "deleted_at": 1791790475.939198,
+      "task": {
+        "id": "t249356819979",
+        "title": "发到评审群里",
+        "note": "",
+        "p": 0,
+        "due": "",
+        "done": false,
+        "order": 1.0,
+        "subs": [],
+        "logs": {},
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": ""
+      }
+    },
+    {
+      "deleted_at": 1791790477.620986,
+      "task": {
+        "id": "t847619090171",
+        "title": "回复同事发来的报销单确认",
+        "note": "十分钟的事，别拖着",
+        "p": 2,
+        "due": "2026-10-11",
+        "done": false,
+        "order": 1.0,
+        "subs": [],
+        "logs": {},
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": "2026-10-12"
+      }
+    },
+    {
+      "deleted_at": 1791790479.050743,
+      "task": {
+        "id": "t199830001264",
+        "title": "个人博客网站修复",
+        "note": "",
+        "p": 2,
+        "due": "",
+        "done": false,
+        "order": 1791719983.0,
+        "subs": [],
+        "logs": {},
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": ""
+      }
+    },
+    {
+      "deleted_at": 1791790480.606981,
+      "task": {
+        "id": "t847619099470",
+        "title": "整理桌面上那堆截图，归档到 NAS",
+        "note": "有空再说",
+        "p": 3,
+        "due": "",
+        "done": false,
+        "order": 1.0,
+        "subs": [],
+        "logs": {},
+        "timer": 0.0,
+        "repeat": "",
+        "done_at": 0.0,
+        "remind_key": ""
+      }
+    }
+  ]
+}
