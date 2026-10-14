@@ -276,9 +276,14 @@ check("清空子任务文字即删除该条", len(st_["subs"]) == n_before - 1,
       "期望 %d 实际 %d" % (n_before - 1, len(st_["subs"])))
 
 app.add_subs(st_, ["a", "b", "c", "d", "e"])
-cap_h = sticky.CARD_H + sticky.SUB_PAD * 2 + sticky.SUB_HEAD + sticky.SUB_MAX * sticky.SUB_LINE
-check("子任务很多时卡片高度封顶", sticky.block_h(st_) == cap_h,
-      "实际 %s 期望 %s" % (sticky.block_h(st_), cap_h))
+# 高度现在是按内容实算的，所以"封顶"要拿一条同标题、正好 SUB_MAX 条子任务的
+# 孪生任务来比 —— 比硬套一个公式稳（公式一改布局就跟着废）。
+tw = mk(st_["title"])
+app.add_subs(tw, ["1", "2", "3"])
+check("子任务超过卡面上限后高度不再增长",
+      sticky.block_h(st_) == sticky.block_h(tw),
+      "7 条=%s  上限%d条=%s" % (sticky.block_h(st_), sticky.SUB_MAX, sticky.block_h(tw)))
+app.tasks.remove(tw)
 app.redraw()
 root.update()
 check("超出显示上限的子任务仍然保留在数据里", len(st_["subs"]) == 7)
@@ -665,8 +670,8 @@ kb = region(app, "card", kid_id)
 check("两张卡片都画出来了", bool(mb) and bool(kb))
 zone = app._nest_zone.get(mid)
 check("母任务记录了「上半张」嵌套区", bool(zone), "实际 %s" % (zone,))
-check("嵌套区确实是卡片的上半张（下沿不到卡片一半高）",
-      bool(zone) and zone[1] == mb[1] and zone[3] < (mb[1] + mb[3]) / 2.0,
+check("嵌套区确实是卡片的上半张（下沿不超过卡片一半高）",
+      bool(zone) and zone[1] == mb[1] and zone[3] <= (mb[1] + mb[3]) / 2.0,
       "实际 %s / 卡片 %s" % (zone, mb))
 
 # 抓在卡片下半张（徽章行那一段），起点本身不会落在别人的嵌套区里
@@ -864,10 +869,60 @@ h_before = sticky.block_h(app.task_by_id(h1id))
 app.add_subs(app.task_by_id(h1id), ["一"])
 app.redraw()
 root.update()
-check("加了子任务后卡片变高", sticky.block_h(app.task_by_id(h1id)) > h_before)
-check("高度算的是子任务区，没写死",
-      sticky.block_h(app.task_by_id(h1id)) == h_before + sticky.SUB_PAD * 2
-      + sticky.SUB_HEAD + sticky.SUB_LINE)
+h_one = sticky.block_h(app.task_by_id(h1id))
+check("加了子任务后卡片变高", h_one > h_before,
+      "前 %s 后 %s" % (h_before, h_one))
+app.add_subs(app.task_by_id(h1id), ["二"])
+check("子任务每多一条就高一行（没写死）",
+      sticky.block_h(app.task_by_id(h1id)) == h_one + sticky.SUB_LINE,
+      "一条 %s 两条 %s" % (h_one, sticky.block_h(app.task_by_id(h1id))))
+# 高度必须和真正画出来的卡片一致，否则就是"算的行数"和"画的行数"对不上
+app.redraw()
+root.update()
+box2 = region(app, "card", h1id)
+check("卡片实高与 block_h 一致（两行备注 + 两条子任务）",
+      box2 and abs((box2[3] - box2[1]) - sticky.block_h(app.task_by_id(h1id))) < 0.5,
+      "实际 %s 期望 %s" % (box2 and box2[3] - box2[1], sticky.block_h(app.task_by_id(h1id))))
+
+print("\n-- 卡片高度按内容实算（不再留空行）--")
+_base = (sticky.TITLE_TOP + sticky.LINE_TITLE + sticky.NOTE_GAP
+         + sticky.LINE_NOTE + sticky.FOOT_GAP + sticky.FOOT_H)
+c1 = mk("一行标题")
+check("单行标题 + 空备注 = 内容 + 呼吸位 + 徽章行（没有多余空行）",
+      sticky.block_h(c1) == _base, "实际 %s 期望 %s" % (sticky.block_h(c1), _base))
+check("空备注那行「＋ 备注」也算一行高（不然会被子任务压住）",
+      sticky.block_h(c1) == sticky.block_h(dict(c1, note="")), "实际 %s" % sticky.block_h(c1))
+
+c2 = mk("很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长很长的标题")
+check("标题折成两行时卡片更高", sticky.block_h(c2) > _base,
+      "两行 %s vs 一行 %s" % (sticky.block_h(c2), _base))
+
+c3 = mk("一行备注")
+c3["note"] = "短"
+c4 = mk("两行备注")
+c4["note"] = "特别特别长的一条备注" * 8
+check("备注折成两行时比一行高", sticky.block_h(c4) > sticky.block_h(c3),
+      "%s vs %s" % (sticky.block_h(c4), sticky.block_h(c3)))
+check("备注行数不受标题长度影响（各算各的）",
+      sticky.block_h(c4) - sticky.block_h(c3) == sticky.LINE_NOTE,
+      "差 %s 期望 %s" % (sticky.block_h(c4) - sticky.block_h(c3), sticky.LINE_NOTE))
+
+# 关键的一条：子任务最后一行到卡片底，只应该剩「呼吸位 + 徽章行」。
+# 卡片高度由 block_h 算、内容由 _draw_card 画，两者的偏移量必须严丝合缝，
+# 差一点就是"卡片下面拖着一条空行"（这次改的就是它）。
+c5 = mk("空隙检查")
+app.add_subs(c5, ["甲"])
+app.redraw()
+root.update()
+_rows = app._sub_rows.get(c5["id"]) or []
+_card = region(app, "card", c5["id"])
+check("子任务最后一行到卡片底只剩呼吸位 + 徽章行（没有多余空行）",
+      bool(_rows) and bool(_card)
+      and abs((_card[3] - _rows[-1][2]) - (sticky.FOOT_GAP + sticky.FOOT_H)) < 3.5,
+      "实际 %s 期望 %s" % (_card and _rows and _card[3] - _rows[-1][2],
+                          sticky.FOOT_GAP + sticky.FOOT_H))
+app.tasks = [t for t in app.tasks if t["id"] not in (c1["id"], c2["id"], c3["id"],
+                                                    c4["id"], c5["id"])]
 
 # 把前面那些任务放回来，后面的持久化用例还要用
 app.tasks = _keep_tasks
