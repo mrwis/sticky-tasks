@@ -391,6 +391,63 @@ app.redraw()
 root.update()
 check("翻页测试任务已清理", len([t for t in app.tasks if t["id"] == pg_["id"]]) == 0)
 
+print("\n-- 已完成的任务第二天从板面收起 --")
+app.set_filter("all")
+app.q = ""
+
+ad_now = mk("今天刚完成的")
+app.toggle_done(ad_now)                 # 走真实路径：done_at 会写成"现在"
+check("今天完成的还留在板面上", app.visible(ad_now) is True)
+check("今天完成的还不算归档", ad_now not in app.archived_done())
+
+ad_old = mk("昨天完成的")
+app.toggle_done(ad_old)
+_old_ts = sticky.now_ts() - 86400 * 1.5     # 36 小时前 = 一定是"昨天或更早"
+ad_old["done_at"] = _old_ts
+ad_old["order"] = _old_ts
+check("昨天完成的不再出现在板面上", app.visible(ad_old) is False)
+check("昨天完成的算进了归档计数", ad_old in app.archived_done())
+
+app.set_filter("done")
+check("切到「已完成」还能看到它", app.visible(ad_old) is True)
+check("「已完成」里今天完成的也在", app.visible(ad_now) is True)
+app.set_filter("all")
+
+# 搜索是例外：找东西就应该找得到，哪怕它已经收起
+app.search.insert(0, "昨天完成的")
+app.on_search()
+check("搜索能找到已收起的任务", app.visible(ad_old) is True)
+app.search.delete(0, "end")
+app.on_search()
+check("清空搜索后又收起了", app.visible(ad_old) is False)
+
+app.redraw()
+root.update()
+check("板面上确实没有它的卡片", region(app, "card", ad_old["id"]) is None)
+check("同一张卡面今天完成的那张还画着",
+      region(app, "card", ad_now["id"]) is not None)
+
+# 老数据没有 done_at：done_day 会回落到 order；两者都像时间戳时按当时算
+ad_legacy = mk("老数据里的已完成")
+ad_legacy["done"] = True
+ad_legacy["done_at"] = 0
+ad_legacy["order"] = sticky.now_ts() - 86400 * 3
+check("老数据（没有 done_at）也按 order 算完成日",
+      sticky.done_day(ad_legacy) != sticky.d2s(sticky.today()))
+check("老数据的已完成同样被收起", app.visible(ad_legacy) is False)
+
+check("状态栏报出了「归档」条数", "归档" in app.stat.cget("text"),
+      "实际 %r" % app.stat.cget("text"))
+
+app.tasks = [t for t in app.tasks
+             if t["id"] not in (ad_now["id"], ad_old["id"], ad_legacy["id"])]
+app.set_filter("all")
+app.redraw()
+root.update()
+check("归档测试任务已清理",
+      all(app.task_by_id(x["id"]) is None
+          for x in (ad_now, ad_old, ad_legacy)))
+
 nz = sticky._norm_subs(["x", {"text": "y"}, {"text": ""}, 123, {"text": "z", "done": True}])
 check("归一化丢掉空文本与非字典项", len(nz) == 3, "实际 %d" % len(nz))
 check("归一化保留完成状态", nz[2]["done"] is True and nz[2]["text"] == "z")
