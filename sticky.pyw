@@ -52,7 +52,8 @@
       due     截止日期 "2026-10-15"，空串表示没设
       done    是否已完成
       order   排序用的分数，越小越靠前；完成时会被刷新到最末
-      subs    子任务列表 [{"id":..., "text":..., "done":...}, ...]
+      subs    子任务列表 [{"id":..., "text":..., "done":..., "done_at":...}, ...]
+              done_at 是子任务的完成时间戳（次日收起靠它判断；跟主任务一个意思）
       logs    耗时流水 {"2026-10-11": 1500.0}  键是日期，值是当天累计秒数
       timer   正在计时的起始时间戳；0 表示没在计时
       repeat  重复周期 ""/"daily"/"weekly"/"monthly"/"yearly"，空串=不重复
@@ -170,13 +171,17 @@
   · 改"卡片上那行时间显示什么" → meta_line()（**唯一**出口）；开关是模块级
                       SHOW_TIME + set_show_time()，菜单在 build_more_menu。
                       改完记得两处一起对：block_h() 和 _draw_card 都调 meta_line
+  · 改子任务的显示顺序/收起规则 → visible_subs()（**唯一**出口）+
+                      SUB_SHOW_DONE（摊开状态）+ hidden_sub_n()（收起条数）。
+                      **block_h / _draw_subs / turn_sub_page / 拖拽折算四处
+                      都要用可见条数**，少改一处就是"算的行数和画的行数对不上"
   · 状态栏那行提示  → 改 HINT_TEXT。**改完先用 tkfont.measure() 量宽度**：
                       窗口缩到最小（MIN_W=760）时，左边提示 + 右边统计数字
                       + 撤销按钮要一起装得下
 
 
 ----------------------------------------------------------------
-  十四个值得单独弄懂的小机制
+  十五个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -353,6 +358,34 @@
 
   另外：数据存盘用"先写 .tmp 再 os.replace"的方式，避免中途断电
   导致 tasks.json 被写坏 —— 这是个通用且值得记住的写法。
+
+  ⑮ 子任务的显示顺序 ≠ 数据顺序（visible_subs / hidden_sub_n）
+    卡片上画的不是 `subs` 本身，而是 visible_subs(t) 加工过的：**未完成在前、
+     已完成沉底**，而且已完成里"不是今天完成的"直接不画（跟主任务板面那套
+     规则完全对称：sort_key 沉底 + visible 次日收起）。
+
+     ★ 所以"屏幕上的第几行"和"列表里的第几个"是两回事，中间隔着三层折算：
+       ① 翻页（第二页第一行是可见序列里的第 SUB_MAX 条）
+       ② 未完成/已完成的重排（稳定分区，各自保持原相对顺序）
+       ③ 次日收起（有几条压根没画）
+     子任务拖拽排序的落点在屏幕上、落库要的是列表下标，两个方向都走
+     `_sub_insert_index`（屏幕行 → 列表下标）和 `_sub_row_of`（反过来）。
+     **这跟第 2 项加翻页时踩的是同一类坑，只是又多了一层。** 改这块之前，
+     先确认自测里"拖拽落点的两个方向能对上"那条还在。
+
+     几个容易忘的连带点：
+       · `block_h` 也按 visible_subs 的条数算高度（不是 subs 的总数），
+         所以收起来之后卡片会真的变矮。**可见条数可以是 0**（全收起了），
+         这时仍然留着标题行 —— 上面那个「已完成 N」胶囊是唯一能把它们
+         摊开的入口（主任务有「已完成」筛选兜着，子任务没有第二层入口）。
+       · 胶囊的判据是 `n_hid or is_open`，**不能只看 n_hid**：摊开之后
+         n_hid 变成 0，只看它的话胶囊当场消失，那就再也收不回去了。
+       · 摊开状态存在模块级 `SUB_SHOW_DONE`（一组 tid），跟 SHOW_TIME 同样
+         的理由放模块级 —— block_h 拿不到 App 实例。它**只活在内存里**，
+         不落库。
+       · 子任务的完成时间在 `sub.done_at`（_norm_subs 归一化时会顺手把
+         "没完成却留着 done_at"清掉）。老数据没有它 → sub_done_day() 返回
+         ""，按"早就完成了"处理，也就是直接收起。
 """
 
 import os
@@ -611,12 +644,25 @@ HELP_SECTIONS = [
     ("k", ("单击「＋ 备注」", "给这条加备注（还没备注时，卡片上会显示这行浅灰的字）")),
     ("k", ("点「‹ 1/2 ›」", "子任务超过 3 条时的翻页按钮，在「子任务 x/y」右边；"
                             "每页 3 条，翻页不会改变卡片高度")),
+    ("k", ("点「已完成 N」", "摊开那几条已收起的已完成子任务（见下面「子任务的排序」）；"
+                              "再点一下又收回去")),
     ("k", ("点右下角药丸",   "开始 / 暂停计时，药丸里显示累计投入的时间")),
     ("k", ("右键卡片",       "编辑任务… / 删除备注 / 改优先级 / 设置截止日期 / 重复规则 / "
                               "添加子任务 / 子任务批量操作 / 计时 / 标记完成 / 删除（进回收站）")),
     ("k", ("右键子任务",     "编辑文字 / 标记完成 / 添加子任务 / 上移 / 下移 / "
                              "提升成独立任务 / 删除这条子任务")),
     ("k", ("右键空白处",     "新建任务 / 耗时统计 / 每日复盘 / 回收站 / 清空已完成")),
+
+    ("h2", "子任务的排序：做完的往后站，第二天不再占地方"),
+    ("p",  "一个任务底下的子任务多了以后，最烦的是「做完的混在没做的中间」，"
+           "一眼看不出还剩几条要干。所以子任务跟主任务用同一套规矩："),
+    ("n",  "· 划掉的自动排到**最后面**（当天划掉的仍然留着，方便手滑点错时点回来）"),
+    ("n",  "· 第二天起自动不再显示 —— 它们没有删，只是不占位置了"),
+    ("n",  "· 标题行右边那个「已完成 N」就是被收起来的那几条，点一下摊开看，再点一下收起"),
+    ("n",  "· 摊开之后如果超过 3 条，照样用「‹ 1/2 ›」翻页"),
+    ("n",  "· 卡面上写的「子任务 2/5」永远是**总共**的进度，收起不影响这个数"),
+    ("n",  "· 想改顺序：直接拖子任务行（同一张卡里上下拖）。显示顺序和实际顺序是两回事，"
+           "但拖的时候程序会自己折算，照常拖就行"),
 
     ("h2", "拖拽能做五件事（最容易被忽略，也最省事）"),
     ("n",  "1. 拖到别的象限 → 改优先级"),
@@ -816,6 +862,55 @@ def sub_done_n(t):
     return len([s for s in subs_of(t) if s.get("done")])
 
 
+# 哪些卡片把"收起的已完成子任务"临时摊开了（存任务 id）。
+#
+# 放模块级的唯一原因还是 block_h()：它是纯函数、拿不到 App 实例，而
+# **算高度和画卡片必须用同一个判断**（见机制⑪/⑭，SHOW_TIME 也是这个道理）。
+# 只活在内存里、不落库 —— 重开程序回到"收起"，因为收起才是常态下想看的。
+SUB_SHOW_DONE = set()
+
+
+def sub_done_day(s):
+    """子任务是在哪一天完成的。
+
+    老数据（或子任务刚被取消完成）没有 done_at → 返回 ""，按"早就完成了"
+    处理，也就是直接收起。跟主任务的 done_day() 不同，这里**没有第二层兜底**：
+    子任务结构里既没有 order 也没有别的能当时间用的字段。
+    """
+    if not s.get("done"):
+        return ""
+    ts = _norm_num(s.get("done_at"))
+    return ts_day(ts) if ts > TS_OK else ""
+
+
+def visible_subs(t):
+    """卡片上真正要画的那些子任务：**未完成的在前、已完成的沉底**，
+    而且已完成里"不是今天完成的"直接不画（跟主任务板面那套规则对称）。
+
+    为什么这么排：一个任务的子任务多了以后，用户要的是"一眼看见还没做的"，
+    而不是在一堆划掉的行里扒拉。当天划掉的那几条仍然留着（有反馈感，
+    也方便手滑点错时点回来），第二天自动收起。
+
+    收起的那部分不是没了 —— 卡片上会写「已完成 N」并给一个能点开的胶囊，
+    点开就临时摊平（`App.toggle_sub_done_view`，状态存在 SUB_SHOW_DONE 里）。
+
+    **排序只发生在显示层**：数据里的 order 是用户一条条拖出来的，不能动 ——
+    否则取消完成之后它自己会跑到别的地方去。
+    """
+    subs = subs_of(t)
+    if t.get("id") not in SUB_SHOW_DONE:
+        T = d2s(today())
+        subs = [s for s in subs
+                if not (s.get("done") and sub_done_day(s) != T)]
+    return ([s for s in subs if not s.get("done")]
+            + [s for s in subs if s.get("done")])
+
+
+def hidden_sub_n(t):
+    """卡片上没画出来的子任务条数（已收起的那部分）。"""
+    return len(subs_of(t)) - len(visible_subs(t))
+
+
 def sub_pages(n):
     """n 条子任务要分几页（每页 SUB_MAX 条）。**至少一页** ——
     没子任务时也返回 1，省得调用方到处写 `or 1`。"""
@@ -919,12 +1014,17 @@ def block_h(t):
     note_top = TITLE_TOP + LINE_TITLE * nth + NOTE_GAP
     note_bottom = note_top + LINE_NOTE * note_lines(t)
 
-    n = len(subs_of(t))
-    if n:
+    n_all = len(subs_of(t))
+    if n_all:
         # 子任务区一律从**备注底**往下排（备注为空时那行「＋ 备注」也算一行，
         # 见 note_lines）—— 这样空备注的卡片不会把「子任务 x/y」压到那行字上。
+        #
+        # 几行按**可见条数**算：已完成的第二天收起，卡片跟着变矮。
+        # 可见条数可能是 0（全收起了）—— 这时仍然留着标题行（上面那个
+        # 「已完成 N」的胶囊是唯一能摊开它们的入口），只是不占子任务行的高度。
         sub_top = note_bottom + SUB_PAD
-        content = sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * min(n, SUB_MAX)
+        nv = min(len(visible_subs(t)), SUB_MAX)
+        content = sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * nv
     else:
         content = note_bottom
     # 「创建 / 完成时间」那一行是可选显示：关掉之后整行连同它的间距一起消失，
@@ -951,17 +1051,26 @@ def _norm_num(v):
 
 
 def _norm_subs(raw):
-    """把 subs 归一成 [{"id","text","done"}]，顺带容忍「纯字符串列表」这种简写。"""
+    """把 subs 归一成 [{"id","text","done","done_at"}]，顺带容忍「纯字符串列表」这种简写。
+
+    done_at 是**子任务的完成时间戳**：卡片上"已完成次日收起"靠它判断。
+    老数据没有这个字段，读出来是 0 → sub_done_day() 会当成"早就完成了"
+    （也就是直接收起），这个取舍是有意的。
+    """
     out = []
     if isinstance(raw, list):
         for s in raw:
             if isinstance(s, dict):
                 txt = str(s.get("text", "")).strip()
                 if txt:
+                    done = bool(s.get("done"))
                     out.append({"id": s.get("id") or new_sid(),
-                                "text": txt, "done": bool(s.get("done"))})
+                                "text": txt, "done": done,
+                                # 没完成就不该留着完成时间（取消完成要清干净）
+                                "done_at": _norm_num(s.get("done_at")) if done else 0.0})
             elif isinstance(s, str) and s.strip():
-                out.append({"id": new_sid(), "text": s.strip(), "done": False})
+                out.append({"id": new_sid(), "text": s.strip(), "done": False,
+                            "done_at": 0.0})
     return out
 
 
@@ -2307,25 +2416,53 @@ class App:
             self.regions.append(("due", t["id"], dx, ry - 2, dx + dwn, ry + 20))
 
     def _draw_subs(self, t, x, y, w, pr, tag):
-        """画卡片里的子任务区。返回画完后的 y（方便以后往下面接着加东西）。"""
+        """画卡片里的子任务区。返回画完后的 y（方便以后往下面接着加东西）。
+
+        画的是 visible_subs()：**未完成在前、已完成沉底、不是今天完成的不画**
+        （跟 block_h 里按可见条数算高度是同一套判断）。收起的那几条不是没了 ——
+        「子任务 x/y」右边有个「已完成 N」的胶囊，点一下临时摊开。
+        """
         cv = self.cv
         subs = subs_of(t)
-        n, done = len(subs), sub_done_n(t)
+        n_all, done = len(subs), sub_done_n(t)
+        vis = visible_subs(t)
+        n_hid = n_all - len(vis)
+        head = "子任务 %d/%d" % (done, n_all)
 
         cv.create_line(x + 12, y, x + w - 12, y, fill=C_SUB_SEP, tags=(tag,))
         y += SUB_PAD
-        cv.create_text(x + 13, y, anchor="nw", text="子任务 %d/%d" % (done, n),
+        cv.create_text(x + 13, y, anchor="nw", text=head,
                        font=F_SUB, fill=C_INK3, tags=(tag,))
 
-        # 超过一页就在这一行右边画 ‹ 1/2 ›。页码越界（比如刚删掉几条子任务）
-        # 会在 _sub_page 里自动夹回合法范围，所以这里拿到的永远是对的。
-        pgs = sub_pages(n)
+        # 右端先摆翻页器（贴边），它返回自己占的宽度，好让胶囊接着往左排
+        pgs = sub_pages(len(vis))
         pg = self._sub_page(t["id"], pgs)
+        pager_w = 0
         if pgs > 1:
-            self._draw_sub_pager(t, x + w - 11, y, pgs, pg, tag)
+            pager_w = self._draw_sub_pager(t, x + w - 11, y, pgs, pg, tag)
+
+        # 翻页器左边：「已完成 N」胶囊。它是**摊开收起部分**的唯一入口 ——
+        # 主任务有「已完成」筛选兜着，子任务没有第二层入口，收起来就再也点不到了。
+        #
+        # 注意判据是「有收起的 **或** 现在正摊着」：摊开之后 n_hid 变成 0，
+        # 只看 n_hid 的话胶囊会当场消失 —— 那就再也收不回去了。
+        is_open = t["id"] in SUB_SHOW_DONE
+        if n_hid or is_open:
+            lbl = "收起" if is_open else "已完成 %d" % n_hid
+            cw = _font_of(F_SUB).measure(lbl) + 16
+            cx2 = x + w - 11 - (pager_w + 4 if pager_w else 0)
+            cx1 = cx2 - cw
+            head_w = _font_of(F_SUB).measure(head)
+            if cx1 > x + 13 + head_w + 8:          # 别和左边的标题挤在一起
+                round_rect(cv, cx1, y - 2, cx2, y + SUB_HEAD - 1, 7,
+                           fill="#efeadf", outline=C_LINE, width=1, tags=(tag,))
+                cv.create_text((cx1 + cx2) / 2.0, y + SUB_HEAD / 2.0 - 3,
+                               text=lbl, font=F_SUB, fill=C_INK2, tags=(tag,))
+                self.regions.append(("subtos:" + t["id"], t["id"],
+                                     cx1, y - 3, cx2, y + SUB_HEAD))
         y += SUB_HEAD
 
-        for s in subs[pg * SUB_MAX:(pg + 1) * SUB_MAX]:
+        for s in vis[pg * SUB_MAX:(pg + 1) * SUB_MAX]:
             sd = bool(s.get("done"))
             bx, by = x + 14, y + 1
             cv.create_rectangle(bx, by, bx + SUB_BOX, by + SUB_BOX, fill=C_WHITE,
@@ -2348,13 +2485,14 @@ class App:
                 cv.create_line(sx, y + 8, sx + tkfont.Font(font=F_SUB).measure(txt), y + 8,
                                fill=C_SUB_DONE, tags=(tag,))
             self.regions.append(("st:" + s["id"], t["id"], sx - 3, y - 2, x + w - 8, y + 15))
-            # 子任务行的 y 区间（按显示顺序）—— 子任务拖拽排序时用来算落点
+            # 子任务行的 y 区间（按**显示顺序**）—— 子任务拖拽排序时用来算落点
             self._sub_rows.setdefault(t["id"], []).append((s["id"], y - 2, y + 13))
             y += SUB_LINE
         return y
 
     def _draw_sub_pager(self, t, xr, y, pgs, pg, tag):
-        """在「子任务 x/y」那一行的右端画 ‹ 1/2 ›。
+        """在「子任务 x/y」那一行的右端画 ‹ 1/2 ›。**返回它占的宽度** ——
+        调用方要在它左边接着摆「已完成 N」那个胶囊（那个得先知道这儿占了多少）。
 
         箭头是用 create_line 画的折线，不是 ‹ › 这两个字符 —— 字符要靠字体
         碰运气，缺字形就是豆腐块；折线永远画得出来（复选框的勾也是这么画的）。
@@ -2382,6 +2520,7 @@ class App:
                            fill=ink, width=1.6, capstyle="round",
                            joinstyle="round", tags=(tag,))
             self.regions.append((knd, t["id"], b1 - 3, y - 4, b2 + 3, y + SUB_HEAD + 2))
+        return (n2 + 3) - (p1 - 3)
 
     def _sub_page(self, tid, pgs):
         """这张卡当前翻到第几页（0 起）。**越界一律夹回合法范围再返回** ——
@@ -2392,16 +2531,40 @@ class App:
         return pg
 
     def _sub_page_base(self, tid):
-        """当前页第一条子任务在**整个列表**里的下标。
+        """当前页第一条子任务在**整个可见序列**里的下标。
 
         子任务拖拽的落点算的是"屏幕上的第几行"，落库要的是列表下标 ——
-        翻到第二页时两者正好差 SUB_MAX，所以必须折算一次。
+        中间隔着两层：① 翻页（第二页的第一行其实是可见序列里的第 SUB_MAX 条）；
+        ② "可见序列"本身是 reorder + 过滤过的（未完成在前、次日收起的没画）。
+        所以每次都要先按**可见条数**把页码夹回合法范围（收起几条之后页码会越界）。
         """
-        return max(0, int(self.sub_page.get(tid) or 0)) * SUB_MAX
+        t = self.task_by_id(tid)
+        pgs = sub_pages(len(visible_subs(t))) if t else 1
+        return self._sub_page(tid, pgs) * SUB_MAX
+
+    def _sub_row_of(self, tid, idx):
+        """列表下标 → **当前这一页里的第几行**（_sub_insert_index 的逆运算）。
+
+        落到看不见的那条（已收起的已完成）或者越界时，一律当作"本页末尾"。
+        """
+        rows = self._sub_rows.get(tid) or []
+        t = self.task_by_id(tid)
+        if not t:
+            return len(rows)
+        vis, subs = visible_subs(t), subs_of(t)
+        try:
+            k = vis.index(subs[int(idx)])
+        except (ValueError, IndexError):
+            return len(rows)
+        return max(0, min(k - self._sub_page_base(tid), len(rows)))
 
     def turn_sub_page(self, t, d):
-        """翻一页子任务（d = -1 上一页 / +1 下一页）。到头了就停住，不循环。"""
-        pgs = sub_pages(len(subs_of(t)))
+        """翻一页子任务（d = -1 上一页 / +1 下一页）。到头了就停住，不循环。
+
+        页数按**可见条数**算 —— 已收起的已完成条目不参与分页（跟 block_h
+        和 _draw_subs 用的是同一个 visible_subs）。
+        """
+        pgs = sub_pages(len(visible_subs(t)))
         if pgs <= 1:
             return
         old = self._sub_page(t["id"], pgs)
@@ -2782,18 +2945,26 @@ class App:
                                    % ellipsis(t["title"], 12))
 
     def _sub_insert_index(self, tid, cy):
-        """子任务拖拽：落点该插到第几条。只看卡面上画出来的那几条
-        （没翻到的那几页本来就看不见，没法当落点）。
+        """子任务拖拽：落点该插到**整个列表**的第几位。
 
-        返回的是**整个列表里的绝对下标**（不是屏幕上的第几行）：
-        卡片翻到第二页时，画出来的第一行其实是列表里的第 SUB_MAX 条。
+        返回的是"插到某条**之前**"的列表下标（不是屏幕上的第几行）——
+        屏幕上画的是 visible_subs()，中间隔着翻页和"未完成在前+次日收起"
+        两层折算，所以必须走 _sub_page_base 把"本页第几行"还原成列表下标。
         """
+        t = self.task_by_id(tid)
         rows = self._sub_rows.get(tid) or []
+        if not t:
+            return 0
+        vis, subs = visible_subs(t), subs_of(t)
         base = self._sub_page_base(tid)
+
+        def to_idx(k):
+            return subs.index(vis[k]) if k < len(vis) else len(subs)
+
         for i, (_sid, y1, y2) in enumerate(rows):
             if cy < (y1 + y2) / 2.0:
-                return base + i
-        return base + len(rows)
+                return to_idx(base + i)
+        return to_idx(base + len(rows))
 
     def _motion_sub(self, d, cx, cy):
         """子任务拖拽：不真的搬行，只画辅助线；松手才落库。
@@ -2868,8 +3039,9 @@ class App:
         band = PRIO_BY_P[t["p"]]["band"] if t else "#9c9384"
         rows = self._sub_rows.get(tid) or []
         if rows:
-            # idx 是列表绝对下标，画线要看它是当前这一页里的第几行
-            i = max(0, min(int(idx) - self._sub_page_base(tid), len(rows)))
+            # idx 是列表下标，画线要看它是**当前这一页里的第几行**
+            # （中间隔着翻页和"未完成在前 + 次日收起"两层折算）
+            i = self._sub_row_of(tid, idx)
             ly = rows[i][1] - 1 if i < len(rows) else rows[-1][2] + 1
             self.cv.create_line(r[0] + 14, ly, r[2] - 14, ly,
                                 fill=band, width=3, capstyle="round", tags="hl")
@@ -2980,6 +3152,9 @@ class App:
             self.turn_sub_page(t, -1)
         elif kind == "subnext":
             self.turn_sub_page(t, +1)
+        elif kind and kind.startswith("subtos:"):
+            # 「已完成 N」胶囊：摊开 / 收起那几条次日自动藏起来的已完成子任务
+            self.toggle_sub_done_view(t)
         # kind == "st:xxx" 是子任务文字：单击不做事，留给双击去编辑
 
     def on_double(self, e):
@@ -3168,7 +3343,8 @@ class App:
             "id": new_id(), "title": t["title"], "note": t["note"], "p": t["p"],
             "due": next_date(t["due"], rp), "done": False,
             "order": self._order_end(t["p"]),
-            "subs": [{"id": new_sid(), "text": s["text"], "done": False}
+            "subs": [{"id": new_sid(), "text": s["text"], "done": False,
+                      "done_at": 0.0}
                      for s in subs_of(t)],
             "logs": {}, "timer": 0, "repeat": rp, "done_at": 0,
             # 新一轮从**现在**算起，而不是继承上一轮的创建时间 ——
@@ -3357,10 +3533,30 @@ class App:
         if not s:
             return
         s["done"] = not s["done"]
+        # 完成时间（取消完成就清掉）：卡片上"已完成次日收起"靠它判断。
+        # 跟主任务的 done_at 一个意思，只是子任务结构本身就轻，没别的兜底。
+        s["done_at"] = now_ts() if s["done"] else 0.0
         self.save()
         self.redraw()
         self.status.configure(text="子任务 %d/%d 已完成"
                                    % (sub_done_n(t), len(subs_of(t))))
+
+    def toggle_sub_done_view(self, t):
+        """把这张卡上"收起的已完成子任务"临时摊开 / 再收回去。
+
+        入口是「子任务 x/y」右边那个「已完成 N」胶囊。**状态只存在内存里**
+        （SUB_SHOW_DONE，跟翻页页码一样不落库）：重开程序回到收起状态，
+        因为"只看见还没做的"才是常态下想要的样子。
+        """
+        if t["id"] in SUB_SHOW_DONE:
+            SUB_SHOW_DONE.discard(t["id"])
+            self.status.configure(text="已收起的子任务又收起来了")
+        else:
+            SUB_SHOW_DONE.add(t["id"])
+            self.status.configure(
+                text="摊开了 %d 条已完成的子任务（它们是次日自动收起的）"
+                     % hidden_sub_n(t))
+        self.redraw()
 
     def add_subs(self, t, lines):
         """lines 可以是多行文本，一行算一条子任务。"""
@@ -3369,7 +3565,8 @@ class App:
         for ln in lines:
             txt = str(ln).strip()
             if txt:
-                subs.append({"id": new_sid(), "text": txt, "done": False})
+                subs.append({"id": new_sid(), "text": txt, "done": False,
+                             "done_at": 0.0})
                 added += 1
         if added:
             self.save()
