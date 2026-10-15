@@ -12,6 +12,10 @@
     dist/逍遥便利贴.exe        ← 单文件，拷给谁都能双击运行
     dist/使用说明.txt          ← 给"朋友"看的，讲数据存在哪
 
+如果项目上一级存在 成品-便利贴/ 这个目录（日常用的那份），
+编译完会顺手把 exe 和 使用说明.txt 拷过去覆盖旧的，**数据文件不动**，
+省得每回"打完了忘了拷"。目录不存在就什么都不做。
+
 为什么要有这个脚本，而不是手敲 pyinstaller
 ------------------------------------------
 那一串参数（单文件 / 无控制台 / 图标 / 版本信息 / 一堆 exclude）改一次忘一次，
@@ -40,6 +44,17 @@ ICON = os.path.join(ROOT, "assets", "app.ico")
 DIST = os.path.join(ROOT, "dist")
 BUILD = os.path.join(ROOT, "build")
 APP_NAME = "逍遥便利贴"
+
+# 日常使用的那份成品放在**项目上一级**的 成品-便利贴/ 里（不存在就跳过）。
+# 为什么不直接让人用 dist/ 里这个：
+#   dist/ 在 sticky-tasks 这个 git 仓库里面，是「构建产物目录」。
+#   把日常数据（tasks.json）放在那儿有两个隐患 ——
+#   ① `git clean -xdf` 会把被忽略的文件一起删掉，数据跟着没；
+#   ② 心里老觉得"这是仓库里的东西"，不敢放开用。
+# 放到仓库外的独立目录之后，"用"和"改"就彻底分开了：
+#   日常增删任务不会在 git status 里冒出任何东西，改坏了源码也不影响在用的那份。
+# 注意：这里**只拷 exe 和 使用说明.txt，绝不碰 tasks.json** —— 那是用户的真实数据。
+RELEASE = os.path.join(os.path.dirname(ROOT), "成品-便利贴")
 
 # 程序真正用到的标准库只有这些：
 #   os re sys json shutil calendar datetime subprocess
@@ -239,15 +254,39 @@ def main():
     size = os.path.getsize(exe) / 1024.0 / 1024.0
     log("      使用说明.txt")
 
+    refreshed = refresh_release(exe, txt)
+
     log("\n" + "=" * 58)
     log("好了：")
     log("  %s" % exe)
     log("  %.1f MB" % size)
     log("  %s" % txt)
     log("=" * 58)
+    if refreshed:
+        log("日常用的成品目录也刷新了（exe + 使用说明，数据没动）：")
+        log("  %s" % RELEASE)
+        log("")
+    else:
+        log("日常用的成品目录不存在：%s" % RELEASE)
+        log("  想要的话，建一个这个名字的空目录再跑一次，")
+        log("  或者直接把上面那个 exe 拷到顺手的地方用。")
+        log("")
     log("分享：把 exe（和 使用说明.txt）发给对方就行，对方不用装 Python。")
     log("提醒：exe 别放在 C:\\Program Files 这类要管理员权限的目录里，")
     log("      任务数据存在它旁边，那里写不进去。")
+
+
+def refresh_release(exe, txt):
+    """把新产物拷进日常用的成品目录。
+
+    只拷 exe 和 使用说明.txt —— **绝不碰 tasks.json**：那是用户的真实任务，
+    换一版程序不该把数据换掉。目录不存在就什么都不做（返回 False）。
+    """
+    if not os.path.isdir(RELEASE):
+        return False
+    for src in (exe, txt):
+        shutil.copy2(src, os.path.join(RELEASE, os.path.basename(src)))
+    return True
 
 
 if __name__ == "__main__":
