@@ -549,6 +549,117 @@ app.redraw()
 root.update()
 check("菜单用例的任务已清理", app.task_by_id(sm["id"]) is None)
 
+print("\n-- 创建时间 / 完成时间：自动记，显示可选 --")
+
+# 用户的原话：「创建的任务应该自动添加创建时间，同理完成任务勾选后，也应该
+# 自动添加完成任务时间。这样复盘的时候就知道执行效率如何。另外这个时间是否
+# 显示应该是可选的……不管显示不显示，记录应该要有。」
+
+app.set_filter("all")
+app.entry.delete(0, "end")
+app.entry.insert(0, "带创建时间的任务")
+app.do_add()
+ct = app.tasks[-1]
+check("新建任务自动记下了创建时间", sticky.created_ts(ct) > 0,
+      "实际 %r" % ct.get("created_at"))
+check("写的是 created_at 字段本身（不是靠 order 兜底蒙对的）",
+      sticky._norm_num(ct.get("created_at")) > 0, "实际 %r" % ct.get("created_at"))
+check("创建时间就是刚才（误差 5 秒内）",
+      abs(sticky.created_ts(ct) - sticky.now_ts()) < 5)
+check("未完成的任务上写「建于 …」",
+      sticky.meta_line(ct).startswith("建于"), "实际 %r" % sticky.meta_line(ct))
+
+# 假装它是三天前写下来的，再走真实的「勾完成」路径
+ct["created_at"] = sticky.now_ts() - 86400 * 3.2
+app.toggle_done(ct)
+check("勾完成后自动记下了完成时间",
+      ct["done_at"] > 0 and sticky.done_day(ct) != "", "实际 %r" % ct.get("done_at"))
+check("完成时间就是刚才（误差 5 秒内）", abs(ct["done_at"] - sticky.now_ts()) < 5)
+_line = sticky.meta_line(ct)
+check("已完成的任务上写清跨了几天（复盘看的就是它）",
+      "→" in _line and "3 天" in _line, "实际 %r" % _line)
+
+app.toggle_done(ct)                                  # 取消完成
+check("取消完成后 done_at 跟着清掉", ct["done_at"] == 0, "实际 %r" % ct["done_at"])
+check("取消完成后又回到「建于 …」",
+      sticky.meta_line(ct).startswith("建于"), "实际 %r" % sticky.meta_line(ct))
+
+ct["created_at"] = sticky.now_ts()                   # 同一天建、同一天完成
+app.toggle_done(ct)
+check("当天创建当天完成不写「0 天」",
+      "创建并完成" in sticky.meta_line(ct), "实际 %r" % sticky.meta_line(ct))
+app.toggle_done(ct)
+
+# 老数据：没有 created_at 就回落到 order，但排序号不能当时间用
+old_c = mk("老数据没有 created_at")
+old_c["order"] = sticky.now_ts() - 86400 * 2
+old_c.pop("created_at", None)
+check("老数据没有 created_at 时回落到 order",
+      abs(sticky.created_ts(old_c) - old_c["order"]) < 1,
+      "实际 %r / order %r" % (sticky.created_ts(old_c), old_c["order"]))
+seq_c = mk("order 是排序号的老数据")
+seq_c["order"] = 3.0
+seq_c.pop("created_at", None)
+check("order 是 1.0/2.0 这种排序号时不拿它当时间（否则会显示成 70 年）",
+      sticky.created_ts(seq_c) == 0, "实际 %r" % sticky.created_ts(seq_c))
+check("判断不出创建时间就干脆不画那一行", sticky.meta_line(seq_c) == "",
+      "实际 %r" % sticky.meta_line(seq_c))
+
+# ---- 显示开关：开着占一行，关掉整行消失，但记录一个字都不动 ----
+app.redraw()
+root.update()
+check("卡片上确实画了那一行（regions 里登记了 meta）",
+      region(app, "meta", ct["id"]) is not None)
+_h_on = sticky.block_h(ct)
+app.toggle_show_time()
+check("关掉显示后卡片真的矮了一行（不是留一条空档）",
+      sticky.block_h(ct) == _h_on - (sticky.META_GAP + sticky.LINE_META),
+      "开 %s 关 %s" % (_h_on, sticky.block_h(ct)))
+check("关掉显示后这一行不再产生内容", sticky.meta_line(ct) == "")
+app.redraw()
+root.update()
+check("关掉之后画布上也没有它了", region(app, "meta", ct["id"]) is None)
+check("★ 关掉显示不影响记录：创建时间还在", sticky.created_ts(ct) > 0,
+      "实际 %r" % ct.get("created_at"))
+check("★ 关掉显示不影响记录：完成时间还在",
+      (not ct["done"]) or ct["done_at"] > 0)
+check("开关状态写进了 ui 段，下次打开还是这个选择",
+      app.ui.get("show_time") is False, "实际 %r" % app.ui.get("show_time"))
+app.toggle_show_time()
+check("再打开显示，那一行又回来了",
+      sticky.meta_line(ct) != "" and app.ui.get("show_time") is True)
+
+mm = app.build_more_menu()
+# 菜单里有分隔线，而分隔线没有 label 这个选项，直接 entrycget 会报错
+_mlabels = [mm.entrycget(i, "label") for i in range(mm.index("end") + 1)
+            if mm.type(i) != "separator"]
+check("「更多 ▾」菜单里有这个开关",
+      any(l.startswith("卡片上显示时间：") for l in _mlabels), "实际 %s" % _mlabels)
+mm.destroy()
+
+nt_c = sticky._norm_task(dict(ct))
+check("created_at 会被写进数据、读回来也还在",
+      abs(sticky.created_ts(nt_c) - sticky.created_ts(ct)) < 1)
+
+# 提升子任务 / 重复任务的下一次：都得带上自己的创建时间
+ct2 = mk("重复任务的样板")
+app.set_repeat(ct2, "daily")
+_nxt = app._spawn_next(ct2)
+check("重复任务排出的下一次有自己的创建时间（不继承上一轮的）",
+      _nxt is not None and sticky.created_ts(_nxt) > 0
+      and abs(sticky.created_ts(_nxt) - sticky.now_ts()) < 5,
+      "实际 %r" % (_nxt and _nxt.get("created_at")))
+
+app.tasks = [t for t in app.tasks
+             if t["id"] not in (ct["id"], old_c["id"], seq_c["id"],
+                                ct2["id"], _nxt["id"])]
+app.set_filter("all")
+app.redraw()
+root.update()
+check("时间用例的测试任务已清理",
+      all(app.task_by_id(x["id"]) is None
+          for x in (ct, old_c, seq_c, ct2, _nxt)))
+
 print("\n-- 已完成的任务第二天从板面收起 --")
 app.set_filter("all")
 app.q = ""
@@ -1312,10 +1423,11 @@ check("卡片实高与 block_h 一致（两行备注 + 两条子任务）",
       "实际 %s 期望 %s" % (box2 and box2[3] - box2[1], sticky.block_h(app.task_by_id(h1id))))
 
 print("\n-- 卡片高度按内容实算（不再留空行）--")
+_meta = sticky.META_GAP + sticky.LINE_META      # 「创建 / 完成时间」那一行
 _base = (sticky.TITLE_TOP + sticky.LINE_TITLE + sticky.NOTE_GAP
-         + sticky.LINE_NOTE + sticky.FOOT_GAP + sticky.FOOT_H)
+         + sticky.LINE_NOTE + _meta + sticky.FOOT_GAP + sticky.FOOT_H)
 c1 = mk("一行标题")
-check("单行标题 + 空备注 = 内容 + 呼吸位 + 徽章行（没有多余空行）",
+check("单行标题 + 空备注 = 内容 + 时间行 + 呼吸位 + 徽章行（没有多余空行）",
       sticky.block_h(c1) == _base, "实际 %s 期望 %s" % (sticky.block_h(c1), _base))
 check("空备注那行「＋ 备注」也算一行高（不然会被子任务压住）",
       sticky.block_h(c1) == sticky.block_h(dict(c1, note="")), "实际 %s" % sticky.block_h(c1))
@@ -1334,20 +1446,23 @@ check("备注行数不受标题长度影响（各算各的）",
       sticky.block_h(c4) - sticky.block_h(c3) == sticky.LINE_NOTE,
       "差 %s 期望 %s" % (sticky.block_h(c4) - sticky.block_h(c3), sticky.LINE_NOTE))
 
-# 关键的一条：子任务最后一行到卡片底，只应该剩「呼吸位 + 徽章行」。
+# 关键的一条：子任务最后一行到卡片底，只应该剩「时间行 + 呼吸位 + 徽章行」。
 # 卡片高度由 block_h 算、内容由 _draw_card 画，两者的偏移量必须严丝合缝，
-# 差一点就是"卡片下面拖着一条空行"（这次改的就是它）。
+# 差一点就是"卡片下面拖着一条空行"。
 c5 = mk("空隙检查")
 app.add_subs(c5, ["甲"])
 app.redraw()
 root.update()
 _rows = app._sub_rows.get(c5["id"]) or []
 _card = region(app, "card", c5["id"])
-check("子任务最后一行到卡片底只剩呼吸位 + 徽章行（没有多余空行）",
+check("子任务最后一行到卡片底只剩时间行 + 呼吸位 + 徽章行（没有多余空行）",
       bool(_rows) and bool(_card)
-      and abs((_card[3] - _rows[-1][2]) - (sticky.FOOT_GAP + sticky.FOOT_H)) < 3.5,
+      and abs((_card[3] - _rows[-1][2])
+              - (sticky.META_GAP + sticky.LINE_META
+                 + sticky.FOOT_GAP + sticky.FOOT_H)) < 3.5,
       "实际 %s 期望 %s" % (_card and _rows and _card[3] - _rows[-1][2],
-                          sticky.FOOT_GAP + sticky.FOOT_H))
+                          sticky.META_GAP + sticky.LINE_META
+                          + sticky.FOOT_GAP + sticky.FOOT_H))
 app.tasks = [t for t in app.tasks if t["id"] not in (c1["id"], c2["id"], c3["id"],
                                                     c4["id"], c5["id"])]
 

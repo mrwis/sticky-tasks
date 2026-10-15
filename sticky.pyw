@@ -57,6 +57,7 @@
       timer   正在计时的起始时间戳；0 表示没在计时
       repeat  重复周期 ""/"daily"/"weekly"/"monthly"/"yearly"，空串=不重复
       done_at 完成时间戳；0 表示未完成。复盘面板的热力图靠它
+      created_at  创建时间戳，新建任务时自动写。卡片底下那行「建于 …」用它
       remind_key  今天已经提醒过的那个日期；同一天不再重复弹提醒
 
   数据文件顶层除了 tasks 还有两样东西：
@@ -68,6 +69,9 @@
 
   为什么要单独存 done_at 而不是复用 order？order 会被拖拽排序反复改写，
   拿它当完成时间算热力图会算错。老数据没有 done_at，done_day() 里做了回落。
+  同理，created_at 也是单独存的 —— order 会被拖拽改写，拿它当创建时间
+  一样不准（只当"老数据实在没别的东西可看"时的参考值）。
+  有了这两个时间戳，卡片上就能算出「从写到划掉花了几天」（见机制⑭）。
 
   渲染链（第 6 站展开）——这是全项目的主干，看懂它就看懂了一大半：
       redraw()            总入口：筛出要显示的任务、按象限分组
@@ -163,13 +167,16 @@
   · 改状态栏那几个数字     → STAT_CHIPS（增删项）+ _update_stats()（填文字和显隐），
                       它们是**切筛选的按钮**（_chip_paint 管三种样子、
                       chip_filter 管点击、_filter_hint 管切过去时那句提示）
+  · 改"卡片上那行时间显示什么" → meta_line()（**唯一**出口）；开关是模块级
+                      SHOW_TIME + set_show_time()，菜单在 build_more_menu。
+                      改完记得两处一起对：block_h() 和 _draw_card 都调 meta_line
   · 状态栏那行提示  → 改 HINT_TEXT。**改完先用 tkfont.measure() 量宽度**：
                       窗口缩到最小（MIN_W=760）时，左边提示 + 右边统计数字
                       + 撤销按钮要一起装得下
 
 
 ----------------------------------------------------------------
-  十三个值得单独弄懂的小机制
+  十四个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -321,6 +328,29 @@
      否则每拖动一下卡片就蹦一个框。
      打包本身跑 tools/build_exe.py，图标由 tools/make_icon.py 画。
 
+  ⑭ 创建时间 / 完成时间是「自动记、可选看」的两件事
+     用户的原话："创建的任务应该自动添加创建时间……这个时间是否显示应该是
+     可选的，有的人可能不需要时间显示避免紧迫感，不管显示不显示，记录应该要有。"
+     于是拆成两层，**改动时务必别把两层搅在一起**：
+
+       · 记录层（永远在跑，跟显示开关无关）
+         created_at 在新建任务那一刻写（do_add / _spawn_next / 提升子任务），
+         done_at 在勾完成那一刻写、取消完成时清回 0（toggle_done）。
+         老数据没有 created_at → created_ts() 回落到 order（跟 done_day()
+         同一套判断：order 小于 1e9 就当它是"第几位"的排序号，不认）。
+
+       · 显示层（开关控制）
+         meta_line(t) 是**唯一**决定"卡片底下那行写什么"的地方：
+         未完成 →「建于 10-13」，已完成 →「10-13 → 10-15 · 2 天」。
+         开关是模块级 SHOW_TIME（ui.show_time 的镜像），切换走
+         set_show_time()。
+
+     ★ 为什么开关必须放**模块级**、而且 block_h() 里也要判它：
+       block_h 是纯函数（自测要在没有 Tk 的环境里算高度），拿不到 App 实例。
+       更关键的是——**算高度和画卡片必须用同一个判断**，否则关掉显示之后
+       卡片下面还会留着那一行的空档（这正是前面第 1、4 项修掉的毛病）。
+       所以两处都调 meta_line()，别在任何一边写死"这里有一行"。
+
   另外：数据存盘用"先写 .tmp 再 os.replace"的方式，避免中途断电
   导致 tasks.json 被写坏 —— 这是个通用且值得记住的写法。
 """
@@ -433,8 +463,25 @@ TITLE_TOP  = 17     # 标题第一行距卡片顶
 LINE_TITLE = 18     # 标题每行高度
 NOTE_GAP   = 4      # 标题底到备注顶的间距
 LINE_NOTE  = 16     # 备注每行高度（空备注那行「＋ 备注」也算一行）
+META_GAP   = 5      # 内容底（备注/子任务）到「创建/完成时间」那一行的间距
+LINE_META  = 16     # 「创建/完成时间」那一行的高度（关掉显示时整行不占地方）
 FOOT_H     = 34     # 底部：虚线分隔 + 徽章行（虚线到卡片底的总高）
 FOOT_GAP   = 10     # 内容底到虚线之间的呼吸位，别调到 0（会和徽章行贴死）
+
+# 卡片上是否显示「创建 / 完成时间」这一行（ui.show_time 的镜像）。
+#
+# 为什么放模块级而不是 App 上：block_h() 是纯函数（自测要在没有 Tk 的环境里
+# 算卡片高度），拿不到 App 实例 —— 而**算高度和画卡片必须用同一个判断**，
+# 否则关掉显示之后卡片高度还会留着那一行的空档（见机制⑪）。
+# 改这个值一律走 set_show_time()，别在别处直接赋值。
+SHOW_TIME = True
+
+
+def set_show_time(on):
+    """切换「卡片上显示创建 / 完成时间」。**只影响显示，不影响记录** ——
+    两个时间戳该写还是照写（用户的原话：不管显示不显示，记录应该要有）。"""
+    global SHOW_TIME
+    SHOW_TIME = bool(on)
 
 # 拖拽时「卡片上半张 = 变成它的子任务」的判定区下沿：
 # 标题/备注画完之后再往下多算这么多像素（免得只差一两像素点不中）。
@@ -554,7 +601,7 @@ HELP_SECTIONS = [
     ("k", ("复盘",     "每日复盘面板（今天做了什么、按天回看）")),
     ("k", ("置顶",     "窗口总在最前、盖住别的窗口。变成深色的「已置顶」就是开着，再点一下取消")),
     ("k", ("更多 ▾",   "回收站 / 导入恢复备份 / 立即备份 / 备份文件夹 / 备份保留天数 / "
-                        "到点提醒开关 / 打开数据文件夹 / 清空已完成")),
+                        "到点提醒开关 / 卡片上显示时间 / 打开数据文件夹 / 清空已完成")),
     ("k", ("? 帮助",   "就是本窗口（快捷键 F1，随时可开）")),
 
     ("h2", "卡片上能做的操作"),
@@ -599,6 +646,16 @@ HELP_SECTIONS = [
     ("n",  "· 再点一次「已完成」那个胶囊（或点「全部」）就回到全部任务"),
     ("n",  "· 搜索时不受影响：搜到了照样显示，哪怕它已经收起"),
     ("n",  "· 想彻底清掉：右键空白处 →「清空已完成」，会先进回收站，还能撤销"),
+
+    ("h2", "创建时间 / 完成时间"),
+    ("p",  "新建任务会自动记下创建时间，勾完成会自动记下完成时间 —— 卡片底下那行"
+           "小字就是它们。复盘时看的就是「从写下来到划掉花了几天」。"),
+    ("n",  "· 未完成的写「建于 10-13」；已完成的写「10-13 → 10-15 · 2 天」"),
+    ("n",  "· 同一天创建、同一天划掉的写「10-15 创建并完成」，不会写「0 天」"),
+    ("n",  "· 不想看见可以关掉：顶栏「更多 ▾」→「卡片上显示时间」；"
+           "关掉只是不显示，两个时间一样在记，随时能再打开"),
+    ("n",  "· 以前建的老任务没有创建时间，会拿它的排序时间粗略顶上；"
+           "实在判断不出来的就不显示这一行"),
 
     ("h2", "键盘快捷键"),
     ("k", ("回车",     "输入框里 = 添加任务；「编辑任务」框里 = 保存（Shift+回车 = 备注换行）")),
@@ -870,6 +927,10 @@ def block_h(t):
         content = sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * min(n, SUB_MAX)
     else:
         content = note_bottom
+    # 「创建 / 完成时间」那一行是可选显示：关掉之后整行连同它的间距一起消失，
+    # 卡片真的变矮（不是留一条空档）—— 这也是它必须写在 block_h 里的原因。
+    if meta_line(t):
+        content += META_GAP + LINE_META
     return max(CARD_H, content + FOOT_GAP + FOOT_H)
 
 
@@ -935,6 +996,9 @@ def _norm_task(t):
         "timer": _norm_num(t.get("timer")),
         "repeat": rp if rp in REPEAT_LABEL else "",
         "done_at": _norm_num(t.get("done_at")),
+        # 创建时间。老数据没有这个字段就留 0，显示时由 created_ts() 回落到 order
+        # ——**这里不要替它编一个值**，否则"回落到 order"这条路就再也走不到了。
+        "created_at": _norm_num(t.get("created_at")),
         "remind_key": str(t.get("remind_key", "") or ""),
     }
 
@@ -996,6 +1060,69 @@ def done_day(t):
         o = _norm_num(t.get("order"))
         ts = o if o > 1e9 else 0
     return ts_day(ts) if ts > 0 else ""
+
+
+# 大于这个值才认为"这是个像样的时间戳"（2001 年之后）。种子数据和早期版本
+# 里的 order 是 1.0 / 2.0 这种排序号，拿它当时间会算出 1970 年。
+TS_OK = 1e9
+
+
+def created_ts(t):
+    """任务的创建时间戳；判断不出来就返回 0（卡片上那一行就不画）。
+
+    优先 created_at（v3 之后新建的任务都有）；老数据没有这个字段，就回落到
+    order —— order 是创建时写的时间戳，只是后来会被拖拽排序反复改写，所以
+    只能当"参考值"，不能当准。判断逻辑跟 done_day() 是同一套。
+    """
+    ts = _norm_num(t.get("created_at"))
+    if ts > TS_OK:
+        return ts
+    o = _norm_num(t.get("order"))
+    return o if o > TS_OK else 0.0
+
+
+def short_day(s, ref):
+    """'YYYY-MM-DD' → 'MM-DD'；不是今年才带上两位年（跨年时不至于有歧义）。"""
+    d = s2d(s) if s else None
+    if d is None:
+        return ""
+    if d.year != ref.year:
+        return "%02d-%02d-%02d" % (d.year % 100, d.month, d.day)
+    return "%02d-%02d" % (d.month, d.day)
+
+
+def meta_line(t, ref=None):
+    """卡片上「创建 / 完成时间」那一行写什么。返回 "" = 这一行不画。
+
+    两种样子：
+      未完成 → 「建于 10-13」
+      已完成 → 「10-13 → 10-15 · 2 天」（同一天创建并完成 → 「10-15 创建并完成」）
+
+    复盘时要看的"效率"就是后面那个跨度和天数：一条任务从写下来到划掉花了
+    几天，比"这周完成了几条"更能说明问题。
+
+    没开显示（SHOW_TIME 假）时返回 "" —— **卡片高度也跟着少这一行**，
+    不能只把文字藏起来，否则卡片下面会留一条空档（见机制⑪）。
+    """
+    if not SHOW_TIME:
+        return ""
+    ref = ref or today()
+    c_ts = created_ts(t)
+    # created_ts 判不出来时返回 0，**这时候不能拿它去 ts_day()** ——
+    # 那会算出 1970-01-01，卡片上就冒出一行「建于 70-01-01」。
+    c_s = ts_day(c_ts) if c_ts > 0 else ""
+    c_short = short_day(c_s, ref)
+    if not t.get("done"):
+        return "建于 %s" % c_short if c_short else ""
+    d_short = short_day(done_day(t), ref)
+    if not c_short:
+        return "完成于 %s" % d_short if d_short else ""
+    if not d_short:
+        return "建于 %s" % c_short
+    if c_s == done_day(t):
+        return "%s 创建并完成" % c_short
+    n = (s2d(done_day(t)) - s2d(c_s)).days
+    return "%s → %s · %d 天" % (c_short, d_short, n)
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -1120,6 +1247,10 @@ class App:
         self.mode = self.ui.get("mode", "matrix")
         self.filter = self.ui.get("filter", "all")
         self.quick_p = self.ui.get("quick_p", 2)
+        # 「卡片上是否显示创建 / 完成时间」是个全局开关，同步到模块级
+        # （block_h() 是纯函数、拿不到 App，只能这么传，见 set_show_time）。
+        # 默认开——用户主动要的功能，默认关掉会显得"没做出来"。
+        set_show_time(self.ui.get("show_time", True))
 
         out = []
         for t in items:
@@ -1132,10 +1263,15 @@ class App:
 
     def _seed(self):
         d = today()
+        # 示例数据里的创建时间刻意做出前后差别（今天 / 前天 / 三天前），
+        # 这样第一次打开就能看到卡片底部那行时间是"活的"，不是摆设。
+        def born(days_ago=0):
+            return now_ts() - 86400 * days_ago
+
         return [
             {"id": new_id(), "title": "把季度复盘 PPT 改完，明天下午 3 点前发出去",
              "note": "重点补上留存率那一页", "p": 0, "due": d2s(d + datetime.timedelta(days=1)),
-             "done": False, "order": 1.0,
+             "done": False, "order": 1.0, "created_at": born(2),
              "subs": [{"id": new_sid(), "text": "补留存率那一页的数据", "done": True},
                       {"id": new_sid(), "text": "改封面和字体统一", "done": False},
                       {"id": new_sid(), "text": "发到评审群里", "done": False}],
@@ -1143,13 +1279,13 @@ class App:
                       d2s(d): 1800.0},
              "timer": 0},
             {"id": new_id(), "title": "回复同事发来的报销单确认", "note": "十分钟的事，别拖着",
-             "p": 2, "due": d2s(d), "done": False, "order": 2.0,
+             "p": 2, "due": d2s(d), "done": False, "order": 2.0, "created_at": born(0),
              "subs": [], "logs": {}, "timer": 0},
             {"id": new_id(), "title": "梳理下季度产品路线图", "note": "不着急，但别拖成 P0",
-             "p": 1, "due": "", "done": False, "order": 3.0,
+             "p": 1, "due": "", "done": False, "order": 3.0, "created_at": born(3),
              "subs": [], "logs": {d2s(d - datetime.timedelta(days=2)): 3600.0}, "timer": 0},
             {"id": new_id(), "title": "整理桌面上那堆截图，归档到 NAS", "note": "有空再说",
-             "p": 3, "due": "", "done": False, "order": 4.0,
+             "p": 3, "due": "", "done": False, "order": 4.0, "created_at": born(1),
              "subs": [], "logs": {}, "timer": 0},
         ]
 
@@ -1160,6 +1296,7 @@ class App:
             "ui": {
                 "mode": self.mode, "filter": self.filter,
                 "quick_p": self.quick_p, "topmost": bool(self.topmost),
+                "show_time": bool(SHOW_TIME),
                 "w": self.root.winfo_width(), "h": self.root.winfo_height(),
                 "x": self.root.winfo_x(), "y": self.root.winfo_y(),
                 "backup_dir": self.ui.get("backup_dir", ""),
@@ -1661,6 +1798,10 @@ class App:
         m.add_command(label="到点提醒：%s"
                             % ("开" if self.ui.get("remind_on", True) else "关"),
                       command=self.toggle_remind)
+        # 时间这一行是纯显示选项，和功能开关不是一类，单独摆一行
+        m.add_command(label="卡片上显示时间：%s" % ("开" if SHOW_TIME else "关"),
+                      command=self.toggle_show_time)
+        m.add_separator()
         m.add_command(label="打开数据文件夹", command=lambda: self._open_path(APP_DIR))
         m.add_command(label="清空已完成", command=self.do_clear_done)
         return m
@@ -2115,8 +2256,21 @@ class App:
 
         # 子任务区（只有真的有子任务时才画；高度已在 block_h() 里预留）
         # 起点 = 备注**底** + SUB_PAD，和 block_h() 里的 sub_top 是同一个式子
+        content_bottom = ny
         if subs_of(t):
-            self._draw_subs(t, x, ny + SUB_PAD, w, pr, tag)
+            content_bottom = self._draw_subs(t, x, ny + SUB_PAD, w, pr, tag)
+
+        # ---- 创建 / 完成时间（可选显示，见 meta_line） ----
+        # 位置选在**内容底之下、虚线之上**：徽章行已经挤了（优先级徽章 + 日期 +
+        # 计时器），塞不进去；放标题旁边又会被折行的标题撞上。
+        # 关掉显示时这里整段不画，卡片高度也跟着少一行（block_h 里同步判断）。
+        mtext = meta_line(t)
+        if mtext:
+            my = content_bottom + META_GAP
+            cv.create_text(tx, my, anchor="nw", text=mtext, font=F_SMALL,
+                           fill=(C_INK2 if t["done"] else C_INK3), tags=(tag,))
+            self.regions.append(("meta", t["id"], tx - 3, my - 2,
+                                 tx + tw + 3, my + LINE_META))
 
         # 底部分隔
         fy = y2 - FOOT_H
@@ -2780,7 +2934,11 @@ class App:
         nt = {"id": new_id(), "title": sub["text"], "note": "", "p": p,
               "due": "", "done": done, "order": now_ts(),
               "subs": [], "logs": {}, "timer": 0, "repeat": "",
-              "done_at": now_ts() if done else 0, "remind_key": ""}
+              "done_at": now_ts() if done else 0,
+              # 子任务本身不记时间（结构里只有 id/text/done），提升上来的
+              # 只能从"现在"算起 —— 卡片上显示的创建时间会晚于它真实的诞生，
+              # 这是已知的、可接受的偏差。
+              "created_at": now_ts(), "remind_key": ""}
         subs_of(src).remove(sub)
         self.tasks.append(nt)
         self._apply_drop(nt, p, idx)      # 顺便把那个象限重新编号
@@ -2967,7 +3125,7 @@ class App:
             "id": new_id(), "title": title, "note": "", "p": self.quick_p,
             "due": "", "done": False, "order": now_ts(),
             "subs": [], "logs": {}, "timer": 0,
-            "repeat": "", "done_at": 0, "remind_key": "",
+            "repeat": "", "done_at": 0, "created_at": now_ts(), "remind_key": "",
         })
         self.entry.delete(0, "end")
         self.save()
@@ -3012,7 +3170,10 @@ class App:
             "order": self._order_end(t["p"]),
             "subs": [{"id": new_sid(), "text": s["text"], "done": False}
                      for s in subs_of(t)],
-            "logs": {}, "timer": 0, "repeat": rp, "done_at": 0, "remind_key": "",
+            "logs": {}, "timer": 0, "repeat": rp, "done_at": 0,
+            # 新一轮从**现在**算起，而不是继承上一轮的创建时间 ——
+            # 否则"这轮花了几天"会把重复任务的整个历史都算进去。
+            "created_at": now_ts(), "remind_key": "",
         }
         self.tasks.append(nxt)
         return nxt
@@ -4363,6 +4524,22 @@ class App:
         self.save()
         self.status.configure(text="到点提醒已%s"
                                    % ("开启" if self.ui["remind_on"] else "关闭"))
+
+    def toggle_show_time(self):
+        """开关卡片上那行「创建 / 完成时间」。
+
+        **只影响显示，不影响记录**：两个时间戳一直在写 —— `created_at` 在新建
+        任务时写、`done_at` 在勾完成时写 —— 关掉只是不画那一行（卡片也跟着矮
+        一点）。用户的原话是「不管显示不显示，记录应该要有」，
+        所以这里绝不碰数据，只是重新绘一遍。
+        """
+        set_show_time(not SHOW_TIME)
+        self.ui["show_time"] = SHOW_TIME     # ui 段也跟上，免得两个地方说法不一致
+        self.save()
+        self.redraw()
+        self.status.configure(
+            text=("卡片上会显示「创建 / 完成时间」这一行" if SHOW_TIME
+                  else "卡片上不显示时间了（记录还在，随时能再打开）"))
 
     # ============================================================ 滚动 / 导出 / 关闭
 
