@@ -24,6 +24,41 @@
 - 双击 `启动便利贴.bat`，或命令行 `pythonw sticky.pyw`。
   用 `pythonw` 启动就不会带出黑色控制台窗口。
 
+## 打包成 exe（免安装，直接发给别人）
+
+想让日常使用不碰源码、或者发给没有 Python 的朋友，就打包成单文件 exe：
+
+```bat
+:: 1. 建一个构建环境（只做一次）
+python -m venv _build_venv
+_build_venv\Scripts\python.exe -m pip install pyinstaller pillow
+
+:: 2. 打包
+_build_venv\Scripts\python.exe tools\build_exe.py
+```
+
+产物在 `dist\`：
+
+| 文件 | 说明 |
+|---|---|
+| `逍遥便利贴.exe` | 单文件，约 9.7 MB，双击即用，不用装 Python |
+| `使用说明.txt` | 给拿到 exe 的人看的：数据存哪、怎么换电脑 |
+
+三件需要知道的事：
+
+- **数据存在 exe 旁边的 `tasks.json`**，不写注册表、不写 `%APPDATA%`。
+  所以分享时**只发 exe 就行** —— 每个人第一次打开都会拿到自己那份示例数据，
+  不会带上你的任务。反过来，自己换电脑就把 exe 和 `tasks.json` 一起拷过去。
+- **exe 别放在 `C:\Program Files` 这类需要管理员权限的目录**。那里写不了文件，
+  任务会存不下来（程序会弹一次提示说清楚原因，但最好一开始就放桌面或 D 盘）。
+- 打包脚本会**排除掉整个网络 / 加密栈**（这程序一个字节都不联网），
+  于是 openssl 那两个 dll（合计 7.5 MB）不会进产物 —— 体积直接小一半。
+
+`build/`、`dist/`、`*.spec` 都在 `.gitignore` 里：产物随时能重建，不必进仓库。
+图标由 `tools/make_icon.py` 生成（改两行颜色重跑即可），版本信息读源码里的 `APP_VERSION`。
+打包完可以用 `tools/verify_exe.py` 自动验一遍（12 项：能不能起来、数据落在哪、
+外面改的 json 读不读得到、产物里有没有夹带你的真实任务）。
+
 ## 功能一览
 
 - **四象限卡片墙**：P0 重要且紧急 / P1 重要不紧急 / P2 紧急不重要 / P3 不紧急不重要，
@@ -48,9 +83,15 @@
 任务明文存在程序目录的 `tasks.json` 里（顶层 `{v, ui, tasks, trash}`），
 不上传、不加密，随时可以用记事本打开看。换电脑把这个文件夹拷过去就行。
 
+打包成 exe 之后也是同一套：**"程序目录"就是 exe 所在的那个目录**
+（`_app_dir()` 里判了 `sys.frozen`，见源码导读机制⑬）。
+
 程序自己产生的调试图、构建产物、日志、数据备份和临时文件都不入库（见 `.gitignore`）。
 
 ## 开发
 
-- 回归测试：`python _selftest.py`（真实建窗驱动事件，当前 350 项）。
-- 源码只有一个 `App` 类，顶部「代码导读」写了从哪读起。
+- 回归测试：`python _selftest.py`（真实建窗驱动事件，当前 414 项）。
+- 源码只有一个 `App` 类，顶部「代码导读」写了从哪读起（含 13 条必须弄懂的机制）。
+- 改完代码想验证打包仍然正常：`_build_venv\Scripts\python.exe tools\build_exe.py`
+  重打一次，再 `tools\verify_exe.py` 过一遍 —— 后者会在项目上一级建个
+  `_exetest\` 当"朋友的电脑"，实测"数据确实写在 exe 旁边"，跑完随手删。

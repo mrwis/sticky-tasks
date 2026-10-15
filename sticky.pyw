@@ -98,6 +98,10 @@
                       ③ 需要编辑的话，在 open_editor() 里加一种 field
   · 改窗口标题      → 搜 "便利贴 · 任务清单"
   · 改备份文件名    → 搜 "便利贴备份-"
+  · 打包成 exe      → 跑 tools/build_exe.py（要一个装了 PyInstaller 的
+                      解释器，见 README「打包成 exe」一节）。
+                      版本号读的是本文件的 APP_VERSION，图标由
+                      tools/make_icon.py 现画 —— 这两个都不用在这儿改
   · 改自动备份周期  → 现在是一天一次；搜 _maybe_daily_backup
   · 改计时刷新频率  → 改 HEARTBEAT_MS（毫秒）
   · 改提醒频率      → 改 REMIND_MS；想默认关掉就改 _maybe_remind 里的默认值
@@ -162,7 +166,7 @@
 
 
 ----------------------------------------------------------------
-  十二个值得单独弄懂的小机制
+  十三个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -289,6 +293,24 @@
      状态栏那个「归档 N」= archived_done() 的条数，就是想让用户放心
      "任务没丢，只是收起来了"。
 
+  ⑬ 打包成 exe 之后，任务数据落在 exe 自己旁边（_app_dir / FROZEN）
+     这一条平时看不出来，分享给别人用时才暴露。程序有两种跑法，而它们
+     回答"程序在哪"的方式完全不同：
+       · 源码版：__file__ 就是这个 .pyw 的路径 → 数据写在脚本旁边
+       · 打包版：PyInstaller 的 --onefile 会先把所有东西解压到
+         %TEMP%\MEIxxxxxx（**每次启动换一个新目录、退出即删**），
+         此时 __file__ 指向的正是那个临时目录。要是拿它当基准，
+         用户改了一整天的任务会在关掉程序的瞬间跟着临时目录一起消失。
+     所以 _app_dir() 里专门判了 sys.frozen：打包时改用 sys.executable
+     （就是 exe 自己）所在的目录。**这条改动要格外小心**，自测里有
+     两条用例专门盯它（模拟 sys.frozen=True 之后看返回值）。
+     还有一件只在打包版会遇到的事：exe 可能被放进 C:\Program Files
+     这类需要管理员权限的目录，那里写文件会被系统拒绝。_write_data()
+     原先失败是 `except: pass`（静默），现在第一次失败会弹一次提示，
+     告诉用户"把整个文件夹挪到桌面或 D 盘"—— 只弹一次，
+     否则每拖动一下卡片就蹦一个框。
+     打包本身跑 tools/build_exe.py，图标由 tools/make_icon.py 画。
+
   另外：数据存盘用"先写 .tmp 再 os.replace"的方式，避免中途断电
   导致 tasks.json 被写坏 —— 这是个通用且值得记住的写法。
 """
@@ -316,6 +338,12 @@ APP_DIR = _app_dir()
 DATA_FILE = os.path.join(APP_DIR, "tasks.json")
 BACKUP_PREFIX = "便利贴备份-"
 APP_TITLE = "逍遥便利贴 · 任务清单"
+APP_VERSION = "1.0.0"
+
+# 是不是打包成 exe 在跑？打包版和源码版只有一处实质差别：
+# exe 是单文件，用户会把**它自己**（而不是整个文件夹）拷来拷去，
+# 所以「数据存在哪」这件事得说清楚 —— 见 _write_data() 的失败提示。
+FROZEN = bool(getattr(sys, "frozen", False))
 
 PRIOS = [
     dict(p=0, key="P0", name="重要且紧急",   act="立刻做",   bg="#ffe2e4", band="#e5484d"),
@@ -1120,8 +1148,26 @@ class App:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, DATA_FILE)
-        except Exception:
-            pass
+        except Exception as e:
+            # 存盘失败**不能静默**。源码版跑在仓库里，写不进去基本不可能发生；
+            # 但打包成 exe 之后，用户很容易把它丢进 C:\Program Files 这类受保护
+            # 目录 —— 那里写文件会被系统拒绝。以前这里是 `pass`，表现就是
+            # 「改了一整天任务，关掉再开全没了」，而且一句提示都没有。
+            # 只提示第一次，否则每次拖动都弹一个框。
+            if not getattr(self, "_save_warned", False):
+                self._save_warned = True
+                try:
+                    tkmb.showwarning(
+                        "任务存不进去",
+                        "数据要写在程序旁边的这个文件里：\n\n%s\n\n"
+                        "但写失败了：%s\n\n"
+                        "最常见的原因是程序放在了 C:\\Program Files 这类"
+                        "需要管理员权限的目录。\n"
+                        "把整个文件夹挪到桌面或 D 盘再打开就好了 ——"
+                        "数据是跟着程序走的，换回去之后原来的任务还在。"
+                        % (DATA_FILE, e))
+                except Exception:
+                    pass
 
     def save(self):
         self._write_data()
@@ -3623,6 +3669,11 @@ class App:
         tk.Label(bar, text="数据文件：%s" % DATA_FILE, font=F_SMALL,
                  bg=C_TOP, fg=C_INK3, anchor="w").pack(side="left")
         self._btn(bar, "关闭", w.destroy).pack(side="right")
+        # 版本号放右边（左边留给数据文件路径，它本来就是这行里最长的）。
+        # 打包成 exe 之后，「手上这是哪一版」就只能从这儿看出来了。
+        tk.Label(bar, text="v%s%s" % (APP_VERSION, "（打包版）" if FROZEN else ""),
+                 font=F_SMALL, bg=C_TOP, fg=C_INK3)\
+            .pack(side="right", padx=(0, 12))
 
         w.bind("<Escape>", lambda e: w.destroy())
 
