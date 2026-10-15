@@ -2112,6 +2112,101 @@ _rn = [t for t in app.tasks if t["title"] == "备注测试任务"]
 check("重载后备注完整保留", bool(_rn) and _rn[0]["note"] == "跨重启的备注",
       "实际 %s" % (_rn[0]["note"] if _rn else "任务都没了"))
 
+print("\n-- 打包成 exe：任务数据必须落在 exe 旁边 --")
+
+import re as _re
+
+check("源码里带着版本号（打包脚本从这儿读，只存一份）",
+      bool(_re.match(r"^\d+\.\d+\.\d+$", sticky.APP_VERSION)),
+      "实际 %r" % sticky.APP_VERSION)
+check("源码运行时不算 frozen", sticky.FROZEN is False,
+      "实际 %r" % sticky.FROZEN)
+
+# 这一段是本节最要紧的：_app_dir() 决定任务数据到底写到哪。
+# 单文件 exe 跑起来时 __file__ 指向 %TEMP%\MEIxxxx（每次启动都是一个
+# 新目录、退出即删）。要是 _app_dir() 拿它当基准，用户白天改了一整天
+# 的任务，关掉再开就全没了 —— 而且不留任何痕迹。所以这里把"打包"这件
+# 事模拟出来，直接盯 _app_dir() 的返回值。
+_real_exe = sys.executable
+_fake = r"C:\some\where\逍遥便利贴.exe"
+try:
+    sys.frozen = True
+    sys.executable = _fake
+    check("打包后 _app_dir() 取的是 exe 所在目录，不是临时解压目录",
+          sticky._app_dir() == r"C:\some\where",
+          "实际 %r" % sticky._app_dir())
+    check("打包后任务数据就写在 exe 旁边",
+          os.path.join(sticky._app_dir(), "tasks.json")
+          == os.path.join(r"C:\some\where", "tasks.json"))
+finally:
+    del sys.frozen
+    sys.executable = _real_exe
+
+check("模拟结束，_app_dir() 回到源码目录",
+      sticky._app_dir() == os.path.dirname(os.path.abspath(sticky.__file__)),
+      "实际 %r" % sticky._app_dir())
+
+print("\n-- 帮助窗里能看出这是哪一版 --")
+
+_hw = app.open_help()
+root.update()
+_labels = []
+
+
+def _walk(w):
+    for c in w.winfo_children():
+        if isinstance(c, tk.Label):
+            try:
+                _labels.append(str(c.cget("text")))
+            except Exception:
+                pass
+        _walk(c)
+
+
+_walk(_hw)
+check("帮助窗底部报出了版本号",
+      any(sticky.APP_VERSION in t for t in _labels),
+      "实际 %s" % _labels[-3:])
+check("源码版不冒充「打包版」", not any("打包版" in t for t in _labels),
+      "实际 %s" % _labels[-3:])
+_hw.destroy()
+root.update()
+
+print("\n-- 存不进盘的时候要吭声，不能装死 --")
+
+# 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
+# 目录，那里写文件会被系统拒绝。原来 _write_data() 里是 `except: pass`，
+# 表现就是"改了一天任务、关掉再开全没了"，一句提示都没有。
+import builtins as _bi
+
+_warns = []
+_open, _warn = _bi.open, sticky.tkmb.showwarning
+try:
+    sticky.tkmb.showwarning = lambda *a, **k: _warns.append(a)
+
+    def _denied(*a, **k):
+        raise PermissionError(13, "拒绝访问")
+    _bi.open = _denied
+    app._save_warned = False
+    app._write_data()
+    app._write_data()               # 第二次不该再弹，否则每次拖动都来一个框
+finally:
+    _bi.open = _open
+    sticky.tkmb.showwarning = _warn
+
+check("存盘失败会弹提示（不再静默丢数据）", len(_warns) == 1,
+      "实际弹了 %d 次" % len(_warns))
+check("提示里说清了数据在哪、该怎么办",
+      bool(_warns) and "tasks.json" in str(_warns[0])
+      and "Program Files" in str(_warns[0]),
+      "实际 %s" % (str(_warns[0])[:80] if _warns else "一次都没弹"))
+app._save_warned = False            # 复位，别影响后面
+
+print("\n-- 跳回正常路径：写盘成功后不该再提示 --")
+app.save()
+check("恢复正常后能正常存盘", os.path.exists(sticky.DATA_FILE))
+check("正常存盘不会弹任何提示", len(_warns) == 1, "实际 %d 次" % len(_warns))
+
 root.destroy()
 print("\n" + "=" * 46)
 print("通过 %d 项，失败 %d 项" % (OK, FAIL))
