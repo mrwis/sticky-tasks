@@ -159,7 +159,10 @@
                       只按"主窗 + 相对偏移"摆、不收边的不用管，本来就跟着走
   · 改"已完成的任务什么时候从板面收起" → 改 visible() 最后那一段
                       （现在是"完成当天还在，第二天收起"）；已收起条数是
-                      archived_done()，状态栏那行「归档 N」用它
+                      archived_done()，状态栏那个「已完成 N（收起 M）」用它
+  · 改状态栏那几个数字     → STAT_CHIPS（增删项）+ _update_stats()（填文字和显隐），
+                      它们是**切筛选的按钮**（_chip_paint 管三种样子、
+                      chip_filter 管点击、_filter_hint 管切过去时那句提示）
   · 状态栏那行提示  → 改 HINT_TEXT。**改完先用 tkfont.measure() 量宽度**：
                       窗口缩到最小（MIN_W=760）时，左边提示 + 右边统计数字
                       + 撤销按钮要一起装得下
@@ -290,21 +293,28 @@
      搜索是例外 —— 找东西就应该找得到，所以 self.q 非空时不拦。
      **别把这段挪到 _draw_matrix / _draw_quad 里去**：一旦有两处各自过滤，
      迟早会出现"象限标题写着 3 张、画面只有 2 张"这种对不上的情况。
-     状态栏那个「归档 N」= archived_done() 的条数，就是想让用户放心
-     "任务没丢，只是收起来了"。
+     archived_done() = 已收起的条数，状态栏那个「已完成 N（收起 M）」用它。
+
+     这一条还有个**只有用户才会发现的坑**：光把数字摆在状态栏上，人会以为
+     "已完成 2 · 归档 2"是两批任务，而且满窗口找不到能点的地方（顶栏那个
+     「全部 ▾」跟"已完成"三个字没有任何视觉联系）。所以状态栏那几个数字
+     **本身就得是按钮**（STAT_CHIPS / chip_filter），"收起 M"写成括号而不是
+     并列，切过去时再用 _filter_hint() 说一句"下面就是全部 N 条"。
+     板面被筛空时也要给出口：_draw_empty_state() 画的那段话里带一个
+     能点的「回到全部」（regions 里登记 "emptyreset"）。
 
   ⑬ 打包成 exe 之后，任务数据落在 exe 自己旁边（_app_dir / FROZEN）
      这一条平时看不出来，分享给别人用时才暴露。程序有两种跑法，而它们
      回答"程序在哪"的方式完全不同：
        · 源码版：__file__ 就是这个 .pyw 的路径 → 数据写在脚本旁边
        · 打包版：PyInstaller 的 --onefile 会先把所有东西解压到
-         %TEMP%\MEIxxxxxx（**每次启动换一个新目录、退出即删**），
+         %TEMP%\\MEIxxxxxx（**每次启动换一个新目录、退出即删**），
          此时 __file__ 指向的正是那个临时目录。要是拿它当基准，
          用户改了一整天的任务会在关掉程序的瞬间跟着临时目录一起消失。
      所以 _app_dir() 里专门判了 sys.frozen：打包时改用 sys.executable
      （就是 exe 自己）所在的目录。**这条改动要格外小心**，自测里有
      两条用例专门盯它（模拟 sys.frozen=True 之后看返回值）。
-     还有一件只在打包版会遇到的事：exe 可能被放进 C:\Program Files
+     还有一件只在打包版会遇到的事：exe 可能被放进 C:\\Program Files
      这类需要管理员权限的目录，那里写文件会被系统拒绝。_write_data()
      原先失败是 `except: pass`（静默），现在第一次失败会弹一次提示，
      告诉用户"把整个文件夹挪到桌面或 D 盘"—— 只弹一次，
@@ -446,6 +456,18 @@ FILTERS = [
     ("done",     "已完成"),
 ]
 
+# 状态栏右下角那几个数字，同时就是「切筛选」的按钮。
+# 只写数字的话，用户看着「已完成 2」根本不知道该去哪儿看这 2 条 ——
+# 顶栏那个「全部 ▾」跟"已完成"三个字毫无视觉联系（用户原话：找不到按钮）。
+# 所以每个数字都是一个可点的小胶囊，点一下切到对应筛选。
+STAT_CHIPS = [
+    ("open",    "未完成"),
+    ("due",     "今天"),
+    ("overdue", "逾期"),
+    ("running", "计时中"),
+    ("done",    "已完成"),      # 括号里会再补「收起 N」，见 _update_stats
+]
+
 # 耗时统计的口径
 PERIODS = [
     ("today", "今天"),
@@ -525,7 +547,8 @@ HELP_SECTIONS = [
                           "P2 紧急不重要·委托做 / P3 不紧急不重要·有空再做")),
     ("k", ("贴上",     "添加任务（等于在输入框里按回车）")),
     ("k", ("四象限 / 列表", "切换视图：四象限按优先级分四块；列表把任务平铺开按时间排")),
-    ("k", ("全部 ▾",   "筛选：全部 / 未完成 / 今天要做 / 已逾期 / 计时中 / 已完成")),
+    ("k", ("全部 ▾",   "筛选：全部 / 未完成 / 今天要做 / 已逾期 / 计时中 / 已完成。"
+                        "状态栏右下角那几个数字也是按钮，点一下同样切过去")),
     ("k", ("搜索",     "按标题、备注、子任务文字实时过滤；清空输入框就恢复全部")),
     ("k", ("统计",     "耗时统计面板（各象限投入、完成趋势、热力图）")),
     ("k", ("复盘",     "每日复盘面板（今天做了什么、按天回看）")),
@@ -567,8 +590,13 @@ HELP_SECTIONS = [
     ("h2", "已完成的任务第二天就不在板面上了"),
     ("p",  "勾上完成的任务会留在象限里到当天结束，第二天自动收起 —— "
            "板面上只看得到「今天完成的」，不会一天天堆成一片历史垃圾场。"),
-    ("n",  "· 想回看全部完成记录：把顶栏的「全部 ▾」切到「已完成」"),
-    ("n",  "· 状态栏右侧的「归档 N」就是已经收起、不在板面上的条数"),
+    ("p",  "收起不等于删除：任务一条都没少，只是不在板面上而已。"),
+    ("n",  "· 想回看全部完成记录：点状态栏右下角的「已完成 N」，"
+           "或者把顶栏的「全部 ▾」切到「已完成」"),
+    ("n",  "· 「已完成 N」里那个 N 是全部完成的任务数；括号里的"
+           "「收起 M」是其中已经不在板面上的那部分 —— 后者是前者的一部分，"
+           "不是另一批任务"),
+    ("n",  "· 再点一次「已完成」那个胶囊（或点「全部」）就回到全部任务"),
     ("n",  "· 搜索时不受影响：搜到了照样显示，哪怕它已经收起"),
     ("n",  "· 想彻底清掉：右键空白处 →「清空已完成」，会先进回收站，还能撤销"),
 
@@ -1511,9 +1539,81 @@ class App:
         self.undo_btn.grid(row=0, column=1, padx=(10, 0))
         self.undo_btn.grid_remove()          # 平时藏起来，删除后才露面
 
-        # 统计数字挪到底部右侧，给顶栏腾出放按钮的地方
-        self.stat = tk.Label(row, text="", font=F_SMALL, bg=C_TOP, fg=C_INK2)
-        self.stat.grid(row=0, column=2, padx=(14, 0))
+        # 统计数字挪到底部右侧，给顶栏腾出放按钮的地方。
+        # 它们不只是数字，还是**切筛选的按钮**（见 STAT_CHIPS / chip_filter）：
+        # 用户找不到"已完成的任务在哪儿"，就是因为唯一的入口藏在顶栏
+        # 那个「全部 ▾」里，而这几个数字自己不可点、也不像控件。
+        self.stat_box = tk.Frame(row, bg=C_TOP)
+        self.stat_box.grid(row=0, column=2, padx=(10, 0))
+        self.stat_chips = {}
+        for i, (k, _label) in enumerate(STAT_CHIPS):
+            # 白底 + 细边 = 一眼就是按钮。只写文字的话，用户照样会说
+            # "我发现没有任何的按钮"（这正是他报的原话）。
+            # padx / 左间距刻意收得比较小：这排胶囊比原来那串纯文字宽了
+            # 一百多像素，窗口缩到最小（MIN_W）时得跟左边的提示一起装下。
+            lab = tk.Label(self.stat_box, text="", font=F_SMALL, bg=C_WHITE,
+                           fg=C_INK2, padx=6, pady=1, cursor="hand2", bd=0,
+                           highlightthickness=1, highlightbackground=C_LINE,
+                           highlightcolor=C_LINE)
+            # 用 grid 而不是 pack：数量为 0 的项要能藏起来，
+            # 而 grid_remove() 会记住位置，再 grid() 就回到原来的次序
+            # （pack_forget 后再 pack 会跑到最后一个去）。
+            lab.grid(row=0, column=i, padx=(3, 0))
+            lab.grid_remove()
+            lab.bind("<Button-1>", lambda e, kk=k: self.chip_filter(kk))
+            lab.bind("<Enter>", lambda e, kk=k: self._chip_paint(kk, hover=True))
+            lab.bind("<Leave>", lambda e, kk=k: self._chip_paint(kk, hover=False))
+            self.stat_chips[k] = lab
+
+    # -------- 状态栏胶囊（统计数字 = 切筛选的按钮） --------
+
+    def _chip_paint(self, k, hover=False):
+        """胶囊的三种样子：当前视图（深底白字）/ 鼠标悬停 / 平常（白底细边）。
+
+        边框颜色也跟着变，否则选中态那圈浅边会留在深底上。
+        """
+        lab = self.stat_chips.get(k) if getattr(self, "stat_chips", None) else None
+        if lab is None:
+            return
+        if self.filter == k:
+            bg, fg, line = C_INK, "#ffffff", C_INK
+        elif hover:
+            bg, fg, line = "#f2eee6", C_INK, "#cfc8ba"
+        else:
+            bg, fg, line = C_WHITE, C_INK2, C_LINE
+        lab.configure(bg=bg, fg=fg, highlightbackground=line, highlightcolor=line)
+
+    def chip_filter(self, k):
+        """点状态栏胶囊：切到那个筛选。已经在这个筛选里，再点一次 = 回到全部
+        （和顶栏筛选按钮同义，用户不用再去找别的出口）。"""
+        self.set_filter("all" if self.filter == k else k)
+
+    def clear_filters(self):
+        """回到「全部」，并清掉搜索词 —— 板面空态里那个「看全部」用的。"""
+        if self.q:
+            self.q = ""
+            self.search.delete(0, "end")
+        self.set_filter("all")
+
+    def _filter_hint(self, k):
+        """切筛选时在状态栏左侧说一句「你现在看的是什么、怎么回去」。
+
+        从胶囊点进来的用户尤其需要这句 —— 状态栏只管亮数字，不解释的话
+        他们不知道自己被切到哪儿了。
+        """
+        if k == "all":
+            return HINT_TEXT
+        n_done = len([t for t in self.tasks if t["done"]])
+        arch = len(self.archived_done())
+        if k == "done":
+            # 这句是回答"已完成 / 归档 到底啥区别"的地方：
+            # 它们**不是两批任务**，后者只是前者里已经不在板面上的那部分。
+            s = "这里是全部 %d 条已完成的任务" % n_done
+            if arch:
+                s += "，其中 %d 条已从板面收起（不是丢了）" % arch
+            return s + " · 再点一次胶囊回到全部"
+        name = dict(FILTERS).get(k, k)
+        return "只显示「%s」的任务 · 再点一次胶囊回到全部" % name
 
     # ============================================================ 顶栏行为
 
@@ -1584,6 +1684,9 @@ class App:
     def refresh_view_btns(self):
         self.view_btn.configure(text="四象限" if self.mode == "matrix" else "列表")
         self.filter_btn.configure(text=dict(FILTERS).get(self.filter, "全部") + " ▾")
+        # 当前所处的筛选，用深底胶囊标出来（点胶囊进来的用户要能看见"我在哪儿"）
+        for k in (getattr(self, "stat_chips", None) or {}):
+            self._chip_paint(k)
 
     def toggle_view(self):
         self.mode = "list" if self.mode == "matrix" else "matrix"
@@ -1661,15 +1764,30 @@ class App:
             except Exception:
                 pass
 
-    def show_filter_menu(self):
+    def build_filter_menu(self):
+        """只负责把筛选菜单拼出来，不负责弹（菜单一弹就进模态循环，
+        测试没法验它里面写了什么 —— 同 build_more_menu / build_card_menu）。"""
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        n_done = len([t for t in self.tasks if t["done"]])
+        arch = len(self.archived_done())
         for k, label in FILTERS:
+            if k == "done":
+                # 这里是用户找「完成的任务去哪了」的第一站，把条数写出来，
+                # 并点明「已收起」是「已完成」的一部分而不是另一批任务 ——
+                # 光看状态栏那两个并列的数字，谁都会以为是两回事。
+                label = "已完成（%d 条%s）" % (
+                    n_done, "，含已收起 %d" % arch if arch else "")
             m.add_command(label=label, command=lambda kk=k: self.set_filter(kk))
-        self._popup(m, self.filter_btn)
+        return m
+
+    def show_filter_menu(self):
+        self._popup(self.build_filter_menu(), self.filter_btn)
 
     def set_filter(self, k):
         self.filter = k
         self.refresh_view_btns()
+        if getattr(self, "status", None) is not None:
+            self.status.configure(text=self._filter_hint(k))
         self.save()
         self.redraw()
 
@@ -1751,12 +1869,55 @@ class App:
             cv.configure(scrollregion=(0, 0, W, 400))
             return
 
+        if not show:
+            # 筛选（或搜索）把任务全滤掉了。四象限每格只会写一句「暂无」，
+            # 用户会以为任务丢了 —— 给一句解释 + 一个能点回去的地方。
+            self._draw_empty_state(W)
+            cv.configure(scrollregion=(0, 0, W, max(400, cv.winfo_height())))
+            return
+
         if self.mode == "matrix":
             total_h = self._draw_matrix(groups, W)
         else:
             total_h = self._draw_list(groups, W)
 
         cv.configure(scrollregion=(0, 0, W, max(total_h, cv.winfo_height())))
+
+    def _draw_empty_state(self, W):
+        """筛选/搜索之后一张卡片都没有时，板面上画的那段话。
+
+        它同时是**一个能点的按钮**（regions 里登记成 "emptyreset"）：
+        点一下回到「全部」并清空搜索。不这么做的话，用户切到「已完成」
+        发现是空的，就只能自己满窗口找别的出口，很容易卡在这儿。
+        """
+        cv = self.cv
+        if self.q:
+            title = "没找到含「%s」的任务" % self.q
+            tip = "换个词试试，或者回到全部看所有任务"
+            btn = "清空搜索，看全部"
+        else:
+            name = dict(FILTERS).get(self.filter, "全部")
+            title = "「%s」里现在没有任务" % name
+            if self.filter == "done":
+                tip = "完成的任务会一直记在这儿，直到你清空它们"
+            else:
+                tip = "换个筛选看看，或者回到全部"
+            btn = "← 回到全部"
+
+        y = 140
+        cv.create_text(W // 2, y, text=title,
+                       font=("Microsoft YaHei UI", 13), fill=C_INK3)
+        cv.create_text(W // 2, y + 32, text=tip, font=F_BODY, fill=C_INK3)
+
+        bw = _font_of(F_SMALL).measure(btn) + 26
+        bh = 28
+        x1 = W // 2 - bw / 2.0
+        y1 = y + 62
+        round_rect(cv, x1, y1, x1 + bw, y1 + bh, 8,
+                   fill=C_WHITE, outline=C_LINE, width=1)
+        cv.create_text(x1 + bw / 2.0, y1 + bh / 2.0, text=btn,
+                       font=F_SMALL, fill=C_INK)
+        self.regions.append(("emptyreset", "", x1, y1, x1 + bw, y1 + bh))
 
     # -------- 四象限布局 --------
     def _draw_matrix(self, groups, W):
@@ -2148,28 +2309,43 @@ class App:
         return _wrap_lines(text, font, maxw, maxlines)
 
     def _update_stats(self):
+        """刷新状态栏右侧那排胶囊。
+
+        它们既是统计数字，也是**切筛选的入口**（点一下就切，见 chip_filter）。
+        所以这里只负责把文字和显隐填对，样式交给 _chip_paint。
+        """
         T = today()
         all_ = self.tasks
         open_ = [t for t in all_ if not t["done"]]
         hot = [t for t in open_ if t["due"] and s2d(t["due"]) and s2d(t["due"]) <= T]
         late = [t for t in open_ if t["due"] and s2d(t["due"]) and s2d(t["due"]) < T]
         run = [t for t in open_ if t.get("timer")]
-        # 这段文字现在显示在底部状态栏右侧，所以尽量短；
-        # 完整的数字（总数、已完成、子任务进度）在统计面板里。
-        s = "未完成 %d" % len(open_)
-        if hot:
-            s += " · 今天 %d" % len(hot)
-        if late:
-            s += " · 逾期 %d" % len(late)
-        if run:
-            s += " · 计时中 %d" % len(run)
-        s += " · 已完成 %d" % (len(all_) - len(open_))
         arch = len(self.archived_done())
-        if arch:
-            # 「已完成 N」是总数；其中昨天及更早完成的已经从板面收起，
-            # 单独再说一句，免得用户以为任务丢了（它们在「已完成」筛选里）。
-            s += " · 归档 %d" % arch
-        self.stat.configure(text=s)
+
+        vals = {
+            "open":    (len(open_), ""),
+            "due":     (len(hot), ""),
+            "overdue": (len(late), ""),
+            "running": (len(run), ""),
+            # 「已完成 N」的 N 是**全部**完成的任务；括号里是其中已经从板面
+            # 收起的那部分。写成括号而不是并列的「· 归档 N」——
+            # 并列会让人以为是两批不同的任务（用户就是这么被绕进去的）。
+            "done":    (len(all_) - len(open_),
+                        "（收起%d）" % arch if arch else ""),
+        }
+        for k, label in STAT_CHIPS:
+            lab = self.stat_chips.get(k)
+            if lab is None:
+                continue
+            n, extra = vals[k]
+            if k != "done" and not n:
+                lab.grid_remove()        # 为 0 的项不占地方（已完成永远显示）
+            else:
+                # 数字跟汉字之间不留空格：这排胶囊是抢宽度的大户，
+                # 中文里「未完成5」读起来也不别扭
+                lab.configure(text="%s%d%s" % (label, n, extra))
+                lab.grid()
+                self._chip_paint(k)
 
     # ============================================================ 命中测试
 
@@ -2196,6 +2372,14 @@ class App:
             self._commit_editor()
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
+        # 板面空态里那个「回到全部」不是任务（没有 tid），单独给它一个最小
+        # drag：松手时不拖动就走 on_release → handle_click，和别的可点区域
+        # 同一条路径。标记 fixed 是为了不让它参与拖拽（on_motion 里会跳过）。
+        if kind == "emptyreset":
+            self.drag = {"tid": "", "x0": cx, "y0": cy, "kind": kind,
+                         "moved": False, "target": None, "idx": None,
+                         "nest": None, "last_x": cx, "last_y": cy, "fixed": True}
+            return
         if not tid:
             return
         t = self.task_by_id(tid)
@@ -2219,6 +2403,8 @@ class App:
         d = self.drag
         if not d:
             return
+        if d.get("fixed"):
+            return                  # 空态提示上的按钮，不参与拖拽
         cx, cy = self._canvas_xy(e)
 
         if not d["moved"]:
@@ -2607,6 +2793,10 @@ class App:
         return nt
 
     def handle_click(self, kind, tid, e):
+        if kind == "emptyreset":
+            # 板面空态里那个「回到全部 / 清空搜索」（它没有对应的任务）
+            self.clear_filters()
+            return
         t = self.task_by_id(tid)
         if not t:
             return
@@ -2656,7 +2846,7 @@ class App:
     def on_hover(self, e):
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
-        self.cv.configure(cursor="hand2" if tid else "")
+        self.cv.configure(cursor="hand2" if (tid or kind == "emptyreset") else "")
 
     def on_right(self, e):
         cx, cy = self._canvas_xy(e)

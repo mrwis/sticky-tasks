@@ -41,6 +41,18 @@ def region(app, kind, tid):
     return None
 
 
+def chip_text(app, k):
+    """状态栏右下角那个胶囊上写的字（它是统计数字，也是切筛选的按钮）。"""
+    lab = app.stat_chips.get(k)
+    return lab.cget("text") if lab is not None else ""
+
+
+def chip_shown(app, k):
+    """胶囊现在是不是露在外面（为 0 的项会被 grid_remove 藏起来）。"""
+    lab = app.stat_chips.get(k)
+    return bool(lab is not None and lab.winfo_manager())
+
+
 root = tk.Tk()
 app = sticky.App(root)
 # 测试里把提醒关掉：种子数据里就有今天到期的任务，
@@ -582,8 +594,11 @@ check("老数据（没有 done_at）也按 order 算完成日",
       sticky.done_day(ad_legacy) != sticky.d2s(sticky.today()))
 check("老数据的已完成同样被收起", app.visible(ad_legacy) is False)
 
-check("状态栏报出了「归档」条数", "归档" in app.stat.cget("text"),
-      "实际 %r" % app.stat.cget("text"))
+check("状态栏报出了「收起」条数", "收起" in chip_text(app, "done"),
+      "实际 %r" % chip_text(app, "done"))
+check("状态栏不再用「归档」这个词（会被当成另一批任务）",
+      "归档" not in chip_text(app, "done"),
+      "实际 %r" % chip_text(app, "done"))
 
 app.tasks = [t for t in app.tasks
              if t["id"] not in (ad_now["id"], ad_old["id"], ad_legacy["id"])]
@@ -593,6 +608,113 @@ root.update()
 check("归档测试任务已清理",
       all(app.task_by_id(x["id"]) is None
           for x in (ad_now, ad_old, ad_legacy)))
+
+print("\n-- 状态栏的数字就是「已完成 / 归档在哪儿看」的入口 --")
+
+# 用户原话：「已完成 2，归档 2，这两个是什么意思？有什么区别吗？另外就是
+# 按钮在哪？我发现没有任何的按钮。」三个落点都在这一组用例里：
+#   ① 数字变成能点的胶囊         ②「归档」并进「已完成」的括号（不是两批任务）
+#   ③ 筛空了要给一个点得回去的出口
+
+
+def canvas_texts(a):
+    out = []
+    for i in a.cv.find_all():
+        if a.cv.type(i) == "text":
+            out.append(a.cv.itemcget(i, "text"))
+    return out
+
+
+app.set_filter("all")
+app.redraw()
+root.update()
+
+check("状态栏有「未完成」这个可点的胶囊",
+      chip_text(app, "open").startswith("未完成"), "实际 %r" % chip_text(app, "open"))
+check("「已完成」胶囊永远显示（哪怕 0 条也要点得进去看）", chip_shown(app, "done"))
+
+cap_now = mk("胶囊用：今天完成的")
+app.toggle_done(cap_now)
+cap_old = mk("胶囊用：前天完成的")
+app.toggle_done(cap_old)
+cap_old["done_at"] = sticky.now_ts() - 86400 * 2.5
+cap_old["order"] = cap_old["done_at"]
+app.redraw()
+root.update()
+
+n_done_all = len([t for t in app.tasks if t["done"]])
+n_arch = len(app.archived_done())
+txt = chip_text(app, "done")
+check("「已完成 N」的 N 是全部完成数（含已收起的）",
+      ("已完成%d" % n_done_all) in txt, "实际 %r" % txt)
+check("收起的条数挂在括号里、不并列（后者是前者的子集，不是另一批任务）",
+      ("（收起%d）" % n_arch) in txt and n_arch <= n_done_all, "实际 %r" % txt)
+
+app.chip_filter("done")
+check("点「已完成」胶囊就切过去了", app.filter == "done")
+check("切过去看得见那条已收起的任务", region(app, "card", cap_old["id"]) is not None)
+check("状态栏左侧解释了一句「这批任务是啥」",
+      "收起" in app.status.cget("text"), "实际 %r" % app.status.cget("text"))
+check("当前所在的胶囊是深底的（一眼看出自己在哪个视图）",
+      app.stat_chips["done"].cget("bg") == sticky.C_INK,
+      "实际 %r" % app.stat_chips["done"].cget("bg"))
+
+app.chip_filter("done")                  # 同一个胶囊再点一次 = 回到全部
+check("再点一次同一个胶囊就回到全部", app.filter == "all")
+check("回到全部后胶囊变回常态（白底细边）",
+      app.stat_chips["done"].cget("bg") == sticky.C_WHITE,
+      "实际 %r" % app.stat_chips["done"].cget("bg"))
+check("常态胶囊有边框（看得出是个按钮，不是一行文字）",
+      int(app.stat_chips["done"].cget("highlightthickness")) >= 1)
+
+fm = app.build_filter_menu()
+flabels = [fm.entrycget(i, "label") for i in range(fm.index("end") + 1)]
+check("筛选菜单里「已完成」写明了条数",
+      any(l.startswith("已完成（%d 条" % n_done_all) for l in flabels),
+      "实际 %s" % flabels)
+check("筛选菜单里点明了「含已收起 M」",
+      any("含已收起 %d" % n_arch in l for l in flabels), "实际 %s" % flabels)
+fm.destroy()
+
+app.tasks = [t for t in app.tasks if t["id"] not in (cap_now["id"], cap_old["id"])]
+
+print("\n-- 板面被筛空时，给一个点得回去的出口 --")
+
+app.set_filter("all")
+app.redraw()
+root.update()
+
+_saved = app.tasks
+app.tasks = [t for t in _saved if not t["done"]]     # 造出"「已完成」里是空的"
+app.set_filter("done")
+app.redraw()
+root.update()
+check("筛到空的时候画面上有解释",
+      any("没有任务" in x for x in canvas_texts(app)),
+      "实际 %s" % canvas_texts(app)[:6])
+box = region(app, "emptyreset", "")
+check("空态里有一个能点的「回到全部」", box is not None)
+
+app.on_press(E((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0))
+check("空态按钮按下也进 drag（和别的可点区域同一条路径）",
+      bool(app.drag) and app.drag.get("fixed"))
+app.on_release(E((box[0] + box[2]) / 2.0, (box[1] + box[3]) / 2.0))
+check("松手就真的回到全部了", app.filter == "all")
+
+app.search.insert(0, "绝对搜不到的词zzz")
+app.on_search()
+app.redraw()
+root.update()
+check("搜不到时同样有提示和出口", region(app, "emptyreset", "") is not None)
+app.handle_click("emptyreset", "", E(0, 0))
+check("点它连搜索词一起清掉",
+      app.filter == "all" and app.q == "" and app.search.get() == "",
+      "filter=%r q=%r 输入框=%r" % (app.filter, app.q, app.search.get()))
+
+app.tasks = _saved
+app.set_filter("all")
+app.redraw()
+root.update()
 
 nz = sticky._norm_subs(["x", {"text": "y"}, {"text": ""}, 123, {"text": "z", "done": True}])
 check("归一化丢掉空文本与非字典项", len(nz) == 3, "实际 %d" % len(nz))
