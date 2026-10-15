@@ -549,6 +549,164 @@ app.redraw()
 root.update()
 check("菜单用例的任务已清理", app.task_by_id(sm["id"]) is None)
 
+print("\n-- 子任务：已完成的沉底 + 次日自动收起 --")
+
+# 用户原话：「已经完成的子任务自动放在子任务的最后面，同时第二天应该自动隐藏
+# 已完成的子任务，因为一个任务里面如果有很多子任务，不一定能一天全部完成，
+# 放在后面就方便看其他的未完成的子任务。」
+
+app.set_filter("all")
+sd = mk("子任务沉底测试")
+app.add_subs(sd, ["甲", "乙", "丙", "丁"])
+_sd_subs = sticky.subs_of(sd)
+app.toggle_sub(sd, _sd_subs[1]["id"])            # 走真实路径：done_at 会被写上
+app.toggle_sub(sd, _sd_subs[2]["id"])
+
+check("已完成的沉到最后（甲 丁 乙 丙）",
+      [s["text"] for s in sticky.visible_subs(sd)] == ["甲", "丁", "乙", "丙"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(sd)])
+check("数据里的顺序一个字没动（排序只发生在显示层）",
+      [s["text"] for s in sticky.subs_of(sd)] == ["甲", "乙", "丙", "丁"],
+      "实际 %s" % [s["text"] for s in sticky.subs_of(sd)])
+check("今天完成的还没被收起", sticky.hidden_sub_n(sd) == 0)
+check("勾完成时写上了子任务的完成时间",
+      sticky.sub_done_day(_sd_subs[1]) == sticky.d2s(sticky.today()),
+      "实际 %r" % sticky.sub_done_day(_sd_subs[1]))
+
+# 把「丙」的完成时间挪到昨天 → 它就该从卡面消失
+_sd_subs[2]["done_at"] = sticky.now_ts() - 86400 * 1.5
+check("昨天完成的从可见序列里去掉",
+      [s["text"] for s in sticky.visible_subs(sd)] == ["甲", "丁", "乙"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(sd)])
+check("收起条数算得出来", sticky.hidden_sub_n(sd) == 1)
+
+app.redraw()
+root.update()
+check("卡面上确实没有它了",
+      region(app, "sc:" + _sd_subs[2]["id"], sd["id"]) is None)
+check("「已完成 1」胶囊挂在标题行上（点得开）",
+      region(app, "subtos:" + sd["id"], sd["id"]) is not None)
+
+app.handle_click("subtos:" + sd["id"], sd["id"], E(0, 0))
+check("点一下胶囊就摊开了", sticky.hidden_sub_n(sd) == 0)
+check("摊开后它进了可见序列，而且仍然沉底",
+      [s["text"] for s in sticky.visible_subs(sd)] == ["甲", "丁", "乙", "丙"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(sd)])
+check("4 条可见就分两页了", sticky.sub_pages(len(sticky.visible_subs(sd))) == 2)
+app.redraw()
+root.update()
+# 摊开之后 hidden_sub_n 变成 0 了 —— 胶囊要是跟着消失，就再也收不回去
+check("★ 摊开后胶囊还在（不然就收不回去了）",
+      region(app, "subtos:" + sd["id"], sd["id"]) is not None)
+check("第一页还看不到它（第 4 条在第二页）",
+      region(app, "sc:" + _sd_subs[2]["id"], sd["id"]) is None)
+app.turn_sub_page(sd, +1)
+app.redraw()
+root.update()
+check("翻到第二页就看得到摊开的那条",
+      region(app, "sc:" + _sd_subs[2]["id"], sd["id"]) is not None)
+app.turn_sub_page(sd, -1)
+app.handle_click("subtos:" + sd["id"], sd["id"], E(0, 0))
+check("再点一次收回", sticky.hidden_sub_n(sd) == 1)
+app.redraw()
+root.update()
+
+# 「摊开会变高」得挑一张可见条数 < SUB_MAX 的卡来看 —— 否则摊开只是让第二页
+# 多出内容（高度按 min(可见, SUB_MAX) 算，本来就不变）。
+ht = mk("摊开变高测试")
+app.add_subs(ht, ["A", "B", "C"])
+_ht_subs = sticky.subs_of(ht)
+_ht_subs[2]["done"] = True
+_ht_subs[2]["done_at"] = sticky.now_ts() - 86400 * 2      # 昨天完成 → 收起
+check("收起时可见 2 条", len(sticky.visible_subs(ht)) == 2,
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(ht)])
+check("收起时那条也在可见序列之外（它排在最后）",
+      [s["text"] for s in sticky.visible_subs(ht)] == ["A", "B"])
+_h1 = sticky.block_h(ht)
+sticky.SUB_SHOW_DONE.add(ht["id"])
+_h2 = sticky.block_h(ht)
+sticky.SUB_SHOW_DONE.discard(ht["id"])
+check("摊开后卡片正好高出一行（3 条可见，还没到第二页）",
+      _h2 - _h1 == sticky.SUB_LINE, "收 %s 开 %s" % (_h1, _h2))
+
+# 「屏幕第几行 ↔ 列表下标」两个方向都要折算对：拖拽排序全靠它，
+# 而中间隔着翻页 + 未完成在前 + 次日收起三层。
+app.redraw()
+root.update()
+_rows_sd = app._sub_rows.get(sd["id"]) or []
+check("拖拽落点的两个方向能对上（屏幕行号 ↔ 列表下标）",
+      bool(_rows_sd) and all(
+          app._sub_row_of(sd["id"], app._sub_insert_index(sd["id"], y1 - 1)) == i
+          for i, (_s, y1, _y2) in enumerate(_rows_sd)),
+      "实际 %s" % [(i, app._sub_row_of(
+          sd["id"], app._sub_insert_index(sd["id"], y1 - 1)))
+          for i, (_s, y1, _y2) in enumerate(_rows_sd)])
+
+# 全部收起：可见 0 条，但标题行还在（那是唯一能摊开它们的入口），
+# 而且**卡片不留空的子任务行**（跟第 9 项"关掉时间行就不占高度"同一个道理）
+for _s in sticky.subs_of(sd):
+    _s["done"] = True
+    _s["done_at"] = sticky.now_ts() - 86400 * 2
+sticky.SUB_SHOW_DONE.discard(sd["id"])
+app.redraw()
+root.update()
+check("全收起时可见条数是 0", len(sticky.visible_subs(sd)) == 0)
+check("但「已完成 4」那个胶囊还在（不然就再也点不开了）",
+      region(app, "subtos:" + sd["id"], sd["id"]) is not None)
+_h_zero = sticky.block_h(sd)
+sticky.SUB_SHOW_DONE.add(sd["id"])
+_h_all = sticky.block_h(sd)
+sticky.SUB_SHOW_DONE.discard(sd["id"])
+check("全收起时按 0 行算（摊开后正好多出 min(4,3)=3 行，不留空档）",
+      _h_all - _h_zero == sticky.SUB_MAX * sticky.SUB_LINE,
+      "零 %s 全 %s" % (_h_zero, _h_all))
+app.redraw()
+root.update()
+check("画布上也确实没画子任务行",
+      all(region(app, "sc:" + _s["id"], sd["id"]) is None
+          for _s in sticky.subs_of(sd)))
+
+# 老数据（子任务没有 done_at）
+od = mk("老数据的子任务")
+od["subs"] = [{"id": sticky.new_sid(), "text": "老数据未完成", "done": False},
+              {"id": sticky.new_sid(), "text": "老数据已完成", "done": True}]
+check("老数据的已完成子任务照样收起（没有 done_at 就当成早就完成了）",
+      [s["text"] for s in sticky.visible_subs(od)] == ["老数据未完成"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(od)])
+
+# 取消完成：done_at 清掉、人回到未完成那一段
+# （上面「全部收起」那段刚把每条都设成已完成，所以这里 toggle **一次**就是取消）
+app.toggle_sub(sd, _sd_subs[0]["id"])
+check("取消完成后 done_at 清回 0", sticky._norm_num(_sd_subs[0].get("done_at")) == 0,
+      "实际 %r" % _sd_subs[0].get("done_at"))
+check("取消完成后它回到未完成那一段（数据顺序没被挪过）",
+      [s["text"] for s in sticky.visible_subs(sd)][0] == "甲",
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(sd)])
+
+# 页数按**可见条数**算：收起几条之后，翻页器该消失就消失
+pgd = mk("翻页按可见条数")
+app.add_subs(pgd, ["一", "二", "三", "四", "五", "六"])
+for _s in sticky.subs_of(pgd)[-3:]:
+    _s["done"] = True
+    _s["done_at"] = sticky.now_ts() - 86400 * 2
+check("收起三条之后只剩三条 → 一页就够",
+      sticky.sub_pages(len(sticky.visible_subs(pgd))) == 1)
+app.redraw()
+root.update()
+check("翻页器确实不画了", region(app, "subnext", pgd["id"]) is None)
+check("可见的正好是没完成的那三条",
+      [s["text"] for s in sticky.visible_subs(pgd)] == ["一", "二", "三"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(pgd)])
+
+app.tasks = [t for t in app.tasks
+             if t["id"] not in (sd["id"], od["id"], pgd["id"])]
+sticky.SUB_SHOW_DONE.discard(sd["id"])
+app.set_filter("all")
+app.redraw()
+root.update()
+check("子任务沉底用例的测试任务已清理",
+      all(app.task_by_id(x) is None for x in (sd["id"], od["id"], pgd["id"])))
+
 print("\n-- 创建时间 / 完成时间：自动记，显示可选 --")
 
 # 用户的原话：「创建的任务应该自动添加创建时间，同理完成任务勾选后，也应该
