@@ -2796,12 +2796,15 @@ class App:
             self._commit_editor()
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
-        # 板面空态里那个「回到全部」、象限标题栏上的翻页器，都不是任务（没有
-        # 对应的 tid）：单独给它们一条最小 drag，松手时不拖动就走
-        # on_release → handle_click，和别的可点区域同一条路径。
-        # 标记 fixed 是为了不让它们参与拖拽（on_motion 里会跳过）。
+        # 板面空态里那个「回到全部」、象限标题栏上的翻页器，都不是任务：
+        # 单独给它们一条最小 drag，松手时不拖动就走 on_release → handle_click，
+        # 和别的可点区域同一条路径。标记 fixed 是为了不让它们参与拖拽。
+        #
+        # ★ tid 必须**原样带上**。象限翻页器的 tid 是 "Q1" 这种（不是任务 id），
+        #   handle_click 靠它判断翻哪个象限 —— 写成空串的话点了会静默没反应
+        #   （2026-10-24 就是这么翻车一次的）。空态那个的 tid 本来就是 ""。
         if kind in ("emptyreset", "qprev", "qnext"):
-            self.drag = {"tid": "", "x0": cx, "y0": cy, "kind": kind,
+            self.drag = {"tid": tid, "x0": cx, "y0": cy, "kind": kind,
                          "moved": False, "target": None, "idx": None,
                          "nest": None, "last_x": cx, "last_y": cy, "fixed": True}
             return

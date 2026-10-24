@@ -593,6 +593,30 @@ check("翻到第二页后，第一页的头一张就不画了",
 
 app.turn_quad_page(1, -1)
 check("能翻回来", app.quad_page.get(1) == 0)
+
+# ★ 走**真实的按下 → 松手**路径。只调 turn_quad_page() 是测不出
+#   "on_press 把 tid 丢掉了"这种问题的 —— 按钮画出来、点了却没反应，
+#   2026-10-24 就是这么翻车一次。
+app.quad_page[1] = 0
+app.redraw()
+root.update()
+_box = region(app, "qnext", "Q1")
+check("翻页按钮是可点的（regions 里登记了 qnext）", _box is not None)
+if _box:
+    _c = ((_box[0] + _box[2]) / 2.0, (_box[1] + _box[3]) / 2.0)
+    app.on_press(E(*_c))
+    app.on_release(E(*_c))
+    check("★ 真的点一下「下一页」就翻过去了（不是只有个按钮画着）",
+          app.quad_page.get(1) == 1, "实际 %r" % app.quad_page.get(1))
+    app.redraw()
+    root.update()
+    _box2 = region(app, "qprev", "Q1")
+    if _box2:
+        _c2 = ((_box2[0] + _box2[2]) / 2.0, (_box2[1] + _box2[3]) / 2.0)
+        app.on_press(E(*_c2))
+        app.on_release(E(*_c2))
+        check("★ 点「上一页」翻得回去", app.quad_page.get(1) == 0,
+              "实际 %r" % app.quad_page.get(1))
 app.quad_page[1] = 99
 app.redraw()
 root.update()
