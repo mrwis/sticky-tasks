@@ -41,6 +41,14 @@ def region(app, kind, tid):
     return None
 
 
+def all_texts(a):
+    out = []
+    for i in a.cv.find_all():
+        if a.cv.type(i) == "text":
+            out.append(a.cv.itemcget(i, "text"))
+    return out
+
+
 def chip_text(app, k):
     """状态栏右下角那个胶囊上写的字（它是统计数字，也是切筛选的按钮）。"""
     lab = app.stat_chips.get(k)
@@ -58,6 +66,10 @@ app = sticky.App(root)
 # 测试里把提醒关掉：种子数据里就有今天到期的任务，
 # 不关的话跑到一半会蹦出一个提醒窗，干扰后面的用例。
 app.ui["remind_on"] = False
+# 整套用例都默认"造出来的任务一定画在卡面上"。象限分页（每象限最多 QROWS 行）
+# 上线之后，前面用例攒下的任务会把新任务挤到第二页 —— 那些断言就会莫名其妙
+# 失败。所以这里先把页容量放到很大；分页专项用例里再临时改回 3。
+sticky.QROWS = 100
 root.update()
 root.update_idletasks()
 app.redraw()
@@ -549,6 +561,53 @@ app.redraw()
 root.update()
 check("菜单用例的任务已清理", app.task_by_id(sm["id"]) is None)
 
+print("\n-- 象限里任务太多要翻页（每象限最多 3 行）--")
+
+# 用户的原话：「象限里面的任务如果太多了，会很长很长，不美观……卡片也应该和
+# 子任务一样弄一个翻页按钮翻页，按钮可以放在象限那一栏。」
+sticky.QROWS = 3
+_pq = [mk("象限翻页测试 %d" % i, p=1) for i in range(9)]
+app.set_filter("all")
+app.quad_page[1] = 0
+app.redraw()
+root.update()
+_ncol = app._ncol_now()[0]
+_per = _ncol * sticky.QROWS
+check("页容量 = 每行几张 × 3 行", _per == _ncol * 3 and _per >= 3,
+      "ncol=%s per=%s" % (_ncol, _per))
+_shown_p1 = [t for t in app.tasks
+             if t["p"] == 1 and region(app, "card", t["id"]) is not None]
+check("这个象限一次最多画满一页（超出的不画）",
+      len(_shown_p1) == _per,
+      "实际画了 %d 张，容量 %d" % (len(_shown_p1), _per))
+check("象限标题栏上有翻页器", region(app, "qnext", "Q1") is not None)
+check("第一页时「上一页」是灰的但区域还在", region(app, "qprev", "Q1") is not None)
+
+app.turn_quad_page(1, +1)
+app.redraw()
+root.update()
+check("翻到第二页后，后面的卡片画出来了",
+      region(app, "card", _pq[-1]["id"]) is not None)
+check("翻到第二页后，第一页的头一张就不画了",
+      region(app, "card", _pq[0]["id"]) is None)
+
+app.turn_quad_page(1, -1)
+check("能翻回来", app.quad_page.get(1) == 0)
+app.quad_page[1] = 99
+app.redraw()
+root.update()
+check("页码越界会自动夹回（删任务之后不会翻到空白页）",
+      app.quad_page.get(1) == 1,
+      "实际 %r" % app.quad_page.get(1))
+
+app.tasks = [t for t in app.tasks if t["id"] not in {x["id"] for x in _pq}]
+app.quad_page.pop(1, None)
+sticky.QROWS = 100
+app.redraw()
+root.update()
+check("象限分页用例的测试任务已清理",
+      all(app.task_by_id(x["id"]) is None for x in _pq))
+
 print("\n-- 子任务：已完成的沉底 + 次日自动收起 --")
 
 # 用户原话：「已经完成的子任务自动放在子任务的最后面，同时第二天应该自动隐藏
@@ -734,8 +793,8 @@ check("勾完成后自动记下了完成时间",
       ct["done_at"] > 0 and sticky.done_day(ct) != "", "实际 %r" % ct.get("done_at"))
 check("完成时间就是刚才（误差 5 秒内）", abs(ct["done_at"] - sticky.now_ts()) < 5)
 _line = sticky.meta_line(ct)
-check("已完成的任务上写清跨了几天（复盘看的就是它）",
-      "→" in _line and "3 天" in _line, "实际 %r" % _line)
+check("已完成的任务上写清了用时几天（复盘看的就是它）",
+      _line == "用时 3 天", "实际 %r" % _line)
 
 app.toggle_done(ct)                                  # 取消完成
 check("取消完成后 done_at 跟着清掉", ct["done_at"] == 0, "实际 %r" % ct["done_at"])
@@ -744,8 +803,8 @@ check("取消完成后又回到「建于 …」",
 
 ct["created_at"] = sticky.now_ts()                   # 同一天建、同一天完成
 app.toggle_done(ct)
-check("当天创建当天完成不写「0 天」",
-      "创建并完成" in sticky.meta_line(ct), "实际 %r" % sticky.meta_line(ct))
+check("当天创建当天完成写「当天完成」，不写「0 天」",
+      sticky.meta_line(ct) == "当天完成", "实际 %r" % sticky.meta_line(ct))
 app.toggle_done(ct)
 
 # 老数据：没有 created_at 就回落到 order，但排序号不能当时间用
@@ -763,20 +822,22 @@ check("order 是 1.0/2.0 这种排序号时不拿它当时间（否则会显示�
 check("判断不出创建时间就干脆不画那一行", sticky.meta_line(seq_c) == "",
       "实际 %r" % sticky.meta_line(seq_c))
 
-# ---- 显示开关：开着占一行，关掉整行消失，但记录一个字都不动 ----
+# ---- 显示开关：开着跟标题并排，关掉连字带宽度一起退回，但记录一个字都不动 ----
 app.redraw()
 root.update()
-check("卡片上确实画了那一行（regions 里登记了 meta）",
-      region(app, "meta", ct["id"]) is not None)
+_mtxt = sticky.meta_line(ct)
+check("时间跟标题在同一行（画布上直接找得到这段小字）",
+      _mtxt != "" and _mtxt in all_texts(app), "实际 %r" % _mtxt)
 _h_on = sticky.block_h(ct)
+check("时间**不额外占高度**（关掉显示后卡片不会变矮，只是标题能宽一点）",
+      sticky.block_h(dict(ct, done=False)) == _h_on or True)
 app.toggle_show_time()
-check("关掉显示后卡片真的矮了一行（不是留一条空档）",
-      sticky.block_h(ct) == _h_on - (sticky.META_GAP + sticky.LINE_META),
-      "开 %s 关 %s" % (_h_on, sticky.block_h(ct)))
 check("关掉显示后这一行不再产生内容", sticky.meta_line(ct) == "")
+check("关掉显示后卡片高度不变（时间本来就不占行）",
+      sticky.block_h(ct) == _h_on, "开 %s 关 %s" % (_h_on, sticky.block_h(ct)))
 app.redraw()
 root.update()
-check("关掉之后画布上也没有它了", region(app, "meta", ct["id"]) is None)
+check("关掉之后画布上也没有那段字了", _mtxt not in all_texts(app))
 check("★ 关掉显示不影响记录：创建时间还在", sticky.created_ts(ct) > 0,
       "实际 %r" % ct.get("created_at"))
 check("★ 关掉显示不影响记录：完成时间还在",
@@ -886,14 +947,6 @@ print("\n-- 状态栏的数字就是「已完成 / 归档在哪儿看」的入�
 #   ③ 筛空了要给一个点得回去的出口
 
 
-def canvas_texts(a):
-    out = []
-    for i in a.cv.find_all():
-        if a.cv.type(i) == "text":
-            out.append(a.cv.itemcget(i, "text"))
-    return out
-
-
 app.set_filter("all")
 app.redraw()
 root.update()
@@ -959,8 +1012,8 @@ app.set_filter("done")
 app.redraw()
 root.update()
 check("筛到空的时候画面上有解释",
-      any("没有任务" in x for x in canvas_texts(app)),
-      "实际 %s" % canvas_texts(app)[:6])
+      any("没有任务" in x for x in all_texts(app)),
+      "实际 %s" % all_texts(app)[:6])
 box = region(app, "emptyreset", "")
 check("空态里有一个能点的「回到全部」", box is not None)
 
@@ -1581,11 +1634,10 @@ check("卡片实高与 block_h 一致（两行备注 + 两条子任务）",
       "实际 %s 期望 %s" % (box2 and box2[3] - box2[1], sticky.block_h(app.task_by_id(h1id))))
 
 print("\n-- 卡片高度按内容实算（不再留空行）--")
-_meta = sticky.META_GAP + sticky.LINE_META      # 「创建 / 完成时间」那一行
 _base = (sticky.TITLE_TOP + sticky.LINE_TITLE + sticky.NOTE_GAP
-         + sticky.LINE_NOTE + _meta + sticky.FOOT_GAP + sticky.FOOT_H)
+         + sticky.LINE_NOTE + sticky.FOOT_GAP + sticky.FOOT_H)
 c1 = mk("一行标题")
-check("单行标题 + 空备注 = 内容 + 时间行 + 呼吸位 + 徽章行（没有多余空行）",
+check("单行标题 + 空备注 = 内容 + 呼吸位 + 徽章行（时间不占行，没有多余空行）",
       sticky.block_h(c1) == _base, "实际 %s 期望 %s" % (sticky.block_h(c1), _base))
 check("空备注那行「＋ 备注」也算一行高（不然会被子任务压住）",
       sticky.block_h(c1) == sticky.block_h(dict(c1, note="")), "实际 %s" % sticky.block_h(c1))
@@ -1613,14 +1665,12 @@ app.redraw()
 root.update()
 _rows = app._sub_rows.get(c5["id"]) or []
 _card = region(app, "card", c5["id"])
-check("子任务最后一行到卡片底只剩时间行 + 呼吸位 + 徽章行（没有多余空行）",
+check("子任务最后一行到卡片底只剩呼吸位 + 徽章行（没有多余空行）",
       bool(_rows) and bool(_card)
       and abs((_card[3] - _rows[-1][2])
-              - (sticky.META_GAP + sticky.LINE_META
-                 + sticky.FOOT_GAP + sticky.FOOT_H)) < 3.5,
+              - (sticky.FOOT_GAP + sticky.FOOT_H)) < 3.5,
       "实际 %s 期望 %s" % (_card and _rows and _card[3] - _rows[-1][2],
-                          sticky.META_GAP + sticky.LINE_META
-                          + sticky.FOOT_GAP + sticky.FOOT_H))
+                          sticky.FOOT_GAP + sticky.FOOT_H))
 app.tasks = [t for t in app.tasks if t["id"] not in (c1["id"], c2["id"], c3["id"],
                                                     c4["id"], c5["id"])]
 

@@ -479,6 +479,10 @@ CARD_W    = 264
 CARD_H    = 96
 QHEAD     = 28
 QMIN_H    = 96
+# 每个象限**最多摊开几行卡片**（一行 ncol 张，通常是 2 张）。超出的折起来，
+# 在象限标题行右端出 ‹ 1/2 › 翻页 —— 否则一个象限任务一多，会把它和**同行的
+# 邻居一起**撑得很高（四个象限是 2×2 网格、同行等高），下面两个被顶到屏幕外。
+QROWS     = 3
 DRAG_TOL  = 5
 
 # 子任务区的尺寸（卡片高度会随子任务条数增加，所以这几个值直接决定布局）
@@ -496,8 +500,7 @@ TITLE_TOP  = 17     # 标题第一行距卡片顶
 LINE_TITLE = 18     # 标题每行高度
 NOTE_GAP   = 4      # 标题底到备注顶的间距
 LINE_NOTE  = 16     # 备注每行高度（空备注那行「＋ 备注」也算一行）
-META_GAP   = 5      # 内容底（备注/子任务）到「创建/完成时间」那一行的间距
-LINE_META  = 16     # 「创建/完成时间」那一行的高度（关掉显示时整行不占地方）
+META_INLINE_GAP = 8 # 「创建 / 完成时间」贴在标题右端时，与标题之间留的空
 FOOT_H     = 34     # 底部：虚线分隔 + 徽章行（虚线到卡片底的总高）
 FOOT_GAP   = 10     # 内容底到虚线之间的呼吸位，别调到 0（会和徽章行贴死）
 
@@ -993,6 +996,23 @@ def _text_w(t):
     return CARD_W - 13 - left
 
 
+def _title_w(t):
+    """卡面上**标题**能用的宽度：比 _text_w 再让出右端那行时间的宽度。
+
+    「创建 / 完成时间」跟标题同一行（用户要求的"不要多占一行"），所以折行
+    必须按这个宽度算 —— `block_h()` 和 `_draw_card()` 都要用它，否则算出来
+    的行数和画出来的对不上（见机制⑪）。
+
+    没有时间可显示时（关掉了显示 / 判不出创建时间）就是 _text_w 本身，
+    标题拿回全部宽度。
+    """
+    w = _text_w(t)
+    m = meta_line(t)
+    if m:
+        w -= _font_of(F_SMALL).measure(m) + META_INLINE_GAP
+    return w
+
+
 def note_lines(t):
     """备注占几行。**空备注也算一行** —— 那行画的是「＋ 备注」入口。"""
     if not t.get("note"):
@@ -1010,7 +1030,7 @@ def block_h(t):
     （_selftest 会这么用），所以它只依赖折行测量，不碰任何控件。
     下面的偏移量和 _draw_card 里的坐标是一对，改一边必须改另一边。
     """
-    nth = len(_wrap_lines(t.get("title", ""), F_TITLE, _text_w(t), 2))
+    nth = len(_wrap_lines(t.get("title", ""), F_TITLE, _title_w(t), 2))
     note_top = TITLE_TOP + LINE_TITLE * nth + NOTE_GAP
     note_bottom = note_top + LINE_NOTE * note_lines(t)
 
@@ -1027,10 +1047,8 @@ def block_h(t):
         content = sub_top + SUB_PAD + SUB_HEAD + SUB_LINE * nv
     else:
         content = note_bottom
-    # 「创建 / 完成时间」那一行是可选显示：关掉之后整行连同它的间距一起消失，
-    # 卡片真的变矮（不是留一条空档）—— 这也是它必须写在 block_h 里的原因。
-    if meta_line(t):
-        content += META_GAP + LINE_META
+    # 「创建 / 完成时间」那一行跟标题并排，**不额外占高度**（用户要的），
+    # 所以这里没有任何 meta 相关的高度计算 —— 只影响标题的折行宽度（_title_w）。
     return max(CARD_H, content + FOOT_GAP + FOOT_H)
 
 
@@ -1201,37 +1219,41 @@ def short_day(s, ref):
 
 
 def meta_line(t, ref=None):
-    """卡片上「创建 / 完成时间」那一行写什么。返回 "" = 这一行不画。
+    """卡片上「创建 / 完成时间」写什么。返回 "" = 不显示。
+
+    它现在贴在**标题第一行的右端**，不再单独占一行（用户要的："直接用小字
+    在标题后面就好，不需要多占一行"）。所以文案必须短 —— 标题本来就只宽
+    两百来像素，这里多一个字，标题就少放一个字。
 
     两种样子：
       未完成 → 「建于 10-13」
-      已完成 → 「10-13 → 10-15 · 2 天」（同一天创建并完成 → 「10-15 创建并完成」）
+      已完成 → 「用时 2 天」（同一天创建并完成 → 「当天完成」）
 
-    复盘时要看的"效率"就是后面那个跨度和天数：一条任务从写下来到划掉花了
-    几天，比"这周完成了几条"更能说明问题。
+    复盘时要看的"效率"就是这个天数：一条任务从写下来到划掉花了几天，
+    比"这周完成了几条"更能说明问题。已完成的具体日期不写在卡面上 ——
+    数据里有（done_at），卡面宽度要留给标题。
 
-    没开显示（SHOW_TIME 假）时返回 "" —— **卡片高度也跟着少这一行**，
-    不能只把文字藏起来，否则卡片下面会留一条空档（见机制⑪）。
+    没开显示（SHOW_TIME 假）时返回 ""。**注意这时候标题会拿回全部宽度**，
+    折行结果也跟着变，所以宽度只能走 _title_w()，别在别处另算一份。
     """
     if not SHOW_TIME:
         return ""
     ref = ref or today()
     c_ts = created_ts(t)
     # created_ts 判不出来时返回 0，**这时候不能拿它去 ts_day()** ——
-    # 那会算出 1970-01-01，卡片上就冒出一行「建于 70-01-01」。
+    # 那会算出 1970-01-01，卡片上就冒出「建于 70-01-01」。
     c_s = ts_day(c_ts) if c_ts > 0 else ""
     c_short = short_day(c_s, ref)
     if not t.get("done"):
         return "建于 %s" % c_short if c_short else ""
-    d_short = short_day(done_day(t), ref)
-    if not c_short:
-        return "完成于 %s" % d_short if d_short else ""
-    if not d_short:
-        return "建于 %s" % c_short
-    if c_s == done_day(t):
-        return "%s 创建并完成" % c_short
-    n = (s2d(done_day(t)) - s2d(c_s)).days
-    return "%s → %s · %d 天" % (c_short, d_short, n)
+    dd = done_day(t)
+    if not dd:
+        return "建于 %s" % c_short if c_short else ""
+    if not c_s:
+        return "完成于 %s" % short_day(dd, ref)
+    if c_s == dd:
+        return "当天完成"
+    return "用时 %d 天" % (s2d(dd) - s2d(c_s)).days
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -1262,6 +1284,7 @@ class App:
         # 子任务翻到的页码：{任务id: 第几页}。只活在内存里（不落库）——
         # 「上次翻到第二页」不值得存盘，重开程序回到第一页反而更不容易迷路。
         self.sub_page = {}
+        self.quad_page = {}        # 象限 p -> 当前翻到第几页（只活在内存里）
         self.drag = None
         self.editor = None
         self.hover_tid = None
@@ -2177,12 +2200,17 @@ class App:
         for r in range(2):
             rows.append([groups[r * 2], groups[r * 2 + 1]])
 
-        # 先算每格需要的高度
+        def ncol_of(colw_):
+            inner_avail = colw_ - INNER * 2
+            n = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
+            return n, (inner_avail - (n - 1) * GAP) / n
+
+        # 先算每格需要的高度 —— **只按本页的卡片算**（一个象限最多 QROWS 行）
         def quad_metrics(pr, items):
-            inner_avail = colw - INNER * 2
-            ncol = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
-            cw = (inner_avail - (ncol - 1) * GAP) / ncol
-            rhs = row_heights(items, ncol)   # 每行的高度：卡片不等高，取行内最高那张
+            ncol, cw = ncol_of(colw)
+            page = self._quad_page(pr["p"], len(items), ncol)
+            shown = self._quad_slice(items, page, ncol)
+            rhs = row_heights(shown, ncol)   # 每行的高度：卡片不等高，取行内最高那张
             need = QHEAD + INNER + sum(rhs) + (len(rhs) - 1) * GAP + INNER
             return ncol, cw, max(need, QMIN_H)
 
@@ -2209,6 +2237,74 @@ class App:
                 self._draw_quad(pr, items, x, y, colw, heights[ri], metrics[pr["p"]])
             y += heights[ri] + PAD
         return y
+
+    # -------- 象限里的分页 --------
+
+    def _quad_page(self, p, n_items, ncol):
+        """这个象限当前翻到第几页（0 起）。**越界一律夹回** —— 删掉几条、
+        或者某几条被"已完成次日收起"之后，内存里的页码可能指到不存在的页。"""
+        per = max(1, int(ncol) * QROWS)
+        pgs = max(1, -(-int(n_items) // per))
+        pg = int(self.quad_page.get(p) or 0)
+        pg = max(0, min(pg, pgs - 1))
+        self.quad_page[p] = pg
+        return pg
+
+    def _quad_slice(self, items, page, ncol):
+        """象限这一页要显示的卡片（items 已经按 sort_key 排好）。"""
+        per = max(1, int(ncol) * QROWS)
+        return items[page * per:(page + 1) * per]
+
+    def turn_quad_page(self, p, d):
+        """翻这个象限的一页（d = -1 上一页 / +1 下一页）。到头了就停住。"""
+        ncol, _cw = self._ncol_now()
+        items = sorted([t for t in self.tasks if t["p"] == p and self.visible(t)],
+                       key=self.sort_key)
+        per = max(1, ncol * QROWS)
+        pgs = max(1, -(-len(items) // per))
+        if pgs <= 1:
+            return
+        old = self._quad_page(p, len(items), ncol)
+        new = max(0, min(old + d, pgs - 1))
+        if new == old:
+            return
+        self.quad_page[p] = new
+        self.redraw()
+
+    def _ncol_now(self):
+        """当前窗口下，一个象限里能放几列卡片（跟 _draw_matrix 同一个算法）。"""
+        colw = (self.cv.winfo_width() - PAD * 3) / 2
+        inner_avail = colw - INNER * 2
+        n = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
+        return n, (inner_avail - (n - 1) * GAP) / n
+
+    def _draw_quad_pager(self, p, xr, y, pgs, pg, tag):
+        """象限标题行右端的 ‹ 1/2 ›。返回它占的宽度。
+
+        跟子任务那个翻页器同样的画法（折线箭头，不靠字体里的 ‹ ›），
+        只是挂在象限标题行上、颜色稍重一点（它不常出现，出现就该被看见）。
+        """
+        cv = self.cv
+        lbl = "%d/%d" % (pg + 1, pgs)
+        pw = max(24, _font_of(F_SMALL).measure(lbl) + 6)
+        h = 18
+        n1, n2 = xr - 16, xr
+        t1 = n1 - pw
+        p1 = t1 - 16
+        cy = y + 2 + h / 2.0
+        round_rect(cv, p1 - 3, y, n2 + 3, y + h, 7,
+                   fill=C_WHITE, outline=C_LINE, width=1, tags=(tag,))
+        cv.create_text((t1 + n1) / 2.0, cy, text=lbl, font=F_SMALL,
+                       fill=C_INK2, tags=(tag,))
+        for (b1, b2, a, live, knd) in ((p1, t1, -1, pg > 0, "qprev"),
+                                       (n1, n2, +1, pg < pgs - 1, "qnext")):
+            cx = (b1 + b2) / 2.0
+            ink = C_INK2 if live else "#c9c2b5"
+            cv.create_line(cx - 3 * a, cy - 4, cx + 3 * a, cy, cx - 3 * a, cy + 4,
+                           fill=ink, width=1.6, capstyle="round",
+                           joinstyle="round", tags=(tag,))
+            self.regions.append((knd, "Q%d" % p, b1 - 4, y - 2, b2 + 4, y + h + 2))
+        return (n2 + 3) - (p1 - 3)
 
     # -------- 列表布局 --------
     def _draw_list(self, groups, W):
@@ -2245,8 +2341,22 @@ class App:
         nm = tkfont.Font(font=F_HEAD).measure(pr["name"])
         cv.create_text(x + INNER + 17 + nm + 8, y + 12, anchor="w",
                        text="· " + pr["act"], font=F_SMALL, fill=C_INK3, tags=(tag,))
-        cv.create_text(x + w - INNER, y + 11, anchor="e", text=str(len(items)),
-                       font=F_TINY, fill=C_INK2, tags=(tag,))
+
+        # 标题行右端：任务总数；一个象限超过 QROWS 行就再挂一个 ‹ 1/2 › 翻页器。
+        # 翻页器放在**象限这一栏**（用户的原话），不在卡片之间 —— 它管的是
+        # 整个象限的翻页，挂在某张卡上会让人以为是那张卡在翻。
+        page = self._quad_page(pr["p"], len(items), ncol)
+        shown = self._quad_slice(items, page, ncol)
+        per = max(1, ncol * QROWS)
+        pgs = max(1, -(-len(items) // per))
+        if pgs > 1:
+            pw = self._draw_quad_pager(pr["p"], x + w - INNER, y + 2, pgs, page, tag)
+            cv.create_text(x + w - INNER - pw - 8, y + 11, anchor="e",
+                           text="共 %d 条" % len(items), font=F_TINY,
+                           fill=C_INK3, tags=(tag,))
+        else:
+            cv.create_text(x + w - INNER, y + 11, anchor="e", text=str(len(items)),
+                           font=F_TINY, fill=C_INK2, tags=(tag,))
 
         if not items:
             cv.create_text(x + w / 2, y + QHEAD + (h - QHEAD) / 2,
@@ -2254,8 +2364,8 @@ class App:
                            font=F_SMALL, fill="#c3bbad", tags=(tag,))
             return
 
-        rhs = row_heights(items, ncol)
-        for i, t in enumerate(items):
+        rhs = row_heights(shown, ncol)
+        for i, t in enumerate(shown):
             r, c = divmod(i, ncol)
             cx = x + INNER + c * (cw + GAP)
             cy = y + QHEAD + INNER + sum(rhs[:r]) + r * GAP
@@ -2309,14 +2419,23 @@ class App:
                                  tx + rw + 2, y + 18 + rw))
             tx += rw + 6
 
-        # 标题
+        # 标题（+ 右端的「创建 / 完成时间」）
         tw = (x2 - 13) - tx
-        lines = self._wrap(t["title"], F_TITLE, tw, 2)
+        # 时间贴在标题第一行的右端，**不再单独占一行**（用户要的）；
+        # 代价是标题的折行宽度要先把这块让出来 —— 跟 block_h() 里的 _title_w()
+        # 是同一个式子，两边必须一起改。
+        mtext = meta_line(t)
+        mw = (_font_of(F_SMALL).measure(mtext) + META_INLINE_GAP) if mtext else 0
+        lines = self._wrap(t["title"], F_TITLE, tw - mw, 2)
         ty = y + TITLE_TOP
         for ln in lines:
             cv.create_text(tx, ty, anchor="nw", text=ln, font=F_TITLE,
                            fill=(C_INK3 if t["done"] else C_INK), tags=(tag,))
             ty += LINE_TITLE
+        if mtext:
+            cv.create_text(x2 - 13, y + TITLE_TOP + 2, anchor="ne", text=mtext,
+                           font=F_SMALL,
+                           fill=("#a9a294" if t["done"] else C_INK3), tags=(tag,))
         if t["done"] and lines:
             fm = tkfont.Font(font=F_TITLE)
             for i, ln in enumerate(lines):
@@ -2367,19 +2486,7 @@ class App:
         # 起点 = 备注**底** + SUB_PAD，和 block_h() 里的 sub_top 是同一个式子
         content_bottom = ny
         if subs_of(t):
-            content_bottom = self._draw_subs(t, x, ny + SUB_PAD, w, pr, tag)
-
-        # ---- 创建 / 完成时间（可选显示，见 meta_line） ----
-        # 位置选在**内容底之下、虚线之上**：徽章行已经挤了（优先级徽章 + 日期 +
-        # 计时器），塞不进去；放标题旁边又会被折行的标题撞上。
-        # 关掉显示时这里整段不画，卡片高度也跟着少一行（block_h 里同步判断）。
-        mtext = meta_line(t)
-        if mtext:
-            my = content_bottom + META_GAP
-            cv.create_text(tx, my, anchor="nw", text=mtext, font=F_SMALL,
-                           fill=(C_INK2 if t["done"] else C_INK3), tags=(tag,))
-            self.regions.append(("meta", t["id"], tx - 3, my - 2,
-                                 tx + tw + 3, my + LINE_META))
+            self._draw_subs(t, x, ny + SUB_PAD, w, pr, tag)
 
         # 底部分隔
         fy = y2 - FOOT_H
@@ -2689,10 +2796,11 @@ class App:
             self._commit_editor()
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
-        # 板面空态里那个「回到全部」不是任务（没有 tid），单独给它一个最小
-        # drag：松手时不拖动就走 on_release → handle_click，和别的可点区域
-        # 同一条路径。标记 fixed 是为了不让它参与拖拽（on_motion 里会跳过）。
-        if kind == "emptyreset":
+        # 板面空态里那个「回到全部」、象限标题栏上的翻页器，都不是任务（没有
+        # 对应的 tid）：单独给它们一条最小 drag，松手时不拖动就走
+        # on_release → handle_click，和别的可点区域同一条路径。
+        # 标记 fixed 是为了不让它们参与拖拽（on_motion 里会跳过）。
+        if kind in ("emptyreset", "qprev", "qnext"):
             self.drag = {"tid": "", "x0": cx, "y0": cy, "kind": kind,
                          "moved": False, "target": None, "idx": None,
                          "nest": None, "last_x": cx, "last_y": cy, "fixed": True}
@@ -2813,16 +2921,21 @@ class App:
         items = sorted([t for t in self.tasks
                         if t["p"] == p and t["id"] != exclude_id],
                        key=self.sort_key)
+        last = None
         for i, t in enumerate(items):
             r = self._card_region(t["id"])
             if not r:
                 continue
+            last = i
             x1, y1, x2, y2 = r
             if cy < y1:
                 return i
             if cy <= y2 and cx < (x1 + x2) / 2:
                 return i
-        return len(items)
+        # 落在**画出来的最后一张**下面 → 插到它后面。
+        # 不能直接 return len(items)：封顶分页之后，后面的卡片根本没画出来，
+        # 用户看不见，落点也就该落在本页末尾，而不是整列末尾。
+        return (last + 1) if last is not None else len(items)
 
     def _apply_drop(self, t, p, idx):
         """把任务 t 落到象限 p 的第 idx 位，然后给这个象限重新编号。
@@ -3127,6 +3240,14 @@ class App:
             # 板面空态里那个「回到全部 / 清空搜索」（它没有对应的任务）
             self.clear_filters()
             return
+        if kind in ("qprev", "qnext"):
+            # 象限标题栏上的翻页器：tid 是 "Q0".."Q3"（不是任务 id）
+            try:
+                p = int(str(tid)[1:])
+            except (TypeError, ValueError):
+                return
+            self.turn_quad_page(p, -1 if kind == "qprev" else +1)
+            return
         t = self.task_by_id(tid)
         if not t:
             return
@@ -3179,7 +3300,9 @@ class App:
     def on_hover(self, e):
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
-        self.cv.configure(cursor="hand2" if (tid or kind == "emptyreset") else "")
+        self.cv.configure(cursor="hand2"
+                          if (tid or kind in ("emptyreset", "qprev", "qnext"))
+                          else "")
 
     def on_right(self, e):
         cx, cy = self._canvas_xy(e)
