@@ -65,6 +65,11 @@
       ui      界面状态（窗口位置、当前筛选、备份设置、提醒开关…）
       trash   回收站。删掉的任务整个搬进来，附带删除时间，所以删除可逆
 
+  ui 里有两项是"用户重新定义了软件长什么样"的，别当成普通开关看：
+      show_time  卡片上要不要显示创建/完成时间（关掉只是不画，记录照旧）
+      quads      四个象限的名字 [{"name","act"} × 4]，顺序就是 p 0..3
+                 （可自定义，见机制⑯；没有这一项 = 用出厂那四个名字）
+
   为什么耗时用「按日期分桶」而不是一个总数？因为统计要支持
   「今天 / 本周 / 全部」三个口径。只存一个总数就算不出「今天花了多久」。
 
@@ -97,7 +102,9 @@
                       它由 block_h() 按内容算出来（见机制⑪），
                       别再去找 CARD_H 调高调低了（它现在只是最小高度）。
                       子任务区的行高在 SUB_LINE / SUB_MAX / SUB_PAD
-  · 改象限名字      → 改 PRIOS 里的 name 和 act（如"立刻做"）
+  · 改象限名字      → 出厂默认在 PRIOS 的 name / act；用户改过的存在
+                      ui.quads，启动时 apply_quad_labels() 装回去（机制⑯）。
+                      别在别处再写死"重要且紧急"这类字面量
   · 加一个字段      → ① load() 的 out.append({...}) 里加上默认值
                       ② _draw_card() 里决定怎么显示它
                       ③ 需要编辑的话，在 open_editor() 里加一种 field
@@ -181,7 +188,7 @@
 
 
 ----------------------------------------------------------------
-  十五个值得单独弄懂的小机制
+  十六个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -386,6 +393,31 @@
        · 子任务的完成时间在 `sub.done_at`（_norm_subs 归一化时会顺手把
          "没完成却留着 done_at"清掉）。老数据没有它 → sub_done_day() 返回
          ""，按"早就完成了"处理，也就是直接收起。
+
+  ⑯ 象限的名字是可以改的（PRIOS / apply_quad_labels / QUAD_DEFAULTS）
+    四个象限本质上是一种**分类方式**，不同的人分法不一样（工作 / 学习 /
+    娱乐 / 生活）。所以 name（"重要且紧急"）和 act（"立刻做"）都开放修改，
+    **颜色不开放**：四个象限靠颜色区分，自己挑很快就撞在一起，而且没法
+    保证字还看得清。
+
+    存在哪儿：`ui.quads` = [{"name","act"} × 4]，顺序就是 p 0..3。
+    启动时 `apply_quad_labels()` 把它们写回 PRIOS 里那几个 dict ——
+    **直接改 PRIOS，不另存一份**：全项目十几处都在读 pr["name"] / pr["act"]
+    （象限头、卡片徽章、右键菜单、统计面板、拖拽提示），另起一份就得挨个
+    替换，漏一处就是"这里改了、那里还是旧的"。
+
+    ★ 三个容易踩的点：
+      · 名字必须非空；**备注允许为空**（有人只想要一个名字）。所以
+        apply_quad_labels 里要靠"有没有给 act 这个键"来区分"回落默认"
+        和"用户主动清空"，不能拿 `if not act` 判 —— 那样清空永远清不掉。
+      · 名字可以被改得很长，而标题行右端还有任务数和翻页器。
+        一律走 `fit_quad_head()` / `_clip_text()` 按**像素**裁剪，
+        别直接 create_text（中英文宽度差一倍，按字数算必翻车）。
+      · 卡片徽章和菜单用的是 `quad_title()` / `quad_full()`。
+        备注为空时短标签退回象限名顶上 —— 光秃秃一个「P3」看着像被截断了。
+
+    入口：点象限标题（regions 里的 qhead，左键开改名框）、象限标题右键、
+    「更多 ▾ → 自定义象限名字…」。三个入口都指同一个 ask_quads()。
 """
 
 import os
@@ -425,6 +457,99 @@ PRIOS = [
     dict(p=3, key="P3", name="不紧急不重要", act="有空再做", bg="#e6ecf0", band="#64748b"),
 ]
 PRIO_BY_P = {x["p"]: x for x in PRIOS}
+
+# 象限名是**可以改**的（它的本质是一种分类方式：工作 / 学习 / 娱乐 / 生活……）。
+# 这里存的是出厂默认值；用户改过的存在 tasks.json 的 ui.quads 里，启动时装回
+# PRIOS。颜色（bg / band）不开放改 —— 四个象限靠颜色区分优先级，改花了
+# 反而认不出来，而且配色得互相协调，不该让用户一个个挑。
+QUAD_DEFAULTS = [(pr["name"], pr["act"]) for pr in PRIOS]
+
+
+def quad_labels():
+    """当前生效的四个象限名字 → [{"name","act"}]（存盘用）。"""
+    return [{"name": pr["name"], "act": pr["act"]} for pr in PRIOS]
+
+
+def apply_quad_labels(raw):
+    """把存盘里的象限名装回 PRIOS。字段缺失/为空时逐个回落到默认值。
+
+    ★ 直接改 PRIOS 里那几个 dict，而不是另存一份：全项目十几处都在读
+      pr["name"] / pr["act"]（象限头、右键菜单、统计面板、拖拽提示、提升提示），
+      另起一份就得挨个替换，漏一处就是「这里改了、那里还是旧的」——
+      这类不一致在本项目已经修过好几次。
+    """
+    if not isinstance(raw, (list, tuple)):
+        raw = []
+    for i, pr in enumerate(PRIOS):
+        dname, dact = QUAD_DEFAULTS[i]
+        item = raw[i] if i < len(raw) else None
+        name, act, has_act = "", "", False
+        if isinstance(item, dict):
+            name = str(item.get("name") or "").strip()
+            has_act = "act" in item
+            act = str(item.get("act") or "").strip()
+        elif isinstance(item, (list, tuple)) and item:
+            name = str(item[0] or "").strip()
+            has_act = len(item) > 1
+            act = str(item[1] or "").strip() if has_act else ""
+        pr["name"] = name or dname          # 名字不许空：空就等于没改
+        # 备注**允许清空**（有人只想要一个名字），所以"没给这一项"才算回落，
+        # "给了空串"就是用户主动要空着 —— 别把两者混为一谈。
+        pr["act"] = act if has_act else dact
+
+
+def reset_quad_labels(p=None):
+    """恢复出厂名字。p 为 None 时四个全恢复。"""
+    for i, pr in enumerate(PRIOS):
+        if p is not None and i != p:
+            continue
+        pr["name"], pr["act"] = QUAD_DEFAULTS[i]
+
+
+def quad_title(p):
+    """「P0 立刻做」这种短标签（卡片徽章、状态栏提示用）。
+
+    备注被用户清空时用象限名顶上 —— 只剩一个「P3」看着像字被截断了。
+    """
+    pr = PRIO_BY_P[p]
+    return ("%s %s" % (pr["key"], pr["act"] or pr["name"])).strip()
+
+
+def quad_full(p):
+    """「P0 重要且紧急 · 立刻做」这种完整标签（右键菜单用）。"""
+    pr = PRIO_BY_P[p]
+    return "%s %s%s" % (pr["key"], pr["name"], (" · " + pr["act"]) if pr["act"] else "")
+
+
+def _clip_text(s, font, maxw):
+    """把 s 截到 maxw 像素以内，末尾补「…」。一个字都放不下就返回空串。
+
+    象限标题行同时要塞：色点 + 名字 + 备注 + 任务数 + 翻页器。名字一旦被
+    用户改成很长（比如「工作 —— 上班时间只做这个」），不裁剪就会压到右边
+    的任务数上。用像素量而不是字符数：中英文宽度差一倍。
+    """
+    s = str(s or "")
+    f = _font_of(font)
+    if not s or f.measure(s) <= maxw:
+        return s
+    out = ""
+    for ch in s:
+        if f.measure(out + ch + "…") > maxw:
+            break
+        out += ch
+    return (out + "…") if out else ""
+
+
+def fit_quad_head(name, act, avail):
+    """标题行放不下时怎么缩：先缩备注（它是注解），再缩名字。"""
+    fh, fs = _font_of(F_HEAD), _font_of(F_SMALL)
+    if fh.measure(name) + (8 + fs.measure("· " + act) if act else 0) <= avail:
+        return name, act
+    # 名字先保住六成宽度（下限 60px），剩下给备注
+    keep = min(fh.measure(name), max(60.0, avail * 0.6))
+    act2 = _clip_text(act, F_SMALL, avail - keep - 8 - fs.measure("· "))
+    left = avail - (8 + fs.measure("· " + act2) if act2 else 0)
+    return _clip_text(name, F_HEAD, left), act2
 
 C_BG      = "#f3efe7"
 C_TOP     = "#f7f4ee"
@@ -626,8 +751,9 @@ HELP_SECTIONS = [
 
     ("h2", "顶栏按钮"),
     ("k", ("P0 P1 P2 P3", "给新任务选优先级，决定它落进哪个象限。"
-                          "P0 重要且紧急·立刻做 / P1 重要不紧急·计划做 / "
-                          "P2 紧急不重要·委托做 / P3 不紧急不重要·有空再做")),
+                          "出厂是 P0 重要且紧急·立刻做 / P1 重要不紧急·计划做 / "
+                          "P2 紧急不重要·委托做 / P3 不紧急不重要·有空再做，"
+                          "但这四个名字是可以改成你自己的分法的（见「四个象限可以改名」）")),
     ("k", ("贴上",     "添加任务（等于在输入框里按回车）")),
     ("k", ("四象限 / 列表", "切换视图：四象限按优先级分四块；列表把任务平铺开按时间排")),
     ("k", ("全部 ▾",   "筛选：全部 / 未完成 / 今天要做 / 已逾期 / 计时中 / 已完成。"
@@ -637,8 +763,24 @@ HELP_SECTIONS = [
     ("k", ("复盘",     "每日复盘面板（今天做了什么、按天回看）")),
     ("k", ("置顶",     "窗口总在最前、盖住别的窗口。变成深色的「已置顶」就是开着，再点一下取消")),
     ("k", ("更多 ▾",   "回收站 / 导入恢复备份 / 立即备份 / 备份文件夹 / 备份保留天数 / "
-                        "到点提醒开关 / 卡片上显示时间 / 打开数据文件夹 / 清空已完成")),
+                        "到点提醒开关 / 卡片上显示时间 / 自定义象限名字 / "
+                        "打开数据文件夹 / 清空已完成")),
     ("k", ("? 帮助",   "就是本窗口（快捷键 F1，随时可开）")),
+
+    ("h2", "四个象限可以改名（它本质是一种分类方式）"),
+    ("p",  "重要 / 不重要 × 紧急 / 不紧急 只是出厂那套分法。有人按 工作 / 学习 / "
+           "娱乐 / 生活 分，有人按项目分 —— 都行，四个格子的名字和后面那句说明都能改。"),
+    ("n",  "· 改法一：直接点象限标题（比如「重要且紧急 · 立刻做」那几个字）"),
+    ("n",  "· 改法二：右键标题 → 「改这个名字…」"),
+    ("n",  "· 改法三：顶栏「更多 ▾」→「自定义象限名字…」（一次改四个）"),
+    ("p",  "打开的那个框里，左边是名字（必填），右边是名字后面的说明（可以不填，"
+           "不填就只显示名字）。回车保存，Esc 取消。"),
+    ("n",  "· 改错了：右键标题 →「这一格恢复默认名字」，或者框里点「填回默认」"),
+    ("n",  "· 颜色不能改：四个象限靠颜色区分，自己挑容易撞在一起，字也容易看不清"),
+    ("n",  "· 名字太长会被省略号截断 —— 标题行右端还要放任务数和翻页器，"
+           "想看全就写短一点（十个字以内最合适）"),
+    ("n",  "· 改了名字不影响已经存在的任务：它们还在原来那个格子里，"
+           "只是格子的称呼变了"),
 
     ("h2", "卡片上能做的操作"),
     ("k", ("单击方框",       "标记完成 / 取消完成（在左上角，打勾就是已完成）")),
@@ -659,11 +801,11 @@ HELP_SECTIONS = [
     ("h2", "子任务的排序：做完的往后站，第二天不再占地方"),
     ("p",  "一个任务底下的子任务多了以后，最烦的是「做完的混在没做的中间」，"
            "一眼看不出还剩几条要干。所以子任务跟主任务用同一套规矩："),
-    ("n",  "· 划掉的自动排到**最后面**（当天划掉的仍然留着，方便手滑点错时点回来）"),
+    ("n",  "· 划掉的自动排到最后面（当天划掉的仍然留着，方便手滑点错时点回来）"),
     ("n",  "· 第二天起自动不再显示 —— 它们没有删，只是不占位置了"),
     ("n",  "· 标题行右边那个「已完成 N」就是被收起来的那几条，点一下摊开看，再点一下收起"),
     ("n",  "· 摊开之后如果超过 3 条，照样用「‹ 1/2 ›」翻页"),
-    ("n",  "· 卡面上写的「子任务 2/5」永远是**总共**的进度，收起不影响这个数"),
+    ("n",  "· 卡面上写的「子任务 2/5」永远是总共的进度，收起不影响这个数"),
     ("n",  "· 想改顺序：直接拖子任务行（同一张卡里上下拖）。显示顺序和实际顺序是两回事，"
            "但拖的时候程序会自己折算，照常拖就行"),
 
@@ -1383,6 +1525,9 @@ class App:
         # （block_h() 是纯函数、拿不到 App，只能这么传，见 set_show_time）。
         # 默认开——用户主动要的功能，默认关掉会显得"没做出来"。
         set_show_time(self.ui.get("show_time", True))
+        # 象限名字也是用户数据，启动时装回去（同样是模块级，理由同上：
+        # 绘制、右键菜单、统计面板都直接读 PRIOS）。
+        apply_quad_labels(self.ui.get("quads"))
 
         out = []
         for t in items:
@@ -1429,6 +1574,7 @@ class App:
                 "mode": self.mode, "filter": self.filter,
                 "quick_p": self.quick_p, "topmost": bool(self.topmost),
                 "show_time": bool(SHOW_TIME),
+                "quads": quad_labels(),
                 "w": self.root.winfo_width(), "h": self.root.winfo_height(),
                 "x": self.root.winfo_x(), "y": self.root.winfo_y(),
                 "backup_dir": self.ui.get("backup_dir", ""),
@@ -1934,6 +2080,9 @@ class App:
         m.add_command(label="卡片上显示时间：%s" % ("开" if SHOW_TIME else "关"),
                       command=self.toggle_show_time)
         m.add_separator()
+        # 象限名字是"我的这张板子长什么样"，也放这一组
+        m.add_command(label="自定义象限名字…", command=lambda: self.ask_quads())
+        m.add_separator()
         m.add_command(label="打开数据文件夹", command=lambda: self._open_path(APP_DIR))
         m.add_command(label="清空已完成", command=self.do_clear_done)
         return m
@@ -2332,31 +2481,45 @@ class App:
                    outline=(pr["band"] if hl else C_LINE), width=(2 if hl else 1),
                    tags=(tag, "qbg%d" % pr["p"]))
 
-        # 头部
-        dot = 5
-        cv.create_oval(x + INNER, y + 11 - dot, x + INNER + dot * 2, y + 11 + dot,
-                       fill=pr["band"], outline="", tags=(tag,))
-        cv.create_text(x + INNER + 17, y + 11, anchor="w", text=pr["name"],
-                       font=F_HEAD, fill=C_INK, tags=(tag,))
-        nm = tkfont.Font(font=F_HEAD).measure(pr["name"])
-        cv.create_text(x + INNER + 17 + nm + 8, y + 12, anchor="w",
-                       text="· " + pr["act"], font=F_SMALL, fill=C_INK3, tags=(tag,))
-
         # 标题行右端：任务总数；一个象限超过 QROWS 行就再挂一个 ‹ 1/2 › 翻页器。
         # 翻页器放在**象限这一栏**（用户的原话），不在卡片之间 —— 它管的是
         # 整个象限的翻页，挂在某张卡上会让人以为是那张卡在翻。
+        #
+        # ★ 先画右边：左边的名字要按"右边剩下的宽度"裁剪（名字可以被用户改得很长）。
         page = self._quad_page(pr["p"], len(items), ncol)
         shown = self._quad_slice(items, page, ncol)
         per = max(1, ncol * QROWS)
         pgs = max(1, -(-len(items) // per))
         if pgs > 1:
             pw = self._draw_quad_pager(pr["p"], x + w - INNER, y + 2, pgs, page, tag)
+            cnt = "共 %d 条" % len(items)
             cv.create_text(x + w - INNER - pw - 8, y + 11, anchor="e",
-                           text="共 %d 条" % len(items), font=F_TINY,
-                           fill=C_INK3, tags=(tag,))
+                           text=cnt, font=F_TINY, fill=C_INK3, tags=(tag,))
+            right_x = x + w - INNER - pw - 8 - _font_of(F_TINY).measure(cnt) - 8
         else:
-            cv.create_text(x + w - INNER, y + 11, anchor="e", text=str(len(items)),
+            cnt = str(len(items))
+            cv.create_text(x + w - INNER, y + 11, anchor="e", text=cnt,
                            font=F_TINY, fill=C_INK2, tags=(tag,))
+            right_x = x + w - INNER - _font_of(F_TINY).measure(cnt) - 8
+
+        # 头部：色点 + 名字 + 「· 备注」。名字和备注都是用户可改的，
+        # 所以一律走 fit_quad_head 按剩余宽度裁剪，不能直接画。
+        dot = 5
+        cv.create_oval(x + INNER, y + 11 - dot, x + INNER + dot * 2, y + 11 + dot,
+                       fill=pr["band"], outline="", tags=(tag,))
+        hx = x + INNER + 17
+        nm_txt, act_txt = fit_quad_head(pr["name"], pr["act"], right_x - hx)
+        cv.create_text(hx, y + 11, anchor="w", text=nm_txt,
+                       font=F_HEAD, fill=C_INK, tags=(tag,))
+        if act_txt:
+            nm = _font_of(F_HEAD).measure(nm_txt)
+            cv.create_text(hx + nm + 8, y + 12, anchor="w", text="· " + act_txt,
+                           font=F_SMALL, fill=C_INK3, tags=(tag,))
+        # 整块标题都是热区：左键 = 打开改名框，右键 = 小菜单。
+        # 用户报的原话是「这种后面的立刻做这些应该是可以修改的才对」——
+        # 点了没反应的地方，谁也不会去猜它能改，所以必须点得动。
+        self.regions.append(("qhead", "Q%d" % pr["p"],
+                             x + INNER - 2, y + 1, right_x, y + QHEAD - 3))
 
         if not items:
             cv.create_text(x + w / 2, y + QHEAD + (h - QHEAD) / 2,
@@ -2496,8 +2659,9 @@ class App:
         ry = fy + 8
         coin_x = self._draw_timer(t, x2, ry, pr, tag)
 
-        # 优先级徽章
-        label = "%s %s" % (pr["key"], pr["act"])
+        # 优先级徽章。备注可能被用户写得很长，裁一下 —— 这一行还要放日期
+        # 和计时器，撑破了就会把计时器挤出卡片。
+        label = _clip_text(quad_title(pr["p"]), F_TINY, 150)
         bw = tkfont.Font(font=F_TINY).measure(label) + 20
         px1 = x + 12
         round_rect(cv, px1, ry, px1 + bw, ry + 18, 9,
@@ -2796,14 +2960,15 @@ class App:
             self._commit_editor()
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
-        # 板面空态里那个「回到全部」、象限标题栏上的翻页器，都不是任务：
-        # 单独给它们一条最小 drag，松手时不拖动就走 on_release → handle_click，
-        # 和别的可点区域同一条路径。标记 fixed 是为了不让它们参与拖拽。
+        # 板面空态里那个「回到全部」、象限标题栏上的翻页器、象限标题本身
+        # （点了改名），都不是任务：单独给它们一条最小 drag，松手时不拖动就
+        # 走 on_release → handle_click，和别的可点区域同一条路径。
+        # 标记 fixed 是为了不让它们参与拖拽。
         #
         # ★ tid 必须**原样带上**。象限翻页器的 tid 是 "Q1" 这种（不是任务 id），
         #   handle_click 靠它判断翻哪个象限 —— 写成空串的话点了会静默没反应
         #   （2026-10-24 就是这么翻车一次的）。空态那个的 tid 本来就是 ""。
-        if kind in ("emptyreset", "qprev", "qnext"):
+        if kind in ("emptyreset", "qprev", "qnext", "qhead"):
             self.drag = {"tid": tid, "x0": cx, "y0": cy, "kind": kind,
                          "moved": False, "target": None, "idx": None,
                          "nest": None, "last_x": cx, "last_y": cy, "fixed": True}
@@ -3134,8 +3299,8 @@ class App:
         self.cv.tag_raise("hl", "qbg%d" % p)
         # 被拖的那条子任务还在原卡里躺着（没有跟着鼠标飘），所以谁也不用排除
         self._draw_insert_line(p, self._insert_index(p, cx, cy, None), None)
-        self.status.configure(text="松手：把这条子任务提升成独立任务 → %s %s"
-                                   % (PRIO_BY_P[p]["key"], PRIO_BY_P[p]["act"]))
+        self.status.configure(text="松手：把这条子任务提升成独立任务 → %s"
+                                   % quad_title(p))
 
     def _show_sub_target(self, d, tid, idx):
         """画两样东西：被拖那一行的虚线框（搬的是它）+ 落点那条横线。"""
@@ -3232,9 +3397,8 @@ class App:
         self._apply_drop(nt, p, idx)      # 顺便把那个象限重新编号
         self.save()
         self.redraw()
-        self._flash_undo("已把子任务「%s」提升成独立任务（%s %s）"
-                         % (ellipsis(nt["title"], 8),
-                            PRIO_BY_P[p]["key"], PRIO_BY_P[p]["act"]),
+        self._flash_undo("已把子任务「%s」提升成独立任务（%s）"
+                         % (ellipsis(nt["title"], 8), quad_title(p)),
                          lambda: self._restore_snapshot(snap))
         return nt
 
@@ -3251,6 +3415,14 @@ class App:
                 return
             self.turn_quad_page(p, -1 if kind == "qprev" else +1)
             return
+        if kind == "qhead":
+            # 象限标题（色点 + 名字 + 备注）本身就是「改名字」的入口。
+            # 没有它，用户只能靠右键去猜 —— 而"点了没反应的地方能改"这件事，
+            # 没人猜得到（这次报的 bug 正是这个形状）。
+            try:
+                self.ask_quads(int(str(tid)[1:]))
+            except (TypeError, ValueError):
+                self.ask_quads()
         t = self.task_by_id(tid)
         if not t:
             return
@@ -3310,6 +3482,14 @@ class App:
     def on_right(self, e):
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
+        if kind == "qhead":
+            # 右键象限标题：只关于这一个象限的两件事（改名 / 恢复默认）
+            try:
+                p = int(str(tid)[1:])
+            except (TypeError, ValueError):
+                return
+            self._popup(self.build_quad_menu(p), x=e.x_root, y=e.y_root)
+            return
         t = self.task_by_id(tid) if tid else None
         if not t:
             self.show_canvas_menu(e)        # 点在空白处
@@ -3369,7 +3549,7 @@ class App:
         m.add_separator()
         sub = tk.Menu(m, tearoff=0, font=F_SMALL)
         for pr in PRIOS:
-            sub.add_command(label="%s %s · %s" % (pr["key"], pr["name"], pr["act"]),
+            sub.add_command(label=quad_full(pr["p"]),
                             command=lambda i=pr["p"]: self.set_prio(t, i))
         m.add_cascade(label="改优先级", menu=sub)
         m.add_command(label="设置截止日期…", command=lambda: self.ask_due(t))
@@ -3857,7 +4037,7 @@ class App:
     def popup_prio(self, t, e):
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
         for pr in PRIOS:
-            m.add_command(label="%s %s · %s" % (pr["key"], pr["name"], pr["act"]),
+            m.add_command(label=quad_full(pr["p"]),
                           command=lambda i=pr["p"]: self.set_prio(t, i))
         try:
             m.tk_popup(e.x_root, e.y_root)
@@ -3933,6 +4113,127 @@ class App:
         t["title"] = txt
         self.save()
         self.redraw()
+
+    # ---------------------------------------------------- 象限的名字（可自定义）
+
+    def build_quad_menu(self, p):
+        """象限标题右键菜单。拆成独立方法是为了能被测试直接调用（同 build_more_menu）。"""
+        pr = PRIO_BY_P[p]
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        m.add_command(label="改这个名字…", command=lambda: self.ask_quads(p))
+        custom = (pr["name"], pr["act"]) != QUAD_DEFAULTS[p]
+        m.add_command(label="这一格恢复默认名字",
+                      state=("normal" if custom else "disabled"),
+                      command=lambda: self.reset_quads(p))
+        m.add_separator()
+        m.add_command(label="四个都恢复默认", command=lambda: self.reset_quads())
+        return m
+
+    def set_quad_labels(self, labels, p=None):
+        """保存四个象限的名字。labels = [{"name","act"}]，顺序对应 p 0..3。"""
+        apply_quad_labels(labels)
+        self.ui["quads"] = quad_labels()
+        self.save()
+        self.redraw()
+        if p is None:
+            self.status.configure(text="象限名字已更新")
+        else:
+            self.status.configure(text="这一格现在叫「%s」" % PRIO_BY_P[p]["name"])
+
+    def reset_quads(self, p=None):
+        reset_quad_labels(p)
+        self.ui["quads"] = quad_labels()
+        self.save()
+        self.redraw()
+        self.status.configure(text="四个象限都恢复成默认名字" if p is None
+                                   else "「%s」恢复成默认名字" % PRIO_BY_P[p]["key"])
+
+    def ask_quads(self, p=None):
+        """改四个象限的名字 / 备注（「重要且紧急 · 立刻做」两段都能改）。
+
+        `p` 表示"从哪一格点进来的"：光标先落在它的名字框，其余三格照样可以
+        一起改 —— 换分类方式的人通常一次就要换掉四个（工作/学习/娱乐/生活）。
+
+        颜色不开放改：四个象限靠颜色区分轻重缓急，各自挑色很快就会撞在一起，
+        而且没法保证文字还看得清。
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("自定义象限")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        self._follow_top(dlg)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="象限就是一种分类方式，改成你自己的那套就行（工作 / 学习 / 娱乐 / 生活…）",
+                 font=F_SMALL, bg=C_BG, fg=C_INK2).pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(dlg, text="名字必填，后面那句说明可以不填（不填就只显示名字）。颜色不开放修改。",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18)
+
+        grid = tk.Frame(dlg, bg=C_BG)
+        grid.pack(padx=18, pady=(10, 0), fill="x")
+        names, acts = [], []
+        for i, pr in enumerate(PRIOS):
+            tk.Label(grid, text="●", font=F_BODY, bg=C_BG, fg=pr["band"])\
+                .grid(row=i, column=0, padx=(0, 6), pady=4)
+            n = tk.Entry(grid, font=F_BODY, width=12, bg=C_WHITE, fg=C_INK, relief="flat",
+                         highlightthickness=1, highlightbackground=C_LINE,
+                         highlightcolor="#c0ae8e", insertbackground=C_INK)
+            n.insert(0, pr["name"])
+            n.grid(row=i, column=1, sticky="ew", ipady=4, pady=4)
+            tk.Label(grid, text="·", font=F_SMALL, bg=C_BG, fg=C_INK3)\
+                .grid(row=i, column=2, padx=6)
+            a = tk.Entry(grid, font=F_SMALL, width=16, bg=C_WHITE, fg=C_INK2, relief="flat",
+                         highlightthickness=1, highlightbackground=C_LINE,
+                         highlightcolor="#c0ae8e", insertbackground=C_INK)
+            a.insert(0, pr["act"])
+            a.grid(row=i, column=3, sticky="ew", ipady=4, pady=4)
+            names.append(n)
+            acts.append(a)
+        grid.columnconfigure(1, weight=3)
+        grid.columnconfigure(3, weight=2)
+
+        err = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
+        err.pack(anchor="w", padx=18, pady=(2, 0))
+        tk.Label(dlg, text="回车 = 保存 · Esc = 取消 · 说明留空就只显示名字",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18)
+
+        def save(_e=None):
+            labels = []
+            for i, (n, a) in enumerate(zip(names, acts)):
+                nm = n.get().strip()
+                if not nm:                     # 名字不许空，留在框里让用户改
+                    err.configure(text="第 %d 格的名字不能为空" % (i + 1))
+                    n.focus_set()
+                    return
+                labels.append({"name": nm, "act": a.get().strip()})
+            dlg.destroy()
+            self.set_quad_labels(labels, p)
+
+        def fill_default():
+            # 只填回框里，不直接落库 —— 用户可能只想复原其中一格，
+            # 填完还能改两个再按保存。
+            for i, (n, a) in enumerate(zip(names, acts)):
+                n.delete(0, "end")
+                n.insert(0, QUAD_DEFAULTS[i][0])
+                a.delete(0, "end")
+                a.insert(0, QUAD_DEFAULTS[i][1])
+            err.configure(text="")
+
+        for w in names + acts:
+            w.bind("<Return>", save)
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18, pady=(8, 16))
+        self._btn(bar, "填回默认", fill_default).pack(side="left")
+        self._btn(bar, "保存", save, primary=True).pack(side="right")
+        self._btn(bar, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
+
+        dlg.update_idletasks()
+        px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        py = self.root.winfo_y() + 120
+        dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
+        (names[p] if p is not None and 0 <= p < len(names) else names[0]).focus_set()
 
     def ask_edit(self, t, focus="title"):
         """编辑一条任务：标题 + 备注 一起改。
@@ -4495,7 +4796,8 @@ class App:
                  for pr in PRIOS]
         qmax = max([0.0001] + q_sec)
         self._stats_title(pad, "时间花在哪一类")
-        self._stats_rows(pad, [("%s · %s" % (pr["key"], pr["act"]),
+        self._stats_rows(pad, [(ellipsis(("%s · %s" % (pr["name"], pr["act"]))
+                                        if pr["act"] else pr["name"], 20),
                                 fmt_dur(q_sec[i]) if q_sec[i] else "—",
                                 q_sec[i] / qmax, pr["band"])
                                for i, pr in enumerate(PRIOS)])
