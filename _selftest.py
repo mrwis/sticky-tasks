@@ -2458,10 +2458,10 @@ check("「k」条目都带着「名字 + 解释」这一对",
       all(len(s) == 2 and isinstance(s[1], tuple) and len(s[1]) == 2
           for s in sticky.HELP_SECTIONS if s[0] == "k"))
 
-check("讲清了象限可以改名，以及三个入口",
-      "四个象限可以改名" in body
-      and all(k in body for k in ("自定义象限名字", "改这个名字", "填回默认")),
-      "正文里没把改名的入口说全")
+check("讲清了象限可以增删改名，以及三个入口",
+      "象限可以增删改名" in body
+      and all(k in body for k in ("象限设置", "改这个名字", "名字填回默认")),
+      "正文里没把增删/改名的入口说全")
 # 帮助窗是纯 Text，不渲染 markdown —— 写 **加粗** 会原样显示星号。
 # 这个错已经犯过两次（第 8 项、第 10 项），用一条用例钉住。
 _all_help_text = "\n".join(
@@ -2773,8 +2773,8 @@ app.reset_quads()
 _mm = app.build_more_menu()
 _m_labels = [_mm.entrycget(i, "label") for i in range(_mm.index("end") + 1)
              if _mm.type(i) == "command"]
-check("「更多 ▾」里有自定义象限的入口（不用靠右键去猜）",
-      any("自定义象限" in l for l in _m_labels), "实际 %s" % _m_labels)
+check("「更多 ▾」里有象限设置的入口（不用靠右键去猜）",
+      any("象限设置" in l for l in _m_labels), "实际 %s" % _m_labels)
 _mm.destroy()
 
 # ---- 名字被改得很长时，不能压到右边的任务数上 ----
@@ -2789,6 +2789,133 @@ check("裁过之后备注也跟着收窄",
       or _short_act == "", "实际 %r / %r" % (_short, _short_act))
 check("放得下的时候一个字都不动",
       sticky.fit_quad_head("工作", "专注", 400) == ("工作", "专注"))
+
+print("\n-- 象限可以增删：要六个、七个都行 --")
+
+# 用户的原话：「原来的四象限可以继续保持，但是支持我新增自定义象限，当然原来的
+# 也可以修改。比如可以有六个象限这样。」
+check("出厂还是 4 个（原来的四象限保持不变）", len(sticky.PRIOS) == 4,
+      "实际 %d" % len(sticky.PRIOS))
+
+_qa = mk("六格测试 A", p=0)
+_qb = mk("六格测试 B", p=1)
+_qd = mk("六格测试 D", p=2)
+app.redraw()
+root.update()
+
+_p5 = app.add_quad(after=3, name="健身", act="每天")
+_p6 = app.add_quad(name="家庭", act="")
+check("新增两格 → 一共 6 个", len(sticky.PRIOS) == 6,
+      "实际 %d：%s" % (len(sticky.PRIOS), [x["name"] for x in sticky.PRIOS]))
+check("插在指定那一格的**后面**（after=3 → 落到下标 4）",
+      [x["name"] for x in sticky.PRIOS][4] == "健身",
+      "实际 %s" % [x["name"] for x in sticky.PRIOS])
+check("新增的格子拿到了没人用过的颜色",
+      len({x["c"] for x in sticky.PRIOS}) == 6,
+      "实际 %s" % [x["c"] for x in sticky.PRIOS])
+check("顶栏那排小按钮跟着变成 6 个", len(app.seg_btns) == 6,
+      "实际 %d" % len(app.seg_btns))
+
+app.redraw()
+root.update()
+check("六个格子都画出来了", len(app._quad_rects) == 6,
+      "实际 %s" % sorted(app._quad_rects))
+_rows6 = sorted({round(r[1], 1) for r in app._quad_rects.values()})
+check("两列排下来 → 三行（不是还按 2×2 硬画）", len(_rows6) == 3, "实际 %d 行" % len(_rows6))
+
+# 删一格：任务要搬到相邻那格，不能跟着分类一起消失
+_t6 = mk("在「家庭」那格里的任务", p=5)
+app.redraw()
+root.update()
+_ok = app.delete_quad(5, ask=False)
+check("能删掉一格", bool(_ok) and len(sticky.PRIOS) == 5,
+      "实际 %s / %d" % (_ok, len(sticky.PRIOS)))
+check("**里面的任务没丢**，被搬到了相邻那一格",
+      app.task_by_id(_t6["id"]) is not None and _t6["p"] == 4,
+      "实际 p=%r" % (_t6["p"] if app.task_by_id(_t6["id"]) else None))
+check("删中间/末尾的格子之后，其余格子的颜色不跟着跳（健身还是原来那支绿）",
+      [x for x in sticky.PRIOS if x["name"] == "健身"][0]["c"] == 4,
+      "实际 %s" % [(x["name"], x["c"]) for x in sticky.PRIOS])
+
+app.redraw()
+root.update()
+_rows5 = sorted({round(r[1], 1) for r in app._quad_rects.values()})
+_last = [r for r in app._quad_rects.values() if abs(r[1] - _rows5[-1]) < 1]
+check("5 个 → 最后一行只摆一个格子（剩下半行留白，不用拉成整行）",
+      len(_rows5) == 3 and len(_last) == 1,
+      "实际 %d 行，最后一行 %d 个" % (len(_rows5), len(_last)))
+
+# 第 5 格（下标 4）的标题也必须是热区 —— 这次别再靠"调方法"验
+_seen5 = []
+_real_ask5 = app.ask_quads
+app.ask_quads = lambda p=None: _seen5.append(p)
+app.redraw()
+root.update()
+_box5 = region(app, "qhead", "Q4")
+check("第 5 格的标题也登记成热区了", _box5 is not None)
+if _box5:
+    _c5 = ((_box5[0] + _box5[2]) / 2.0, (_box5[1] + _box5[3]) / 2.0)
+    app.on_press(E(*_c5))
+    app.on_release(E(*_c5))
+check("★ 点第 5 格打开的是第 5 格", _seen5 == [4], "实际 %r" % _seen5)
+app.ask_quads = _real_ask5
+
+# 存盘往返：数量、名字、配色都要落进 ui.quads
+app.save()
+_ui5 = json.load(open(sticky.DATA_FILE, encoding="utf-8"))["ui"]
+check("5 个格子全写进 ui.quads，且带着配色下标",
+      len(_ui5.get("quads", [])) == 5 and all("c" in q for q in _ui5["quads"]),
+      "实际 %r" % _ui5.get("quads"))
+_cols5 = [x["c"] for x in sticky.PRIOS]
+sticky.apply_quad_labels(_ui5["quads"])
+check("读回来还是 5 个、颜色一个不差",
+      len(sticky.PRIOS) == 5 and [x["c"] for x in sticky.PRIOS] == _cols5,
+      "实际 %s" % [x["c"] for x in sticky.PRIOS])
+
+check("p 越界会被收到最后一格（删格子之后的老数据不会消失）",
+      sticky._norm_p(99) == len(sticky.PRIOS) - 1 and sticky._norm_p("x") == 2,
+      "实际 %s" % [sticky._norm_p(99), sticky._norm_p("x")])
+
+# 上限
+while len(sticky.PRIOS) < sticky.MAX_QUADS:
+    app.add_quad()
+check("能一直加到上限 %d 个" % sticky.MAX_QUADS, len(sticky.PRIOS) == sticky.MAX_QUADS,
+      "实际 %d" % len(sticky.PRIOS))
+check("到上限就不再加了（按钮会变灰）",
+      app.add_quad() is None and len(sticky.PRIOS) == sticky.MAX_QUADS,
+      "实际 %d" % len(sticky.PRIOS))
+
+# 恢复出厂（会弹确认框，测试里直接放行）
+_yes = sticky.tkmb.askyesno
+sticky.tkmb.askyesno = lambda *a, **k: True
+app.reset_quads()
+sticky.tkmb.askyesno = _yes
+check("恢复出厂 → 又回到那 4 个",
+      len(sticky.PRIOS) == 4
+      and [x["name"] for x in sticky.PRIOS] == [d[0] for d in sticky.QUAD_DEFAULTS],
+      "实际 %s" % [x["name"] for x in sticky.PRIOS])
+check("多出来的格子里的任务被搬到前 4 格（任务不会丢）",
+      all(0 <= t["p"] < 4 for t in app.tasks),
+      "实际 %s" % sorted({t["p"] for t in app.tasks}))
+
+# 只剩一格时不许再删
+while len(sticky.PRIOS) > 1:
+    app.delete_quad(len(sticky.PRIOS) - 1, ask=False)
+check("剩最后一格时删除被拒绝",
+      app.delete_quad(0, ask=False) is False and len(sticky.PRIOS) == 1,
+      "实际 %d" % len(sticky.PRIOS))
+
+# 收尾：把象限和测试任务都恢复原状
+sticky.apply_quad_labels(None)
+app.quick_p = 2
+app._rebuild_quick()
+app.tasks = [t for t in app.tasks if t["id"] not in
+             {_qa["id"], _qb["id"], _qd["id"], _t6["id"]}]
+app.save()
+app.redraw()
+root.update()
+check("象限用例的测试任务已清理",
+      all(app.task_by_id(x["id"]) is None for x in (_qa, _qb, _qd, _t6)))
 
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
