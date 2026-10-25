@@ -67,8 +67,9 @@
 
   ui 里有两项是"用户重新定义了软件长什么样"的，别当成普通开关看：
       show_time  卡片上要不要显示创建/完成时间（关掉只是不画，记录照旧）
-      quads      四个象限的名字 [{"name","act"} × 4]，顺序就是 p 0..3
-                 （可自定义，见机制⑯；没有这一项 = 用出厂那四个名字）
+      quads      象限列表 [{"name","act","c"} …]，顺序就是 p 0..N-1，
+                 c 是配色板下标（跟着格子走，删格子时颜色不跳）。
+                 没有这一项 = 用出厂那四个（见机制⑯）
 
   为什么耗时用「按日期分桶」而不是一个总数？因为统计要支持
   「今天 / 本周 / 全部」三个口径。只存一个总数就算不出「今天花了多久」。
@@ -102,9 +103,10 @@
                       它由 block_h() 按内容算出来（见机制⑪），
                       别再去找 CARD_H 调高调低了（它现在只是最小高度）。
                       子任务区的行高在 SUB_LINE / SUB_MAX / SUB_PAD
-  · 改象限名字      → 出厂默认在 PRIOS 的 name / act；用户改过的存在
-                      ui.quads，启动时 apply_quad_labels() 装回去（机制⑯）。
-                      别在别处再写死"重要且紧急"这类字面量
+  · 改象限          → 出厂默认在 QUAD_DEFAULTS / QUAD_PALETTE；用户的在
+                      ui.quads（数量 + 名字 + 配色下标），启动时
+                      apply_quad_labels() 装回去（机制⑯）。运行时一律走
+                      App.apply_quads()，别在别处增删 PRIOS
   · 加一个字段      → ① load() 的 out.append({...}) 里加上默认值
                       ② _draw_card() 里决定怎么显示它
                       ③ 需要编辑的话，在 open_editor() 里加一种 field
@@ -394,30 +396,37 @@
          "没完成却留着 done_at"清掉）。老数据没有它 → sub_done_day() 返回
          ""，按"早就完成了"处理，也就是直接收起。
 
-  ⑯ 象限的名字是可以改的（PRIOS / apply_quad_labels / QUAD_DEFAULTS）
-    四个象限本质上是一种**分类方式**，不同的人分法不一样（工作 / 学习 /
-    娱乐 / 生活）。所以 name（"重要且紧急"）和 act（"立刻做"）都开放修改，
-    **颜色不开放**：四个象限靠颜色区分，自己挑很快就撞在一起，而且没法
-    保证字还看得清。
+  ⑯ 象限是可增删的，名字/说明也能改（PRIOS / apply_quads / QUAD_PALETTE）
+    象限本质上是一种**分类方式**，不同的人分法不一样：有人就用出厂那四个
+    （重要/不重要 × 紧急/不紧急），有人按 工作 / 学习 / 娱乐 / 生活，还有人
+    要再加 健身 / 家人 —— 所以**数量（1~MAX_QUADS）+ 名字 + 说明**都开放，
+    **颜色不开放**（格子靠颜色区分，自己挑很快撞在一起、字也容易看不清）。
 
-    存在哪儿：`ui.quads` = [{"name","act"} × 4]，顺序就是 p 0..3。
-    启动时 `apply_quad_labels()` 把它们写回 PRIOS 里那几个 dict ——
-    **直接改 PRIOS，不另存一份**：全项目十几处都在读 pr["name"] / pr["act"]
-    （象限头、卡片徽章、右键菜单、统计面板、拖拽提示），另起一份就得挨个
-    替换，漏一处就是"这里改了、那里还是旧的"。
+    存在哪儿：`ui.quads` = [{"name","act","c"} …]，顺序就是 p 0..N-1；
+    `c` 是配色板下标，**跟着格子走、不跟位置走** —— 删掉中间一格时其余
+    格子的颜色不该跳。启动时 `apply_quad_labels()` 重建 PRIOS / PRIO_BY_P。
 
-    ★ 三个容易踩的点：
-      · 名字必须非空；**备注允许为空**（有人只想要一个名字）。所以
-        apply_quad_labels 里要靠"有没有给 act 这个键"来区分"回落默认"
-        和"用户主动清空"，不能拿 `if not act` 判 —— 那样清空永远清不掉。
-      · 名字可以被改得很长，而标题行右端还有任务数和翻页器。
-        一律走 `fit_quad_head()` / `_clip_text()` 按**像素**裁剪，
-        别直接 create_text（中英文宽度差一倍，按字数算必翻车）。
-      · 卡片徽章和菜单用的是 `quad_title()` / `quad_full()`。
-        备注为空时短标签退回象限名顶上 —— 光秃秃一个「P3」看着像被截断了。
+    ★ 四条容易踩的点：
+      · **PRIOS 必须原地改**（切片赋值 + PRIO_BY_P.clear），不能 `PRIOS = [...]`：
+        模块级到处都在按这两个名字取对象，重新赋值会让已有引用失效。
+      · **数量变了要连带三件事**：① 任务 p 重编号（映射表由调用方给）；
+        ② 顶栏那排 P0..Pn 小按钮重建（`_rebuild_quick`）；③ 清空
+        `self.quad_page`（页码按 p 存，重排后会翻到不存在的页）。
+        这三件都收在 `App.apply_quads()` 一个出口里，别在别处零散改。
+      · `p` 的合法范围跟着象限数量走（`_norm_p`）。以前写死 0~3，
+        删过格子/老数据会落到"不存在的格子"上，任务就像消失了。
+      · 名字必须非空、**备注允许为空**（有人只想要一个名字）。判"回落默认"
+        还是"主动清空"要看**有没有 act 这个键**，`if not act` 会把清空填回去。
+      · 名字可以被改得很长，而标题行右端还有任务数和翻页器 → 一律走
+        `fit_quad_head()` / `_clip_text()` 按**像素**裁剪（按字数算必翻车）；
+        卡片徽章裁 150px，否则把计时器挤出卡片。
 
-    入口：点象限标题（regions 里的 qhead，左键开改名框）、象限标题右键、
-    「更多 ▾ → 自定义象限名字…」。三个入口都指同一个 ask_quads()。
+    布局：**两列排下来**，行数 = ceil(N/2)，4 个时正好还是原来那个 2×2；
+    奇数个时最后一行只有一个格子（占半宽，右边留白）。`min_row` 要按行数
+    均分，否则 6 个象限会撑成三屏。
+
+    入口：点象限标题（regions 里的 qhead）、标题右键（改名 / 在后面加一格 /
+    删这一格 / 恢复默认）、「更多 ▾ → 象限设置…」。三个入口都指 `ask_quads()`。
 """
 
 import os
@@ -450,60 +459,134 @@ APP_VERSION = "1.0.0"
 # 所以「数据存在哪」这件事得说清楚 —— 见 _write_data() 的失败提示。
 FROZEN = bool(getattr(sys, "frozen", False))
 
-PRIOS = [
-    dict(p=0, key="P0", name="重要且紧急",   act="立刻做",   bg="#ffe2e4", band="#e5484d"),
-    dict(p=1, key="P1", name="重要不紧急",   act="计划做",   bg="#ffeed9", band="#ef8b0c"),
-    dict(p=2, key="P2", name="紧急不重要",   act="委托做",   bg="#deebff", band="#3b82f6"),
-    dict(p=3, key="P3", name="不紧急不重要", act="有空再做", bg="#e6ecf0", band="#64748b"),
+# 象限数量是**可变**的（1 ~ MAX_QUADS）：它的本质是分类方式，4 个只是出厂那套。
+# 颜色由"配色板下标 c"决定，跟着**格子**走、不跟位置走 —— 删掉中间一格时
+# 其余格子的颜色不该跟着跳。前 4 个色就是原来那套（红 / 橙 / 蓝 / 灰）。
+QUAD_PALETTE = [
+    ("#ffe2e4", "#e5484d"),   # 红
+    ("#ffeed9", "#ef8b0c"),   # 橙
+    ("#deebff", "#3b82f6"),   # 蓝
+    ("#e6ecf0", "#64748b"),   # 灰
+    ("#dcf5e4", "#16a34a"),   # 绿
+    ("#efe6ff", "#7c3aed"),   # 紫
+    ("#d9f2f0", "#0d9488"),   # 青
+    ("#ffe3f0", "#db2777"),   # 粉
 ]
-PRIO_BY_P = {x["p"]: x for x in PRIOS}
+MAX_QUADS = 8
+# 出厂那四格的名字（"填回默认" / 老数据没有 ui.quads 时用它）
+QUAD_DEFAULTS = [("重要且紧急", "立刻做"), ("重要不紧急", "计划做"),
+                 ("紧急不重要", "委托做"), ("不紧急不重要", "有空再做")]
 
-# 象限名是**可以改**的（它的本质是一种分类方式：工作 / 学习 / 娱乐 / 生活……）。
-# 这里存的是出厂默认值；用户改过的存在 tasks.json 的 ui.quads 里，启动时装回
-# PRIOS。颜色（bg / band）不开放改 —— 四个象限靠颜色区分优先级，改花了
-# 反而认不出来，而且配色得互相协调，不该让用户一个个挑。
-QUAD_DEFAULTS = [(pr["name"], pr["act"]) for pr in PRIOS]
+PRIOS = []          # 运行时生效的象限，长度 = 当前象限数
+PRIO_BY_P = {}      # p -> 上面那个 dict（同一个对象，别复制）
+
+
+def _rebuild_prios(items):
+    """按 items=[{name,act,c}] 重建 PRIOS / PRIO_BY_P。
+
+    ★ 必须原地改（PRIOS 用切片赋值、PRIO_BY_P 用 clear）——
+      模块级到处都在按这两个名字取对象，重新赋值会让已经拿到的引用失效。
+    """
+    items = list(items)
+    PRIOS[:] = []
+    PRIO_BY_P.clear()
+    for i, it in enumerate(items):
+        try:
+            c = int(it.get("c"))
+        except (TypeError, ValueError):
+            c = i
+        c %= len(QUAD_PALETTE)
+        bg, band = QUAD_PALETTE[c]
+        pr = dict(p=i, key="P%d" % i, name=it["name"], act=it["act"],
+                  bg=bg, band=band, c=c)
+        PRIOS.append(pr)
+        PRIO_BY_P[i] = pr
+
+
+def _default_quad_items():
+    return [{"name": n, "act": a, "c": i} for i, (n, a) in enumerate(QUAD_DEFAULTS)]
+
+
+def _free_color(items):
+    """挑一个还没被占用的配色下标（都用完了就按顺序循环）。"""
+    used = set()
+    for x in items:
+        try:
+            used.add(int(x.get("c")) % len(QUAD_PALETTE))
+        except (TypeError, ValueError):
+            pass
+    for i in range(len(QUAD_PALETTE)):
+        if i not in used:
+            return i
+    return len(items) % len(QUAD_PALETTE)
 
 
 def quad_labels():
-    """当前生效的四个象限名字 → [{"name","act"}]（存盘用）。"""
-    return [{"name": pr["name"], "act": pr["act"]} for pr in PRIOS]
+    """当前生效的象限 → [{"name","act","c"}]（存盘用）。"""
+    return [{"name": pr["name"], "act": pr["act"], "c": pr["c"]} for pr in PRIOS]
 
 
 def apply_quad_labels(raw):
-    """把存盘里的象限名装回 PRIOS。字段缺失/为空时逐个回落到默认值。
+    """把存盘里的象限列表装回去（数量、名字、备注、配色一起）。
 
-    ★ 直接改 PRIOS 里那几个 dict，而不是另存一份：全项目十几处都在读
-      pr["name"] / pr["act"]（象限头、右键菜单、统计面板、拖拽提示、提升提示），
-      另起一份就得挨个替换，漏一处就是「这里改了、那里还是旧的」——
-      这类不一致在本项目已经修过好几次。
+    容错：不是列表 / 空列表 → 回落到出厂那 4 个；超过 MAX_QUADS 截断；
+    名字空着回落到默认名（第 5 格以后没有出厂名，就叫「象限5」）；
+    配色撞了会自动换一个没人用的。
+
+    **备注允许为空**（有人只想要一个名字），所以"没给 act 这个键"才算回落，
+    "给了空串"就是用户主动要空着 —— 这两件事别混为一谈。
     """
-    if not isinstance(raw, (list, tuple)):
-        raw = []
-    for i, pr in enumerate(PRIOS):
-        dname, dact = QUAD_DEFAULTS[i]
-        item = raw[i] if i < len(raw) else None
-        name, act, has_act = "", "", False
-        if isinstance(item, dict):
-            name = str(item.get("name") or "").strip()
-            has_act = "act" in item
-            act = str(item.get("act") or "").strip()
-        elif isinstance(item, (list, tuple)) and item:
-            name = str(item[0] or "").strip()
-            has_act = len(item) > 1
-            act = str(item[1] or "").strip() if has_act else ""
-        pr["name"] = name or dname          # 名字不许空：空就等于没改
-        # 备注**允许清空**（有人只想要一个名字），所以"没给这一项"才算回落，
-        # "给了空串"就是用户主动要空着 —— 别把两者混为一谈。
-        pr["act"] = act if has_act else dact
+    if not isinstance(raw, (list, tuple)) or not raw:
+        raw = None
+    items = []
+    if raw is None:
+        items = _default_quad_items()
+    else:
+        for i, src in enumerate(list(raw)[:MAX_QUADS]):
+            name, act, has_act, c = "", "", False, None
+            if isinstance(src, dict):
+                name = str(src.get("name") or "").strip()
+                has_act = "act" in src
+                act = str(src.get("act") or "").strip()
+                c = src.get("c")
+            elif isinstance(src, (list, tuple)) and src:
+                name = str(src[0] or "").strip()
+                has_act = len(src) > 1
+                act = str(src[1] or "").strip() if has_act else ""
+            dname = QUAD_DEFAULTS[i][0] if i < len(QUAD_DEFAULTS) else "象限%d" % (i + 1)
+            dact = QUAD_DEFAULTS[i][1] if i < len(QUAD_DEFAULTS) else ""
+            try:
+                c = int(c) if c is not None else None
+            except (TypeError, ValueError):
+                c = None
+            items.append({"name": name or dname,
+                          "act": act if has_act else dact,
+                          "c": i if c is None else c})
+        # 配色去重：手改过 json、或者删过格子，都可能留下两个一样的颜色
+        seen = set()
+        for it in items:
+            c = int(it["c"]) % len(QUAD_PALETTE)
+            if c in seen:
+                c = _free_color([{"c": x} for x in seen])
+            seen.add(c)
+            it["c"] = c
+    _rebuild_prios(items)
 
 
 def reset_quad_labels(p=None):
-    """恢复出厂名字。p 为 None 时四个全恢复。"""
+    """恢复出厂名字。p=None 时**整套恢复成出厂那 4 个**（多出来的格子会没了，
+    任务迁移由 App.reset_quads 负责，它比这里知道该问到谁）。"""
+    if p is None:
+        _rebuild_prios(_default_quad_items())
+        return
     for i, pr in enumerate(PRIOS):
-        if p is not None and i != p:
+        if i != p:
             continue
-        pr["name"], pr["act"] = QUAD_DEFAULTS[i]
+        name, act = QUAD_DEFAULTS[i] if i < len(QUAD_DEFAULTS) else ("象限%d" % (i + 1), "")
+        pr["name"], pr["act"] = name, act
+
+
+apply_quad_labels(None)      # 出厂状态：4 个
 
 
 def quad_title(p):
@@ -750,10 +833,10 @@ HELP_SECTIONS = [
     ("n",  "4. 右键卡片 → 「编辑任务…」，标题和备注一起改，回车就保存"),
 
     ("h2", "顶栏按钮"),
-    ("k", ("P0 P1 P2 P3", "给新任务选优先级，决定它落进哪个象限。"
-                          "出厂是 P0 重要且紧急·立刻做 / P1 重要不紧急·计划做 / "
-                          "P2 紧急不重要·委托做 / P3 不紧急不重要·有空再做，"
-                          "但这四个名字是可以改成你自己的分法的（见「四个象限可以改名」）")),
+    ("k", ("P0 P1 P2 P3…", "给新任务选「贴进哪个格子」。出厂是那四格"
+                            "（P0 重要且紧急·立刻做 … P3 不紧急不重要·有空再做），"
+                            "名字和数量都能改（见「象限可以增删改名」）；"
+                            "按钮有几个，就说明你现在有几个格子")),
     ("k", ("贴上",     "添加任务（等于在输入框里按回车）")),
     ("k", ("四象限 / 列表", "切换视图：四象限按优先级分四块；列表把任务平铺开按时间排")),
     ("k", ("全部 ▾",   "筛选：全部 / 未完成 / 今天要做 / 已逾期 / 计时中 / 已完成。"
@@ -763,24 +846,28 @@ HELP_SECTIONS = [
     ("k", ("复盘",     "每日复盘面板（今天做了什么、按天回看）")),
     ("k", ("置顶",     "窗口总在最前、盖住别的窗口。变成深色的「已置顶」就是开着，再点一下取消")),
     ("k", ("更多 ▾",   "回收站 / 导入恢复备份 / 立即备份 / 备份文件夹 / 备份保留天数 / "
-                        "到点提醒开关 / 卡片上显示时间 / 自定义象限名字 / "
+                        "到点提醒开关 / 卡片上显示时间 / 象限设置（增删·改名）/ "
                         "打开数据文件夹 / 清空已完成")),
     ("k", ("? 帮助",   "就是本窗口（快捷键 F1，随时可开）")),
 
-    ("h2", "四个象限可以改名（它本质是一种分类方式）"),
+    ("h2", "象限可以增删改名（它本质是一种分类方式）"),
     ("p",  "重要 / 不重要 × 紧急 / 不紧急 只是出厂那套分法。有人按 工作 / 学习 / "
-           "娱乐 / 生活 分，有人按项目分 —— 都行，四个格子的名字和后面那句说明都能改。"),
+           "娱乐 / 生活 分，有人还要再加 健身 / 家人 —— 都行。名字、后面那句说明、"
+           "格子数量（1 ~ 8 个）都能改。"),
     ("n",  "· 改法一：直接点象限标题（比如「重要且紧急 · 立刻做」那几个字）"),
-    ("n",  "· 改法二：右键标题 → 「改这个名字…」"),
-    ("n",  "· 改法三：顶栏「更多 ▾」→「自定义象限名字…」（一次改四个）"),
-    ("p",  "打开的那个框里，左边是名字（必填），右边是名字后面的说明（可以不填，"
-           "不填就只显示名字）。回车保存，Esc 取消。"),
-    ("n",  "· 改错了：右键标题 →「这一格恢复默认名字」，或者框里点「填回默认」"),
-    ("n",  "· 颜色不能改：四个象限靠颜色区分，自己挑容易撞在一起，字也容易看不清"),
+    ("n",  "· 改法二：右键标题 →「改这个名字…」/「在它后面新增一格」/「删除这一格…」"),
+    ("n",  "· 改法三：顶栏「更多 ▾」→「象限设置…」，一次改完：加、删、改名都在里面"),
+    ("n",  "  那个框里还有「＋ 新增一格」和「名字填回默认」两个按钮"),
+    ("p",  "新加的格子会自己挑一个还没用过的颜色。颜色不开放修改 —— 格子靠颜色区分，"
+           "自己挑容易撞在一起，字也容易看不清。"),
+    ("n",  "· 删掉一个格子时，里面的任务不会被删，会搬到相邻那一格（删之前会问你）"),
+    ("n",  "· 至少要留一个格子 —— 任务总得落在某个地方"),
+    ("n",  "· 最多 8 个：再多顶栏那排小按钮就挤不下了，人也记不住哪个是哪个"),
+    ("n",  "· 改错了：右键标题 →「这一格恢复默认名字」，或「全部恢复出厂四个…」"
+           "（后者会把多出来的格子删掉，任务照样搬到前四格里）"),
     ("n",  "· 名字太长会被省略号截断 —— 标题行右端还要放任务数和翻页器，"
-           "想看全就写短一点（十个字以内最合适）"),
-    ("n",  "· 改了名字不影响已经存在的任务：它们还在原来那个格子里，"
-           "只是格子的称呼变了"),
+           "写短一点（十个字以内最合适）"),
+    ("n",  "· 改了名字不改归属：任务还在原来那个格子里，只是格子的称呼变了"),
 
     ("h2", "卡片上能做的操作"),
     ("k", ("单击方框",       "标记完成 / 取消完成（在左上角，打勾就是已完成）")),
@@ -1247,6 +1334,20 @@ def _norm_logs(raw):
     return out
 
 
+def _norm_p(p):
+    """p 的合法范围**跟着象限数量走**（象限可增删，不能再写死 0~3）。
+
+    超出范围的（老数据、手改过 json、删过格子）一律收到最后一格 ——
+    宁可归错一格，也不能让任务在板面上消失。
+    """
+    try:
+        p = int(p)
+    except (TypeError, ValueError):
+        p = 2
+    n = max(1, len(PRIOS))
+    return p if 0 <= p < n else n - 1
+
+
 def _norm_task(t):
     """把一条原始任务字典归一化。
     load() 读盘、导入备份、回收站恢复都走这里 —— 规则只写一处，永远一致。"""
@@ -1256,7 +1357,7 @@ def _norm_task(t):
         "id": t.get("id") or new_id(),
         "title": str(t.get("title", "")),
         "note": str(t.get("note", "")),
-        "p": p if p in (0, 1, 2, 3) else 2,
+        "p": _norm_p(p),
         "due": t.get("due", "") if s2d(t.get("due", "")) else "",
         "done": bool(t.get("done")),
         "order": float(t.get("order", 0) or 0) or now_ts(),
@@ -1520,7 +1621,7 @@ class App:
 
         self.mode = self.ui.get("mode", "matrix")
         self.filter = self.ui.get("filter", "all")
-        self.quick_p = self.ui.get("quick_p", 2)
+        self.quick_p = _norm_p(self.ui.get("quick_p", 2))
         # 「卡片上是否显示创建 / 完成时间」是个全局开关，同步到模块级
         # （block_h() 是纯函数、拿不到 App，只能这么传，见 set_show_time）。
         # 默认开——用户主动要的功能，默认关掉会显得"没做出来"。
@@ -1866,15 +1967,11 @@ class App:
         self.entry.bind("<Return>", lambda e: self.do_add())
         self.entry.bind("<Escape>", lambda e: self.entry.delete(0, "end"))
 
+        # 象限可以增删，所以这排按钮不能只建一次（数量变了要重建，见 _rebuild_quick）
+        self.seg = tk.Frame(r1, bg=C_WHITE, highlightbackground=C_LINE, highlightthickness=1)
+        self.seg.pack(side="left", padx=(0, 9))
         self.seg_btns = []
-        seg = tk.Frame(r1, bg=C_WHITE, highlightbackground=C_LINE, highlightthickness=1)
-        seg.pack(side="left", padx=(0, 9))
-        for pr in PRIOS:
-            b = tk.Button(seg, text=pr["key"], font=F_TINY, bd=0, relief="flat",
-                          padx=11, pady=5, cursor="hand2", highlightthickness=0,
-                          command=lambda i=pr["p"]: self.set_quick(i))
-            b.pack(side="left")
-            self.seg_btns.append(b)
+        self._rebuild_quick()
 
         self._btn(r1, "贴 上", self.do_add, primary=True).pack(side="left")
 
@@ -2081,7 +2178,7 @@ class App:
                       command=self.toggle_show_time)
         m.add_separator()
         # 象限名字是"我的这张板子长什么样"，也放这一组
-        m.add_command(label="自定义象限名字…", command=lambda: self.ask_quads())
+        m.add_command(label="象限设置…（增删 / 改名）", command=lambda: self.ask_quads())
         m.add_separator()
         m.add_command(label="打开数据文件夹", command=lambda: self._open_path(APP_DIR))
         m.add_command(label="清空已完成", command=self.do_clear_done)
@@ -2094,6 +2191,24 @@ class App:
         self.quick_p = i
         self.refresh_quick()
         self.entry.focus_set()
+
+    def _rebuild_quick(self):
+        """按当前象限重建「这个任务贴进哪一格」那排小按钮。
+
+        象限能增删，所以按钮数量会变 —— 只在 __init__ 里建一次的话，
+        新增第 5 格之后就没有它的按钮了。padx 收到 8：8 个按钮也要塞得下。
+        """
+        for b in list(getattr(self, "seg_btns", [])):
+            b.destroy()
+        self.seg_btns = []
+        for pr in PRIOS:
+            b = tk.Button(self.seg, text=pr["key"], font=F_TINY, bd=0, relief="flat",
+                          padx=8, pady=5, cursor="hand2", highlightthickness=0,
+                          command=lambda i=pr["p"]: self.set_quick(i))
+            b.pack(side="left")
+            self.seg_btns.append(b)
+        self.quick_p = max(0, min(int(self.quick_p or 0), len(PRIOS) - 1))
+        self.refresh_quick()
 
     def refresh_quick(self):
         for b, pr in zip(self.seg_btns, PRIOS):
@@ -2343,11 +2458,15 @@ class App:
 
     # -------- 四象限布局 --------
     def _draw_matrix(self, groups, W):
-        avail = W - PAD * 3
-        colw = avail / 2
-        rows = []
-        for r in range(2):
-            rows.append([groups[r * 2], groups[r * 2 + 1]])
+        # 象限数量是可变的：**两列排下来**，行数 = ceil(个数/2)。
+        # 4 个时正好还是原来那个 2×2；6 个就是 3 行 2 列；奇数个最后一行
+        # 只摆一个格子（照样占半宽，右边留白 —— 比拉成整行更像"少了一格"）。
+        # 只有 1 个象限时才铺满整宽，否则半个窗口空着太怪。
+        nq = len(groups)
+        ncols = 1 if nq <= 1 else 2
+        avail = W - PAD * (ncols + 1)
+        colw = avail / ncols
+        rows = [groups[i:i + ncols] for i in range(0, max(1, nq), ncols)]
 
         def ncol_of(colw_):
             inner_avail = colw_ - INNER * 2
@@ -2365,9 +2484,11 @@ class App:
 
         heights = []
         metrics = {}
-        # 任务不多时让四个象限铺满窗口，避免下半屏大片留白
+        # 任务不多时让象限铺满窗口，避免下半屏大片留白。
+        # **min_row 要按行数均分**：6 个象限时还给"半个窗口"一格高度，
+        # 整块板子就会长到三屏。
         vis_h = self.cv.winfo_height()
-        min_row = max(QMIN_H, (vis_h - PAD * 3) / 2)
+        min_row = max(QMIN_H, (vis_h - PAD * (len(rows) + 1)) / max(1, len(rows)))
         for row in rows:
             hs, ms = [], []
             for pr, items in row:
@@ -4114,126 +4235,269 @@ class App:
         self.save()
         self.redraw()
 
-    # ---------------------------------------------------- 象限的名字（可自定义）
+    # ---------------------------------------------------- 象限（可增删、可改名）
 
     def build_quad_menu(self, p):
         """象限标题右键菜单。拆成独立方法是为了能被测试直接调用（同 build_more_menu）。"""
         pr = PRIO_BY_P[p]
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
         m.add_command(label="改这个名字…", command=lambda: self.ask_quads(p))
-        custom = (pr["name"], pr["act"]) != QUAD_DEFAULTS[p]
-        m.add_command(label="这一格恢复默认名字",
-                      state=("normal" if custom else "disabled"),
-                      command=lambda: self.reset_quads(p))
+        m.add_command(label="在它后面新增一格",
+                      state=("normal" if len(PRIOS) < MAX_QUADS else "disabled"),
+                      command=lambda: self.add_quad(after=p))
+        m.add_command(label="删除这一格…",
+                      state=("normal" if len(PRIOS) > 1 else "disabled"),
+                      command=lambda: self.delete_quad(p))
         m.add_separator()
-        m.add_command(label="四个都恢复默认", command=lambda: self.reset_quads())
+        has_default = p < len(QUAD_DEFAULTS)
+        m.add_command(label="这一格恢复默认名字",
+                      state=("normal" if has_default
+                             and (pr["name"], pr["act"]) != QUAD_DEFAULTS[p] else "disabled"),
+                      command=lambda: self.reset_quads(p))
+        m.add_command(label="全部恢复出厂四个…", command=lambda: self.reset_quads())
         return m
 
-    def set_quad_labels(self, labels, p=None):
-        """保存四个象限的名字。labels = [{"name","act"}]，顺序对应 p 0..3。"""
-        apply_quad_labels(labels)
+    def apply_quads(self, items, mapping=None):
+        """整套换掉象限（数量 / 名字 / 颜色一起），并把任务搬到新的格子里。
+
+        `mapping` 是「旧 p → 新 p」。删格子时任务必须跟着搬 —— 用户想删的是
+        **一个分类**，不是里面的任务。不给 mapping 就按位置对应（改名/新增）。
+
+        这里也是唯一"落库 + 重绘 + 重建顶栏按钮"的出口，别在别处零散改 PRIOS。
+        """
+        old_n = len(PRIOS)
+        apply_quad_labels(items)
+        new_n = len(PRIOS)
+        if mapping is None:
+            mapping = {i: (i if i < new_n else new_n - 1) for i in range(old_n)}
+
+        def land(p):
+            try:
+                p = int(p or 0)
+            except (TypeError, ValueError):
+                p = 0
+            return max(0, min(int(mapping.get(p, min(p, new_n - 1))), new_n - 1))
+
+        for t in self.tasks:
+            t["p"] = land(t.get("p"))
+        for k in self.trash:                     # 回收站里的也一起搬，捞回来才落得进去
+            task = k.get("task") if isinstance(k, dict) else None
+            if isinstance(task, dict):
+                task["p"] = land(task.get("p"))
+        self.quick_p = max(0, min(int(mapping.get(self.quick_p, self.quick_p)), new_n - 1))
+        # 页码是按 p 存的：格子重排之后全部作废（不然会翻到不存在的页）
+        self.quad_page.clear()
         self.ui["quads"] = quad_labels()
+        self._rebuild_quick()
         self.save()
         self.redraw()
+
+    def add_quad(self, after=None, name=None, act=""):
+        """新增一格，插在 after 后面（None = 追加到末尾）。返回它的下标。"""
+        if len(PRIOS) >= MAX_QUADS:
+            self.status.configure(text="最多 %d 个象限（再多就记不住哪个是哪个了）" % MAX_QUADS)
+            return None
+        items = quad_labels()
+        pos = len(items) if after is None else max(0, min(int(after) + 1, len(items)))
+        new_name = name or "新象限"
+        items.insert(pos, {"name": new_name, "act": act, "c": _free_color(items)})
+        self.apply_quads(items)
+        # 名字先存下来再用：apply_quads 之后 PRIO_BY_P 已经按新列表重建过，
+        # 这时候再回查下标属于"绕远路"，边界上一错就是 KeyError
+        self.status.configure(text="加了一格「%s」—— 点它的标题就能改名" % new_name)
+        return pos
+
+    def delete_quad(self, p, ask=True):
+        """删掉一格。里面的任务挪到**相邻那格**（前一个，没有就后一个）。
+
+        不能连任务一起删：用户说的是"删掉这个分类"，不是"删掉这些事"。
+        """
+        if len(PRIOS) <= 1:
+            self.status.configure(text="至少要留一个象限")
+            return False
+        name = PRIO_BY_P[p]["name"]
+        tgt_old = p - 1 if p > 0 else p + 1
+        tgt_name = PRIO_BY_P[tgt_old]["name"]
+        n = len([t for t in self.tasks if t["p"] == p])
+        if ask:
+            msg = ("「%s」里还有 %d 条任务。\n\n删掉这个格子后，它们会被搬到「%s」——"
+                   "任务本身不会丢。\n\n继续？" % (name, n, tgt_name)) if n else \
+                  ("删掉「%s」这个格子？\n\n里面没有任务。" % name)
+            if not tkmb.askyesno("删除象限", msg):
+                return False
+        items = [x for i, x in enumerate(quad_labels()) if i != p]
+        mapping = {}
+        for i in range(len(PRIOS)):
+            if i != p:
+                mapping[i] = i if i < p else i - 1
+        mapping[p] = mapping[tgt_old]
+        self.apply_quads(items, mapping)
+        self.status.configure(text="已删掉「%s」%s" % (
+            name, ("，%d 条任务搬到了「%s」" % (n, tgt_name)) if n else ""))
+        return True
+
+    def set_quad_labels(self, labels, p=None):
+        """保存整套象限（数量可变）。坐标/数量都不变时等价于"改名字"。"""
+        self.apply_quads([dict(x) for x in labels])
         if p is None:
-            self.status.configure(text="象限名字已更新")
+            self.status.configure(text="象限已更新（现在 %d 个）" % len(PRIOS))
         else:
-            self.status.configure(text="这一格现在叫「%s」" % PRIO_BY_P[p]["name"])
+            self.status.configure(text="这一格现在叫「%s」"
+                                       % PRIO_BY_P[min(p, len(PRIOS) - 1)]["name"])
 
     def reset_quads(self, p=None):
-        reset_quad_labels(p)
-        self.ui["quads"] = quad_labels()
-        self.save()
-        self.redraw()
-        self.status.configure(text="四个象限都恢复成默认名字" if p is None
-                                   else "「%s」恢复成默认名字" % PRIO_BY_P[p]["key"])
+        if p is not None:
+            reset_quad_labels(p)
+            self.ui["quads"] = quad_labels()
+            self.save()
+            self.redraw()
+            self.status.configure(text="「%s」恢复成默认名字" % PRIO_BY_P[p]["key"])
+            return True
+        extra = max(0, len(PRIOS) - len(QUAD_DEFAULTS))
+        if extra and not tkmb.askyesno(
+                "恢复出厂象限",
+                "会变回出厂那 4 个象限，多出来的 %d 个格子会被删掉。\n\n"
+                "它们里面的任务会搬到前 4 格里（任务本身不会丢）。\n\n继续？" % extra):
+            return False
+        mapping = {i: min(i, len(QUAD_DEFAULTS) - 1) for i in range(len(PRIOS))}
+        self.apply_quads(_default_quad_items(), mapping)
+        self.status.configure(text="已恢复出厂那 4 个象限")
+        return True
 
     def ask_quads(self, p=None):
-        """改四个象限的名字 / 备注（「重要且紧急 · 立刻做」两段都能改）。
+        """象限设置：改名、改说明、加一格、删一格，一次改完。
 
-        `p` 表示"从哪一格点进来的"：光标先落在它的名字框，其余三格照样可以
-        一起改 —— 换分类方式的人通常一次就要换掉四个（工作/学习/娱乐/生活）。
+        `p` = 从哪一格点进来的（光标先落在那儿），其余照样都能改。
 
-        颜色不开放改：四个象限靠颜色区分轻重缓急，各自挑色很快就会撞在一起，
-        而且没法保证文字还看得清。
+        数量上限 MAX_QUADS：再多没人记得住哪个是哪个，顶栏那排小按钮也会挤爆。
+        配色不开放改 —— 靠颜色区分格子，自己挑容易撞在一起；新增的格子由程序
+        从配色板里挑一个还没人用的颜色。
         """
         dlg = tk.Toplevel(self.root)
-        dlg.title("自定义象限")
+        dlg.title("象限设置")
         dlg.configure(bg=C_BG)
         dlg.resizable(False, False)
         self._follow_top(dlg)
         dlg.grab_set()
 
-        tk.Label(dlg, text="象限就是一种分类方式，改成你自己的那套就行（工作 / 学习 / 娱乐 / 生活…）",
+        tk.Label(dlg, text="象限就是一种分类方式：工作 / 学习 / 娱乐 / 生活…… 想要几个就几个（最多 %d 个）"
+                          % MAX_QUADS,
                  font=F_SMALL, bg=C_BG, fg=C_INK2).pack(anchor="w", padx=18, pady=(16, 2))
-        tk.Label(dlg, text="名字必填，后面那句说明可以不填（不填就只显示名字）。颜色不开放修改。",
+        tk.Label(dlg, text="名字必填，后面那句说明可以不填。颜色由程序分配，不开放修改。",
                  font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18)
 
-        grid = tk.Frame(dlg, bg=C_BG)
-        grid.pack(padx=18, pady=(10, 0), fill="x")
-        names, acts = [], []
+        box = tk.Frame(dlg, bg=C_BG)
+        box.pack(fill="x", padx=18, pady=(8, 0))
+        rows = []
+        # 先建行、后定义 save()，所以回车事件不能直接闭包引用 save（那时它还没
+        # 绑定，会 NameError: free variable）。用一个字典在事件发生时才取。
+        hooks = {}
+
+        def make_row(name, act, c, orig):
+            f = tk.Frame(box, bg=C_BG)
+            f.pack(fill="x", pady=3)
+            tk.Label(f, text="●", font=F_BODY, bg=C_BG, width=2,
+                     fg=QUAD_PALETTE[int(c) % len(QUAD_PALETTE)][1]).pack(side="left")
+            ne = tk.Entry(f, font=F_BODY, width=12, bg=C_WHITE, fg=C_INK, relief="flat",
+                          highlightthickness=1, highlightbackground=C_LINE,
+                          highlightcolor="#c0ae8e", insertbackground=C_INK)
+            ne.insert(0, name)
+            ne.pack(side="left", ipady=4, fill="x", expand=True)
+            tk.Label(f, text="·", font=F_SMALL, bg=C_BG, fg=C_INK3).pack(side="left", padx=6)
+            ae = tk.Entry(f, font=F_SMALL, width=14, bg=C_WHITE, fg=C_INK2, relief="flat",
+                          highlightthickness=1, highlightbackground=C_LINE,
+                          highlightcolor="#c0ae8e", insertbackground=C_INK)
+            ae.insert(0, act)
+            ae.pack(side="left", ipady=4)
+            xb = tk.Button(f, text="×", font=F_SMALL, bd=0, relief="flat", padx=6, pady=2,
+                           bg=C_BG, fg=C_INK3, activebackground="#f0e9dc",
+                           activeforeground="#c4262e", cursor="hand2",
+                           highlightthickness=0)
+            xb.pack(side="left", padx=(4, 0))
+            row = {"f": f, "name": ne, "act": ae, "c": c, "orig": orig}
+            xb.configure(command=lambda rr=row: drop_row(rr))
+            ne.bind("<Return>", lambda e: hooks["save"](e))
+            ae.bind("<Return>", lambda e: hooks["save"](e))
+            return row
+
+        def drop_row(row):
+            if len(rows) <= 1:
+                err.configure(text="至少要留一个象限（任务总得落在某个格子里）")
+                return
+            row["f"].destroy()
+            rows.remove(row)
+            err.configure(text="")
+
         for i, pr in enumerate(PRIOS):
-            tk.Label(grid, text="●", font=F_BODY, bg=C_BG, fg=pr["band"])\
-                .grid(row=i, column=0, padx=(0, 6), pady=4)
-            n = tk.Entry(grid, font=F_BODY, width=12, bg=C_WHITE, fg=C_INK, relief="flat",
-                         highlightthickness=1, highlightbackground=C_LINE,
-                         highlightcolor="#c0ae8e", insertbackground=C_INK)
-            n.insert(0, pr["name"])
-            n.grid(row=i, column=1, sticky="ew", ipady=4, pady=4)
-            tk.Label(grid, text="·", font=F_SMALL, bg=C_BG, fg=C_INK3)\
-                .grid(row=i, column=2, padx=6)
-            a = tk.Entry(grid, font=F_SMALL, width=16, bg=C_WHITE, fg=C_INK2, relief="flat",
-                         highlightthickness=1, highlightbackground=C_LINE,
-                         highlightcolor="#c0ae8e", insertbackground=C_INK)
-            a.insert(0, pr["act"])
-            a.grid(row=i, column=3, sticky="ew", ipady=4, pady=4)
-            names.append(n)
-            acts.append(a)
-        grid.columnconfigure(1, weight=3)
-        grid.columnconfigure(3, weight=2)
+            rows.append(make_row(pr["name"], pr["act"], pr["c"], i))
 
         err = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
         err.pack(anchor="w", padx=18, pady=(2, 0))
-        tk.Label(dlg, text="回车 = 保存 · Esc = 取消 · 说明留空就只显示名字",
+        tk.Label(dlg, text="回车 = 保存 · Esc = 取消 · 删掉的格子里的任务会搬到相邻那格",
                  font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18)
 
+        def add_row_click():
+            if len(rows) >= MAX_QUADS:
+                err.configure(text="最多 %d 个象限" % MAX_QUADS)
+                return
+            rows.append(make_row("新象限", "", _free_color(rows), None))
+            err.configure(text="")
+            dlg.update_idletasks()
+            rows[-1]["name"].focus_set()
+
         def save(_e=None):
-            labels = []
-            for i, (n, a) in enumerate(zip(names, acts)):
-                nm = n.get().strip()
+            data = []
+            for i, row in enumerate(rows):
+                nm = row["name"].get().strip()
                 if not nm:                     # 名字不许空，留在框里让用户改
                     err.configure(text="第 %d 格的名字不能为空" % (i + 1))
-                    n.focus_set()
+                    row["name"].focus_set()
                     return
-                labels.append({"name": nm, "act": a.get().strip()})
+                data.append({"name": nm, "act": row["act"].get().strip(),
+                             "c": row["c"], "orig": row["orig"]})
+            # 旧 p -> 新 p：留下的按 orig 认人；被删的那些搬到最近的一个活着的格子
+            mapping = {it["orig"]: i for i, it in enumerate(data) if it["orig"] is not None}
+            alive = sorted(mapping)
+            for old in range(len(PRIOS)):
+                if old in mapping:
+                    continue
+                prev = [x for x in alive if x < old]
+                nxt = [x for x in alive if x > old]
+                src = prev[-1] if prev else (nxt[0] if nxt else (alive[0] if alive else 0))
+                mapping[old] = mapping.get(src, 0)
+            items = [{"name": it["name"], "act": it["act"], "c": it["c"]} for it in data]
             dlg.destroy()
-            self.set_quad_labels(labels, p)
+            self.apply_quads(items, mapping)
+            self.status.configure(text="象限已更新（现在 %d 个）" % len(items))
+
+        hooks["save"] = save
 
         def fill_default():
-            # 只填回框里，不直接落库 —— 用户可能只想复原其中一格，
-            # 填完还能改两个再按保存。
-            for i, (n, a) in enumerate(zip(names, acts)):
-                n.delete(0, "end")
-                n.insert(0, QUAD_DEFAULTS[i][0])
-                a.delete(0, "end")
-                a.insert(0, QUAD_DEFAULTS[i][1])
+            # 只把名字填回出厂值，**不改数量、不改顺序** —— 用户可能只想复原文字
+            for i, row in enumerate(rows):
+                n, a = (QUAD_DEFAULTS[i] if i < len(QUAD_DEFAULTS)
+                        else ("象限%d" % (i + 1), ""))
+                row["name"].delete(0, "end")
+                row["name"].insert(0, n)
+                row["act"].delete(0, "end")
+                row["act"].insert(0, a)
             err.configure(text="")
 
-        for w in names + acts:
-            w.bind("<Return>", save)
         dlg.bind("<Escape>", lambda e: dlg.destroy())
 
         bar = tk.Frame(dlg, bg=C_BG)
         bar.pack(fill="x", padx=18, pady=(8, 16))
-        self._btn(bar, "填回默认", fill_default).pack(side="left")
+        self._btn(bar, "＋ 新增一格", add_row_click).pack(side="left")
+        self._btn(bar, "名字填回默认", fill_default).pack(side="left", padx=(8, 0))
         self._btn(bar, "保存", save, primary=True).pack(side="right")
         self._btn(bar, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
 
+        dlg.minsize(430, 0)
         dlg.update_idletasks()
         px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
-        py = self.root.winfo_y() + 120
+        py = self.root.winfo_y() + 110
         dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
-        (names[p] if p is not None and 0 <= p < len(names) else names[0]).focus_set()
+        (rows[p] if p is not None and 0 <= p < len(rows) else rows[0])["name"].focus_set()
 
     def ask_edit(self, t, focus="title"):
         """编辑一条任务：标题 + 备注 一起改。
