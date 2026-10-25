@@ -2458,6 +2458,19 @@ check("「k」条目都带着「名字 + 解释」这一对",
       all(len(s) == 2 and isinstance(s[1], tuple) and len(s[1]) == 2
           for s in sticky.HELP_SECTIONS if s[0] == "k"))
 
+check("讲清了象限可以改名，以及三个入口",
+      "四个象限可以改名" in body
+      and all(k in body for k in ("自定义象限名字", "改这个名字", "填回默认")),
+      "正文里没把改名的入口说全")
+# 帮助窗是纯 Text，不渲染 markdown —— 写 **加粗** 会原样显示星号。
+# 这个错已经犯过两次（第 8 项、第 10 项），用一条用例钉住。
+_all_help_text = "\n".join(
+    [s[1] for s in sticky.HELP_SECTIONS if s[0] != "k"]
+    + [s[1][0] + s[1][1] for s in sticky.HELP_SECTIONS if s[0] == "k"])
+check("帮助文案里没有 markdown 标记（纯 Text 只认自己的那套约定）",
+      "**" not in _all_help_text,
+      "带星号的条目：%s" % [x for x in _all_help_text.split("\n") if "**" in x][:2])
+
 check("有个「关闭」按钮", bool(_hw) and any(
     b.cget("text") == "关闭" for b in _hw["btns"]),
     "实际 %s" % ([b.cget("text") for b in _hw["btns"]] if _hw else None))
@@ -2640,6 +2653,142 @@ check("源码版不冒充「打包版」", not any("打包版" in t for t in _la
       "实际 %s" % _labels[-3:])
 _hw.destroy()
 root.update()
+
+print("\n-- 象限名字可以自定义（它本质是一种分类方式）--")
+
+# 用户的原话：「工作、学习、娱乐、生活这些象限其实也是一种分类方式……象限的
+# 备注解释自然是应该可以自定义的」「这种后面的立刻做这些应该是可以修改的才对」
+check("出厂时是那四个默认名字",
+      [pr["name"] for pr in sticky.PRIOS] == [d[0] for d in sticky.QUAD_DEFAULTS],
+      "实际 %s" % [pr["name"] for pr in sticky.PRIOS])
+
+sticky.apply_quad_labels([{"name": "工作", "act": "专注"},
+                          {"name": "学习", "act": "充电"},
+                          {"name": "娱乐", "act": ""},
+                          {"name": "生活", "act": "杂事"}])
+check("四个名字都换掉了",
+      [pr["name"] for pr in sticky.PRIOS] == ["工作", "学习", "娱乐", "生活"],
+      "实际 %s" % [pr["name"] for pr in sticky.PRIOS])
+check("名字后面的备注也跟着换",
+      [pr["act"] for pr in sticky.PRIOS] == ["专注", "充电", "", "杂事"],
+      "实际 %r" % [pr["act"] for pr in sticky.PRIOS])
+check("PRIO_BY_P 看到的是同一份（不是另存了一个副本）",
+      sticky.PRIO_BY_P[0]["name"] == "工作")
+
+sticky.apply_quad_labels([{"name": "  ", "act": "x"}, {"name": "只给名字"}])
+check("名字留空就沿用默认（不会出现没名字的格子）",
+      sticky.PRIOS[0]["name"] == sticky.QUAD_DEFAULTS[0][0],
+      "实际 %r" % sticky.PRIOS[0]["name"])
+check("没给备注的格子沿用默认备注",
+      sticky.PRIOS[1]["act"] == sticky.QUAD_DEFAULTS[1][1],
+      "实际 %r" % sticky.PRIOS[1]["act"])
+check("给了空备注就是空的（用户主动清掉，别拿默认盖回来）",
+      sticky.PRIOS[0]["act"] == "x", "实际 %r" % sticky.PRIOS[0]["act"])
+
+sticky.apply_quad_labels(None)
+check("老数据里没有 ui.quads → 四个全部回落默认",
+      [pr["name"] for pr in sticky.PRIOS] == [d[0] for d in sticky.QUAD_DEFAULTS])
+sticky.apply_quad_labels([None, "脏", {"name": 123}, (None, None)])
+check("脏数据也不崩，名字仍然是字符串且非空",
+      all(isinstance(pr["name"], str) and pr["name"] for pr in sticky.PRIOS),
+      "实际 %r" % [pr["name"] for pr in sticky.PRIOS])
+
+# 徽章/菜单上的短标签要跟着改，而且备注留空时不能露出光秃秃一个「P0」
+sticky.apply_quad_labels([{"name": "生活", "act": ""}])
+check("备注为空时短标签用象限名顶上",
+      sticky.quad_title(0) == "P0 生活", "实际 %r" % sticky.quad_title(0))
+check("备注为空时完整标签也不留「·」尾巴",
+      sticky.quad_full(0) == "P0 生活", "实际 %r" % sticky.quad_full(0))
+sticky.apply_quad_labels([{"name": "工作", "act": "专注"}])
+check("有备注时短标签用备注", sticky.quad_title(0) == "P0 专注",
+      "实际 %r" % sticky.quad_title(0))
+check("完整标签是「P0 工作 · 专注」", sticky.quad_full(0) == "P0 工作 · 专注",
+      "实际 %r" % sticky.quad_full(0))
+
+# ---- 真的改一遍：菜单和对话框都走 set_quad_labels ----
+app.set_quad_labels([{"name": "工作", "act": "立刻做"},
+                     {"name": "学习", "act": "计划做"},
+                     {"name": "娱乐", "act": "有空再做"},
+                     {"name": "生活", "act": ""}], 0)
+app.redraw()
+root.update()
+check("画布上的象限标题换成了新名字",
+      "工作" in all_texts(app) and "重要且紧急" not in all_texts(app),
+      "实际含「工作」的：%s" % [x for x in all_texts(app) if "工作" in x][:3])
+_act_texts = [x for x in all_texts(app) if x.startswith("· ")]
+check("有备注的三格画出了「· 备注」，没备注的那格不画",
+      sorted(_act_texts) == sorted(["· 立刻做", "· 计划做", "· 有空再做"]),
+      "实际 %s" % _act_texts)
+app.save()
+_ui = json.load(open(sticky.DATA_FILE, encoding="utf-8"))["ui"]
+check("名字写进了 ui.quads（下次打开还在）",
+      [q["name"] for q in _ui.get("quads", [])] == ["工作", "学习", "娱乐", "生活"],
+      "实际 %r" % _ui.get("quads"))
+check("备注也一起存了（含那一格空串）",
+      [q["act"] for q in _ui.get("quads", [])] == ["立刻做", "计划做", "有空再做", ""],
+      "实际 %r" % _ui.get("quads"))
+
+# ★ 从真实点击进去（本项目已经栽过三次"按钮画着、点了没反应"）：
+#   把 ask_quads 换成探针，验"点象限标题"确实会打开改名框、且是被点的那一格。
+_seen = []
+_real_ask = app.ask_quads
+app.ask_quads = lambda p=None: _seen.append(p)
+app.redraw()
+root.update()
+_box = region(app, "qhead", "Q2")
+check("象限标题是热区（点了才有反应）", _box is not None)
+if _box:
+    _cx, _cy = (_box[0] + _box[2]) / 2.0, (_box[1] + _box[3]) / 2.0
+    app.on_press(E(_cx, _cy))
+    app.on_release(E(_cx, _cy))
+check("★ 点象限标题打开的是这一格的改名框", _seen == [2], "实际 %r" % _seen)
+app.ask_quads = _real_ask
+
+check("标题热区只占标题那一行，不会盖住下面的卡片（卡片照样能点能拖）",
+      _box is not None and _box[3] - _box[1] <= sticky.QHEAD,
+      "实际 %r，QHEAD=%s" % (_box, sticky.QHEAD))
+
+app.reset_quads()
+app.redraw()
+root.update()
+check("能一键恢复默认",
+      [pr["name"] for pr in sticky.PRIOS] == [d[0] for d in sticky.QUAD_DEFAULTS],
+      "实际 %s" % [pr["name"] for pr in sticky.PRIOS])
+
+_mq = app.build_quad_menu(0)
+_q_labels = [_mq.entrycget(i, "label") for i in range(_mq.index("end") + 1)
+             if _mq.type(i) == "command"]
+check("象限标题右键菜单里有「改这个名字…」",
+      any("改这个名字" in l for l in _q_labels), "实际 %s" % _q_labels)
+_mq.destroy()
+app.set_quad_labels([{"name": "工作", "act": "专注"}])
+_mq = app.build_quad_menu(0)
+_q_states = {_mq.entrycget(i, "label"): _mq.entrycget(i, "state")
+             for i in range(_mq.index("end") + 1) if _mq.type(i) == "command"}
+_mq.destroy()
+check("改过名之后「恢复默认」才可点",
+      _q_states.get("这一格恢复默认名字") == "normal", "实际 %r" % _q_states)
+app.reset_quads()
+
+_mm = app.build_more_menu()
+_m_labels = [_mm.entrycget(i, "label") for i in range(_mm.index("end") + 1)
+             if _mm.type(i) == "command"]
+check("「更多 ▾」里有自定义象限的入口（不用靠右键去猜）",
+      any("自定义象限" in l for l in _m_labels), "实际 %s" % _m_labels)
+_mm.destroy()
+
+# ---- 名字被改得很长时，不能压到右边的任务数上 ----
+_long_name = "工作上的事情统统放这一格谁也不许乱动"
+_long_act = "备注也可以写得很长很长很长"
+_short, _short_act = sticky.fit_quad_head(_long_name, _long_act, 120)
+_w = sticky._font_of(sticky.F_HEAD).measure(_short)
+check("名字太长会裁到可用宽度内（不压右边的任务数）",
+      _w <= 120 and _short.endswith("…"), "实际 %r 宽 %s" % (_short, _w))
+check("裁过之后备注也跟着收窄",
+      sticky._font_of(sticky.F_SMALL).measure("· " + _short_act) + _w + 8 <= 120
+      or _short_act == "", "实际 %r / %r" % (_short, _short_act))
+check("放得下的时候一个字都不动",
+      sticky.fit_quad_head("工作", "专注", 400) == ("工作", "专注"))
 
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
