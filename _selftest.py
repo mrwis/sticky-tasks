@@ -3701,6 +3701,47 @@ finally:
     app.redraw()
     root.update()
 
+print("\n-- 改标题 / 改截止时间也能撤销了 --")
+
+# 撤销是「整份任务列表换成一份新副本」，所以撤销之后手里那把旧引用就失效了，
+# 一律用 task_by_id 重新取（这条坑第 10 项踩过）。
+app._clear_undo()
+_ut = mk("撤销改标题")
+_ut_id, _ut_old = _ut["id"], _ut["title"]
+_ok = app._edit_undo("已改标题，可撤销", app.set_title, _ut, "改成了新标题")
+check("改标题后挂了撤销入口", _ok and app._undo_cb is not None)
+check("标题确实改掉了",
+      app.task_by_id(_ut_id)["title"] == "改成了新标题")
+app._do_undo()
+check("★ 撤销后标题回到原样（改砸了能退回去）",
+      app.task_by_id(_ut_id)["title"] == _ut_old,
+      "实际 %r" % app.task_by_id(_ut_id)["title"])
+
+app._clear_undo()
+_ud = mk("撤销改截止时间")
+_ud_id = _ud["id"]
+app._edit_undo("已改截止时间，可撤销", app.set_due, _ud, "2026-11-11 09:00")
+check("截止时间改成了带时刻的形状",
+      app.task_by_id(_ud_id)["due"] == "2026-11-11 09:00:00",
+      "实际 %r" % app.task_by_id(_ud_id)["due"])
+app._do_undo()
+check("★ 撤销后截止时间回到空", app.task_by_id(_ud_id)["due"] == "",
+      "实际 %r" % app.task_by_id(_ud_id)["due"])
+
+app._clear_undo()
+_before_cb = app._undo_cb
+_ue = mk("空标题不占撤销位")
+_ok2 = app._edit_undo("改了", app.set_title, _ue, "   ")
+check("★ 什么都没改时不留撤销按钮（点了没反应比没有还困惑）",
+      _ok2 is False and app._undo_cb is _before_cb and _before_cb is None)
+
+app.tasks = [t for t in app.tasks
+             if t["id"] not in (_ut_id, _ud_id, _ue["id"])]
+app._clear_undo()
+app.save()
+app.redraw()
+root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
