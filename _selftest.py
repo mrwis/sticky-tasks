@@ -3742,6 +3742,89 @@ app.save()
 app.redraw()
 root.update()
 
+print("\n-- 跨机冲突：谁后改谁赢，另一份留底 --")
+
+_sv_data = sticky.DATA_FILE
+_sv_dir = tempfile.mkdtemp(prefix="sticky_sync_")
+import shutil as _sh2
+
+
+def _disk_json():
+    with open(sticky.DATA_FILE, encoding="utf-8") as f:
+        return json.load(f)
+
+
+def _write_disk(title, up):
+    """冒充另一台机器：直接把一份"别人的数据"写到磁盘上。"""
+    obj = {"v": 3, "updated_at": up, "ui": {}, "trash": [],
+           "tasks": [{"id": "oth" + title, "title": title, "note": "", "p": 0,
+                      "due": "", "done": False, "order": 1.0,
+                      "subs": [], "logs": {}, "timer": 0}]}
+    with open(sticky.DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump(obj, f, ensure_ascii=False)
+    return obj
+
+
+try:
+    sticky.DATA_FILE = os.path.join(_sv_dir, "tasks.json")
+    app.tasks = [mk("我这边的一条")]
+    app.save()
+    check("★ 数据文件里记着 updated_at（判断谁新的依据）",
+          _disk_json().get("updated_at", 0) > 1e9,
+          "实际 %r" % _disk_json().get("updated_at"))
+    check("刚存完不会把自己当成「对方改过」",
+          app._disk_stamp_now() == app._disk_stamp
+          and app._follow_disk() is False)
+
+    # --- A：对方存了一份更新的 → 换它 ---
+    _write_disk("另一台机器加的任务", app._base_updated + 60)
+    check("磁盘被改过一眼就能看出来（mtime/size 变了）",
+          app._disk_stamp_now() != app._disk_stamp)
+    _swapped = app._follow_disk()
+    check("★ 对方更新 → 整份换成对方的（以最后修改为准）",
+          _swapped and [t["title"] for t in app.tasks] == ["另一台机器加的任务"],
+          "实际 %r" % [t["title"] for t in app.tasks])
+    check("换完之后状态栏说了发生什么",
+          "另一台机器" in app.status.cget("text"),
+          "实际 %r" % app.status.cget("text"))
+
+    # --- B：只是 mtime 被碰了、updated_at 没变 → 不换 ---
+    app.save()
+    _up_before = app._base_updated
+    os.utime(sticky.DATA_FILE, (sticky.now_ts(), sticky.now_ts()))
+    check("只是文件时间被碰了、内容没变 → 不动板面",
+          app._follow_disk() is False and app._base_updated == _up_before)
+
+    # --- C：我要保存，但磁盘被对方改过 → 存我的，对方那份留底 ---
+    app.save()                               # 把基准对齐
+    _write_disk("对方的第二版", app._base_updated + 120)
+    app.tasks = app.tasks + [mk("我加的一条")]
+    app.save()
+    _rec = [n for n in os.listdir(_sv_dir) if n.startswith("tasks.remote-")]
+    check("★ 保存时发现对方改过 → 对方那份另存留底（不是默默盖掉）",
+          len(_rec) == 1, "实际 %r" % _rec)
+    with open(os.path.join(_sv_dir, _rec[0]), encoding="utf-8") as f:
+        _parked = json.load(f)
+    check("★ 留底的就是对方那份，内容原样",
+          _parked["tasks"][0]["title"] == "对方的第二版",
+          "实际 %r" % _parked["tasks"][0]["title"])
+    _now_titles = [t["title"] for t in _disk_json()["tasks"]]
+    check("我这边仍然生效（谁后存谁赢）", "我加的一条" in _now_titles,
+          "实际 %r" % _now_titles)
+
+    # --- D：正常保存不产生留底文件 ---
+    _n_before = len([n for n in os.listdir(_sv_dir) if n.startswith("tasks.remote-")])
+    app.save()
+    check("没冲突时不会凭空多出留底文件",
+          len([n for n in os.listdir(_sv_dir) if n.startswith("tasks.remote-")])
+          == _n_before)
+finally:
+    sticky.DATA_FILE = _sv_data
+    _sh2.rmtree(_sv_dir, ignore_errors=True)
+    app.load()
+    app.redraw()
+    root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
