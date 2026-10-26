@@ -192,6 +192,9 @@
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
+  · 改"哪些操作能撤销" → 撤销点只在**用户动作**那一层埋（_edit_undo() 包一下：
+                      拍快照 → 执行 → _flash_undo）。别加进 set_title/set_note
+                      内部 —— 它们还有"程序自己恢复旧值"的调用点，那种不该占位
   · 改"搜索怎么算命中" → search_hit()（**唯一**出口，visible() 和描边都用它）
   · 改"导出 / 按月统计" → export_rows()（CSV 的行，纯函数）+ export_csv()
                       （写文件，**编码必须 utf-8-sig**，否则 Excel 中文乱码）+
@@ -1124,7 +1127,8 @@ HELP_SECTIONS = [
     ("k", ("Ctrl + T", "窗口置顶开关")),
     ("k", ("Ctrl + B", "打开耗时统计")),
     ("k", ("Ctrl + E", "打开每日复盘")),
-    ("k", ("Ctrl + Z", "撤销上一次删除（状态栏右侧会出现「撤销」按钮）")),
+    ("k", ("Ctrl + Z", "撤销上一步（删除、拖拽、改标题、改备注、改截止时间都算；"
+                       "状态栏右侧会出现「撤销」按钮）")),
     ("k", ("F5",       "重画界面")),
     ("k", ("F1",       "打开本帮助")),
 
@@ -4804,7 +4808,9 @@ class App:
                             command=lambda i=pr["p"]: self.set_prio(t, i))
         m.add_cascade(label="改优先级", menu=sub)
         m.add_command(label="设置截止日期…", command=lambda: self.ask_due(t))
-        m.add_command(label="清除截止日期", command=lambda: self.set_due(t, ""))
+        m.add_command(label="清除截止日期",
+                      command=lambda: self._edit_undo(
+                          "已清除截止日期", self.set_due, t, ""))
 
         rsub = tk.Menu(m, tearoff=0, font=F_SMALL)
         for k, label, _badge in REPEATS:
@@ -5265,6 +5271,23 @@ class App:
         self.redraw()
         self.status.configure(text="已撤销")
 
+    def _edit_undo(self, label, fn, *a, **k):
+        """把一次「改字段」包成可撤销的：先拍快照 → 执行 → 挂上撤销按钮。
+
+        为什么不在 set_title / set_note 里直接做：它们还有"程序自己把值恢复
+        回去"的调用点（取消编辑那一路），那种不该占一个撤销位。所以撤销点由
+        **用户动作**这一层显式埋。
+
+        什么都没改（比如标题清空被忽略）就不挂撤销 —— 否则按钮点了没反应，
+        比没有还让人困惑。
+        """
+        snap = self._snapshot()
+        fn(*a, **k)
+        if self.tasks == snap:
+            return False
+        self._flash_undo(label, lambda: self._restore_snapshot(snap))
+        return True
+
     def set_all_subs(self, t, val):
         for s in subs_of(t):
             s["done"] = bool(val)
@@ -5660,8 +5683,8 @@ class App:
             if err:
                 err_lb.configure(text=err)      # 不关窗，让人就地改
                 return
-            self.set_due(t, val)
             dlg.destroy()
+            self._edit_undo("已改截止时间，可撤销", self.set_due, t, val)
 
         for e in (dent, tent):
             e.bind("<KeyRelease>", refresh)
@@ -6031,9 +6054,12 @@ class App:
                 return
             note = txt.get("1.0", "end").strip()
             dlg.destroy()
-            self.set_title(t, title)
-            self.set_note(t, note)
-            self.status.configure(text="已保存「%s」的修改" % ellipsis(title, 12))
+
+            def _apply():
+                self.set_title(t, title)
+                self.set_note(t, note)
+
+            self._edit_undo("已保存「%s」的修改" % ellipsis(title, 12), _apply)
 
         def drop():
             dlg.destroy()
@@ -6174,10 +6200,11 @@ class App:
         self.editor = None
         self.cv.delete("editor")
         if field == "title":
-            self.set_title(t, txt)        # 空标题会被忽略，保持原样
-            return True                   # set_title 里已经 save + redraw 过了
+            # 空标题会被 set_title 忽略，那时 _edit_undo 比一遍数据就把撤销收回去
+            self._edit_undo("已改标题，可撤销", self.set_title, t, txt)
+            return True
         if field == "note":
-            self.set_note(t, txt)         # 备注只走这一个落库出口（含换行归一化）
+            self._edit_undo("已改备注，可撤销", self.set_note, t, txt)
             return True
         if field.startswith("st:"):
             s = sub_by_id(t, field[3:])
