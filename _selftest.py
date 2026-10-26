@@ -3543,6 +3543,93 @@ check("混着之前逾期的，标题里点出来",
       and "1 条" in sticky.reminder_head([_rm_today, _rm_old]),
       "实际 %r" % sticky.reminder_head([_rm_today, _rm_old]))
 
+print("\n-- 导出 CSV 与按月回顾 --")
+
+_now = sticky.now_ts()
+_day = 86400.0
+_exp_tasks = [
+    {"id": "x1", "title": "早完成的一条", "note": "备注里有逗号, 也有\"引号\"",
+     "p": 0, "due": "2026-10-20", "done": True,
+     "created_at": _now - 2 * _day, "done_at": _now - 1 * _day,
+     "subs": [{"id": "a", "text": "子1", "done": True},
+              {"id": "b", "text": "子2", "done": False}], "logs": {}, "timer": 0},
+    {"id": "x2", "title": "晚完成的一条", "note": "", "p": 1, "due": "",
+     "done": True, "created_at": _now - 3 * _day, "done_at": _now - 0.5 * _day,
+     "subs": [], "logs": {}, "timer": 0},
+    {"id": "x3", "title": "还没做完", "note": "", "p": 2, "due": "",
+     "done": False, "created_at": _now - _day, "subs": [], "logs": {}, "timer": 0},
+]
+_rows = sticky.export_rows(_exp_tasks)
+check("CSV 表头是那九列",
+      _rows[0] == ["完成日期", "完成时刻", "标题", "象限", "截止日期",
+                   "创建时间", "用时（分钟）", "子任务", "备注"],
+      "实际 %r" % (_rows[0],))
+check("★ 只导已完成的（没做完的不算）",
+      [r[2] for r in _rows[1:]] == ["早完成的一条", "晚完成的一条"],
+      "实际 %r" % [r[2] for r in _rows[1:]])
+check("按完成时间升序（时间线顺序，不是任务顺序）",
+      _rows[1][2] == "早完成的一条", "实际 %r" % _rows[1][2])
+check("用时换算成分钟（保留一位小数）",
+      _rows[1][6] == "1440.0", "实际 %r" % _rows[1][6])
+check("子任务写成「完成数/总数」", _rows[1][7] == "1/2", "实际 %r" % _rows[1][7])
+check("象限写全名（能直接当透视表的行标签）",
+      "重要且紧急" in _rows[1][3], "实际 %r" % _rows[1][3])
+
+# 真的写出一个文件：编码必须是 utf-8-sig（带 BOM），否则 Excel 打开中文乱码
+_csvp = os.path.join(TMP, "导出测试.csv")
+_keep_tasks = app.tasks
+app.tasks = _exp_tasks
+try:
+    _got = app.export_csv(path=_csvp)
+    _raw = open(_csvp, "rb").read()
+    check("★ 写出的 CSV 带 BOM（Excel 双击打开中文不乱码）",
+          _raw.startswith(b"\xef\xbb\xbf"), "实际开头 %r" % _raw[:6])
+    _txt = _raw.decode("utf-8-sig")
+    check("CSV 里 2 条完成记录 + 1 行表头",
+          len([l for l in _txt.splitlines() if l.strip()]) == 3,
+          "实际 %r" % _txt[:120])
+    check("备注里的逗号和引号被转义了（不会把列错开）",
+          '"备注里有逗号, 也有""引号"""' in _txt, "实际 %r" % _txt[:160])
+    check("导出成功会回报路径", _got == _csvp)
+finally:
+    app.tasks = _keep_tasks
+    try:
+        os.remove(_csvp)
+    except OSError:
+        pass
+
+# ---- 按月回顾：口径单独测 ----
+_ym_now = sticky.d2s(sticky.today())[:7]
+_st = sticky.month_stats(_exp_tasks, _ym_now)
+check("★ 按月统计只算这个月完成的",
+      _st["n"] == 2 and _st["days"] >= 1, "实际 %r" % {k: _st[k] for k in ("n", "days")})
+check("象限分布累加了",
+      sum(_st["by_p"].values()) == _st["n"], "实际 %r" % _st["by_p"])
+check("两个时间戳都在的才算进平均用时",
+      len(_st["useds"]) == 2, "实际 %d" % len(_st["useds"]))
+check("别的月份是空的（不会串月）",
+      sticky.month_stats(_exp_tasks, "2001-01")["n"] == 0)
+check("月份标签写成「2026 年 10 月」",
+      sticky.month_label("2026-10") == "2026 年 10 月",
+      "实际 %r" % sticky.month_label("2026-10"))
+
+# ---- 面板端到端：开窗 → 翻月 → 关掉 ----
+app.open_month_review()
+root.update()
+_mr = [w for w in root.winfo_children()
+       if isinstance(w, tk.Toplevel) and w.winfo_exists()][-1]
+check("按月回顾窗打开了，默认是这个月",
+      _mr._mr_ym() == _ym_now, "实际 %r" % _mr._mr_ym())
+_mr._mr_shift(-1)
+root.update()
+check("点「上月」真的换到上个月", _mr._mr_ym() != _ym_now,
+      "实际 %r" % _mr._mr_ym())
+_mr._mr_shift(+1)
+root.update()
+check("再点「下月」回来", _mr._mr_ym() == _ym_now, "实际 %r" % _mr._mr_ym())
+_mr.destroy()
+root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
