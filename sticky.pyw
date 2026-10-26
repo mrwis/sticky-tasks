@@ -192,6 +192,11 @@
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
+  · 改"数据文件读不出来怎么办" → load() 里的 except 分支：坏文件用
+                      _quarantine_broken() **改名留底**后再用示例数据启动，
+                      弹窗在 _warn_load_problem()。连改名都失败时置
+                      save_blocked，_write_path() 会改写 tasks.recovered.json，
+                      **绝不覆盖原文件**。别改回 `except: self._seed()`
   · 改子任务的显示顺序/收起规则 → visible_subs()（**唯一**出口）+
                       SUB_SHOW_DONE（摊开状态，记的是"哪天摊开的"）+
                       sub_open()（摊开只在当天有效）+ hidden_sub_n()（收起条数）。
@@ -1025,6 +1030,9 @@ HELP_SECTIONS = [
     ("n",  "· 「更多 ▾ → 设置自动备份文件夹」选个目录，之后每天自动存一份备份"),
     ("n",  "· 「更多 ▾ → 打开数据文件夹」直接看到当前的数据文件"),
     ("n",  "· 「更多 ▾ → 导入 / 恢复备份…」可以从任意一份备份恢复"),
+    ("n",  "· 万一这个文件被改坏了（少个逗号、网盘同步到一半），程序打不开它时会"
+           "先把原文件原样另存成 tasks.broken-日期-时间.json，再用示例数据启动，"
+           "并且弹窗告诉你留底在哪 —— 不会一声不响就把你的数据盖掉"),
     ("p",  "换电脑只要把这个文件夹连同 tasks.json 一起拷过去就行。"),
 ]
 
@@ -2178,6 +2186,9 @@ class App:
             self.status.configure(text="已自动备份到 %s" % p)
 
         self._tick()               # 开始心跳：计时中的卡片要持续刷新
+        # 数据文件读坏了 —— 等窗口画完再说，别抢在启动动画前面弹框
+        if self.load_warning:
+            self.root.after(400, self._warn_load_problem)
         # 稍等一下再检查提醒，免得窗口还没画完就先蹦出一个提示框
         self.root.after(1500, self._maybe_remind)
 
@@ -2195,23 +2206,45 @@ class App:
     def load(self):
         self.ui = {}
         self.trash = []
+        # 读坏了要吭声：非空 → 开窗后弹一次说明（见 _quarantine_broken）
+        self.load_warning = ""
+        # True = 这次运行绝不覆盖 tasks.json（原文件还没能改名留底的时候）
+        self.save_blocked = False
         if not os.path.exists(DATA_FILE):
             self.tasks = self._seed()
             return
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
                 raw = json.load(f)
-        except Exception:
+        except Exception as e:
+            # ★ 读坏了**绝不能静默换成示例数据**。
+            #   用户手动改错一个逗号、网盘同步到一半、磁盘坏块，都走这里。
+            #   原来的写法是 `tasks = self._seed()` 然后 return —— 不提示、
+            #   不留底；用户随手点一下（勾选/新增），示例数据就把原文件覆盖了，
+            #   真实数据彻底消失（实测复现过，见 selftest 的"数据文件读坏了"）。
+            #   现在：原文件改名留底 → 用示例数据启动 → 明确告知留底在哪。
             self.tasks = self._seed()
+            self.load_warning = self._quarantine_broken(e)
             return
 
         if isinstance(raw, list):
             items, self.ui = raw, {}
-        else:
+        elif isinstance(raw, dict):
             items = raw.get("tasks", [])
-            if not isinstance(items, list):
-                items = []
             self.ui = raw.get("ui", {}) or {}
+            if not isinstance(items, list):
+                self.load_warning = (
+                    "数据文件里的 tasks 不是列表（读到的是 %s），先按空板面启动。\n"
+                    "原文件没有改动 —— 修好再重开就行。"
+                    % type(items).__name__)
+                items = []
+        else:
+            items, self.ui = [], {}
+            self.load_warning = (
+                "数据文件最外层既不是列表也不是对象，认不出来，先按空板面启动。\n"
+                "原文件没有改动 —— 修好再重开就行。")
+        if not isinstance(self.ui, dict):
+            self.ui = {}
 
         self.mode = self.ui.get("mode", "matrix")
         self.filter = self.ui.get("filter", "all")
@@ -2264,8 +2297,55 @@ class App:
              "subs": [], "logs": {}, "timer": 0},
         ]
 
+    def _quarantine_broken(self, err):
+        """把读不了的数据文件**改名留底**，返回给用户看的那段话。
+
+        改名（而不是复制）是故意的：原路径腾出来之后，程序照常把自己这份
+        示例数据写进 tasks.json，不会被"保存失败"反复打扰；而原文件一个字节
+        都没动，就躺在旁边的 tasks.broken-<时间戳>.json 里。
+
+        万一连改名都失败（权限/占用），那就退一步：这次运行**不覆盖**
+        tasks.json（save_blocked），把改动写到 tasks.recovered.json ——
+        宁可让用户找不到自己的改动，也不能把原始数据盖掉。
+        """
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S")
+        dst = os.path.join(os.path.dirname(DATA_FILE),
+                           "tasks.broken-%s.json" % stamp)
+        try:
+            os.replace(DATA_FILE, dst)
+        except Exception as e2:
+            self.save_blocked = True
+            return ("数据文件读不出来：%s\n\n"
+                    "也没能把它另存一份（%s）。\n\n"
+                    "为了不覆盖你的数据，**这次运行不会写回 tasks.json**，"
+                    "改动会存到 tasks.recovered.json。\n"
+                    "原文件请千万别删，先手工检查一下。" % (err, e2))
+        return ("数据文件读不出来：%s\n\n"
+                "原文件已经原样另存为（旁边的这个文件）：\n  %s\n\n"
+                "现在先用示例数据启动。要找回真实数据，可以从上面那份文件里手工修，"
+                "或者用「更多 ▾ → 导入 / 恢复备份」挑一个最近的备份。"
+                % (err, os.path.basename(dst)))
+
+    def _warn_load_problem(self):
+        """开窗后弹一次"数据没读出来"的说明。**只弹一次**，别每次都吓人。"""
+        try:
+            tkmb.showwarning("数据文件读不出来", self.load_warning)
+        except Exception:
+            pass
+
+    def _write_path(self):
+        """这次该写到哪个文件。
+
+        正常就是 tasks.json。唯一例外：原文件读不出来又没能改名留底
+        （_quarantine_broken 里 save_blocked）—— 那时绝不覆盖原文件。
+        """
+        if getattr(self, "save_blocked", False):
+            return os.path.join(os.path.dirname(DATA_FILE), "tasks.recovered.json")
+        return DATA_FILE
+
     def _write_data(self):
         """把当前状态写进 tasks.json。先写 .tmp 再 os.replace，避免写坏原文件。"""
+        path = self._write_path()
         data = {
             "v": 3,
             "ui": {
@@ -2285,10 +2365,10 @@ class App:
             "trash": self.trash,
         }
         try:
-            tmp = DATA_FILE + ".tmp"
+            tmp = path + ".tmp"
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
-            os.replace(tmp, DATA_FILE)
+            os.replace(tmp, path)
         except Exception as e:
             # 存盘失败**不能静默**。源码版跑在仓库里，写不进去基本不可能发生；
             # 但打包成 exe 之后，用户很容易把它丢进 C:\Program Files 这类受保护
@@ -2306,7 +2386,7 @@ class App:
                         "需要管理员权限的目录。\n"
                         "把整个文件夹挪到桌面或 D 盘再打开就好了 ——"
                         "数据是跟着程序走的，换回去之后原来的任务还在。"
-                        % (DATA_FILE, e))
+                        % (path, e))
                 except Exception:
                     pass
 

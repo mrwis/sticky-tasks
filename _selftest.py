@@ -3493,6 +3493,93 @@ app.save()
 check("恢复正常后能正常存盘", os.path.exists(sticky.DATA_FILE))
 check("正常存盘不会弹任何提示", len(_warns) == 1, "实际 %d 次" % len(_warns))
 
+print("\n-- 数据文件读坏了：留底 + 吭声，不许静默换示例数据 --")
+
+# 这一节会把 DATA_FILE 指到另一个临时目录（自测本来就跑在临时目录里，
+# 所以这里再怎么折腾也碰不到仓库里的 tasks.json）。
+_bak_data = sticky.DATA_FILE
+_bak_dir = os.path.dirname(_bak_data)
+_bad_dir = tempfile.mkdtemp(prefix="sticky_bad_")
+try:
+    sticky.DATA_FILE = os.path.join(_bad_dir, "tasks.json")
+    _bad_txt = '{"v":3,"ui":{},"tasks":[{"id":"t1","title":"我真正重要的三条任务"'
+    with open(sticky.DATA_FILE, "w", encoding="utf-8") as f:
+        f.write(_bad_txt)
+
+    app.load()
+    _broken = [n for n in os.listdir(_bad_dir) if n.startswith("tasks.broken-")]
+    check("★ 读坏的文件被原样另存了一份（改名留底，不是复制）",
+          len(_broken) == 1
+          and open(os.path.join(_bad_dir, _broken[0]), encoding="utf-8").read()
+          == _bad_txt,
+          "实际 %r" % _broken)
+    check("★ 坏文件不再占着 tasks.json（原路径腾出来，之后能正常写）",
+          not os.path.exists(sticky.DATA_FILE))
+    check("★ 明确告知了用户（有提示文案，不是静默）",
+          bool(app.load_warning) and "另存" in app.load_warning,
+          "实际 %r" % app.load_warning)
+    check("先用示例数据启动，板面不是空的", len(app.tasks) > 0,
+          "实际 %d 条" % len(app.tasks))
+
+    app._write_data()          # 用户随手操作一次（不走 save()，免得触发备份）
+    check("读坏之后再存盘，写的是新的 tasks.json，坏文件仍然留着",
+          os.path.exists(sticky.DATA_FILE) and len(_broken) == 1
+          and os.path.exists(os.path.join(_bad_dir, _broken[0])))
+
+    # 结构不对（tasks 是 dict）：只提示，**原文件不许动**
+    with open(sticky.DATA_FILE, "w", encoding="utf-8") as f:
+        json.dump({"v": 3, "ui": {}, "tasks": {"坏": "结构"}}, f)
+    _before_txt = open(sticky.DATA_FILE, encoding="utf-8").read()
+    app.load()
+    check("tasks 不是列表 → 提示 + 按空板面启动",
+          bool(app.load_warning) and "不是列表" in app.load_warning
+          and app.tasks == [],
+          "实际 %r / %d 条" % (app.load_warning, len(app.tasks)))
+    check("结构不对时原文件一个字节都没动（还能手工修回来）",
+          len([n for n in os.listdir(_bad_dir) if n.startswith("tasks.broken-")]) == 1
+          and open(sticky.DATA_FILE, encoding="utf-8").read() == _before_txt)
+
+    # 连改名留底都失败（权限/占用）：这次运行绝不覆盖原文件
+    with open(sticky.DATA_FILE, "w", encoding="utf-8") as f:
+        f.write("{坏掉的")
+    _real_replace = os.replace
+    _real_warn = sticky.tkmb.showwarning
+    _warned2 = []
+    sticky.tkmb.showwarning = lambda *a, **k: _warned2.append(a)
+
+    def _nope(src, dst, *a, **k):
+        # 只让"改名留底"这一步失败（文件被别的程序占着那种），
+        # 别的 os.replace 照常 —— 否则测不出"退而写 recovered"这条退路。
+        if str(src) == sticky.DATA_FILE and "broken" in str(dst):
+            raise OSError("Permission denied")
+        return _real_replace(src, dst, *a, **k)
+
+    os.replace = _nope
+    app._save_warned = False        # 让它该弹就弹，我们只收进列表
+    try:
+        app.load()
+        check("连留底都失败时，明确说「不会写回 tasks.json」",
+              app.save_blocked and "不会写回" in app.load_warning,
+              "实际 %r" % app.load_warning)
+        app._write_data()
+        _rec = os.path.join(_bad_dir, "tasks.recovered.json")
+        check("★ 那种情况下改动写到 tasks.recovered.json，原文件没被覆盖",
+              os.path.exists(_rec)
+              and open(sticky.DATA_FILE, encoding="utf-8").read() == "{坏掉的",
+              "原文件=%r" % open(sticky.DATA_FILE, encoding="utf-8").read())
+    finally:
+        os.replace = _real_replace
+        sticky.tkmb.showwarning = _real_warn
+finally:
+    sticky.DATA_FILE = _bak_data
+    import shutil as _sh
+    _sh.rmtree(_bad_dir, ignore_errors=True)
+    app.load()
+    app.redraw()
+    root.update()
+check("测完回到原来的数据文件，任务还在", len(app.tasks) > 0 and os.path.exists(_bak_data),
+      "实际 %d 条 / %r" % (len(app.tasks), _bak_data))
+
 root.destroy()
 print("\n" + "=" * 46)
 print("通过 %d 项，失败 %d 项" % (OK, FAIL))

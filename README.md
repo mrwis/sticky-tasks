@@ -133,6 +133,11 @@ _build_venv\Scripts\python.exe tools\build_exe.py
 任务明文存在程序目录的 `tasks.json` 里（顶层 `{v, ui, tasks, trash}`），
 不上传、不加密，随时可以用记事本打开看。换电脑把这个文件夹拷过去就行。
 
+**这个文件被改坏也不会丢数据**：少个逗号、网盘同步到一半、磁盘坏块，导致读不出来时，
+程序会先把原文件**原样改名**成 `tasks.broken-<日期>-<时间>.json`，再用示例数据启动，
+并弹窗告诉你留底在哪。连改名都失败（文件被占用 / 没权限）时，这次运行**不会覆盖**
+`tasks.json`，改动改写到 `tasks.recovered.json` —— 宁可让你找自己的改动，也不盖掉原始数据。
+
 打包成 exe 之后也是同一套：**"程序目录"就是 exe 所在的那个目录**
 （`_app_dir()` 里判了 `sys.frozen`，见源码导读机制⑬）。
 
@@ -140,8 +145,8 @@ _build_venv\Scripts\python.exe tools\build_exe.py
 
 ## 开发
 
-- 回归测试：`python _selftest.py`（真实建窗驱动事件，当前 615 项）。
-- 源码只有一个 `App` 类，顶部「代码导读」写了从哪读起（含 13 条必须弄懂的机制）。
+- 回归测试：`python _selftest.py`（真实建窗驱动事件，当前 675 项）。
+- 源码只有一个 `App` 类，顶部「代码导读」写了从哪读起（含 16 条必须弄懂的机制）。
 - 改完代码想验证打包仍然正常：`_build_venv\Scripts\python.exe tools\build_exe.py`
   重打一次，再 `tools\verify_exe.py` 过一遍 —— 后者会在项目上一级建个
   `_exetest\` 当"朋友的电脑"，实测"数据确实写在 exe 旁边"，跑完随手删。
