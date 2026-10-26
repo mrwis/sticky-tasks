@@ -3458,6 +3458,91 @@ app.save()
 app.redraw()
 root.update()
 
+print("\n-- 开机自启：只写 HKCU，不碰系统级设置 --")
+
+# 自测**不**真的写开机启动项（那会在测试机上留一个开机就弹的东西），
+# 只验证命令行拼得对、失败分支认得出来、菜单里有这一个入口。
+_cmd = sticky.autostart_command()
+check("开机命令行带引号（路径有空格 / 中文也不会被拆开）",
+      _cmd.startswith('"') and _cmd.count('"') >= 2, "实际 %r" % _cmd)
+check("命令行指向的是这个程序本身（源码版指向 sticky.pyw）",
+      "sticky.pyw" in _cmd or _cmd.count('"') == 2, "实际 %r" % _cmd)
+_bak_frozen = sticky.FROZEN
+sticky.FROZEN = True
+try:
+    check("打包版的开机命令行 = 带引号的 exe 自己",
+          sticky.autostart_command() == '"%s"' % sys.executable,
+          "实际 %r" % sticky.autostart_command())
+finally:
+    sticky.FROZEN = _bak_frozen
+
+check("读开机项不会崩（没设过就是空串）",
+      isinstance(sticky.autostart_get(), str))
+# "关一个本来就没开的"要幂等 —— 但**不能真删**，那会关掉用户自己的启动项。
+# 用假 winreg 只测异常处理这一路：DeleteValue 抛 FileNotFoundError 要被吞掉。
+import winreg as _wr
+
+
+class _FakeKey:
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+
+_real_create, _real_del = _wr.CreateKey, _wr.DeleteValue
+_wr.CreateKey = lambda *a, **k: _FakeKey()
+
+
+def _no_such_value(*a, **k):
+    raise FileNotFoundError("没有这个值")
+
+
+_wr.DeleteValue = _no_such_value
+try:
+    check("关一个本来就没开的自启不报错（幂等，不碰真注册表）",
+          sticky.autostart_set(False) is True)
+finally:
+    _wr.CreateKey, _wr.DeleteValue = _real_create, _real_del
+_mm = app.build_more_menu()
+_labels = [_mm.entrycget(i, "label") for i in range(_mm.index("end") + 1)
+           if _mm.type(i) != "separator"]
+check("「更多 ▾」里有「开机自动启动」开关",
+      any("开机自动启动" in l for l in _labels), "实际 %s" % _labels)
+_mm.destroy()
+
+# 写不进去时要能认出失败（不装死）
+import builtins as _bi2
+_real_import = _bi2.__import__
+
+
+def _no_winreg(name, *a, **k):
+    if name == "winreg":
+        raise ImportError("no winreg")
+    return _real_import(name, *a, **k)
+
+
+_bi2.__import__ = _no_winreg
+try:
+    check("拿不到 winreg 时 set 返回 False、get 返回空串",
+          sticky.autostart_set(True) is False and sticky.autostart_get() == "")
+finally:
+    _bi2.__import__ = _real_import
+
+print("\n-- 到点提醒：说清「有几条是之前就逾期的」--")
+
+_T0 = datetime.date.today()
+_rm_today = {"due": _T0.isoformat(), "done": False}
+_rm_old = {"due": (_T0 - datetime.timedelta(days=2)).isoformat(), "done": False}
+check("只有今天到期的，不提「逾期」",
+      sticky.reminder_head([_rm_today]) == "有 1 件事到点了",
+      "实际 %r" % sticky.reminder_head([_rm_today]))
+check("混着之前逾期的，标题里点出来",
+      "之前就逾期" in sticky.reminder_head([_rm_today, _rm_old])
+      and "1 条" in sticky.reminder_head([_rm_today, _rm_old]),
+      "实际 %r" % sticky.reminder_head([_rm_today, _rm_old]))
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
