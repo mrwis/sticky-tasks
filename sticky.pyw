@@ -183,8 +183,11 @@
                       SHOW_TIME + set_show_time()，菜单在 build_more_menu。
                       改完记得两处一起对：block_h() 和 _draw_card 都调 meta_line
   · 改"截止时间那个框"   → ask_due()（浅色提示走 _hint_entry/hint_value，
-                      日历走 month_grid + draw_cal，下拉走 build_due_date_menu /
-                      build_due_time_menu，两格 → 存盘值走 due_from_input）
+                      左边日历走 month_grid + draw_cal，右边钟面是 ClockDial
+                      类（点击位置 → 角度 → dial_hour/dial_unit），下拉走
+                      build_due_date_menu / build_due_time_menu，
+                      **随手打的数字**靠 norm_clock/norm_day 认（不用打冒号），
+                      离开框时的整理走框内 tidy_entry，两格 → 存盘值走 due_from_input）
   · 改"截止日期/时间怎么存怎么比" → 只有两个形状："YYYY-MM-DD" 和
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
@@ -445,6 +448,7 @@ import os
 import re
 import sys
 import json
+import math
 import shutil
 import calendar
 import datetime
@@ -932,10 +936,18 @@ HELP_SECTIONS = [
     ("p",  "两格都能直接打字，空着时框里会有一行浅灰的格式提示"
            "（2026-10-15 / 18:30:05），照着一模一样敲就行；点进哪一格，那一格的提示"
            "才让位。写错不关窗，底下会用红字告诉你该写成什么样。"),
+    ("n",  "· 时间不用非打冒号：152413 就是 15:24:13，1830 就是 18:30，"
+           "9 就是 09:00；冒号、点、连字符、全角数字都认。离开输入框时会自动整理成"
+           "标准写法，认不出的（25:99 这种）才报错"),
+    ("n",  "· 日期也能省横杠：20261026 就是 2026-10-26，1026 就是今年 10 月 26 日"),
     ("n",  "· 不想打字就点：日期框右边「▾」给常用日期（今天 / 明天 / 后天 / 本周末 / "
            "下周一 / 一个月后），时间框右边「▾」给常用时刻和上午、下午整点"),
     ("n",  "· 日期下面还有一张日历，点哪天就填哪天；「上月 / 下月」翻页，"
            "今天那格是浅色的、选中的那天是深色的"),
+    ("n",  "· 日期右边还有一只钟面，跟日历一模一样是「点着选」：上面三个小按钮切"
+           "「时 / 分 / 秒」，点盘上哪一格就是哪一点/分/秒 —— 一圈是 00 到 23，"
+           "不用先在脑子里换算上午下午；点完时间框里就是完整时刻，再切到「分」"
+           "点一下，小时还留着"),
     ("n",  "· 填好之后底下会实时写一行「→ 2026-10-15 18:30:00（周四）」，"
            "确认无误再按「确定」"),
     ("n",  "· 填了时间之后：过了那个点就变红显示「已过 2 小时」；"
@@ -1686,6 +1698,130 @@ def usage_text(t):
     return "用时 %d 天" % d if h == 0 else "用时 %d 天 %d 小时" % (d, h)
 
 
+def _half_digits(s):
+    """全角字母数字标点 → 半角。
+
+    中文输入法下敲「１８：３０」很常见，用户不该为这个挨一次格式不对的红字。
+    （只转 ！-～ 那一段，中文汉字不在里面，不受影响。）
+    """
+    out = []
+    for ch in str(s or ""):
+        o = ord(ch)
+        if 0xFF01 <= o <= 0xFF5E:
+            out.append(chr(o - 0xFF01 + 0x21))
+        else:
+            out.append(ch)
+    return "".join(out)
+
+
+def norm_clock(s):
+    """把用户随手打的时刻串规整成 "HH:MM:SS"；认不出返回 ""。
+
+    为什么要这一步：框里已经有浅色提示 18:30:05，可用户还是得每次敲两个冒号 ——
+    用户原话「有提示后，输入时间就没必要每次还打一个冒号」。所以这里**认纯数字**，
+    按位数猜（1 位当小时、3 位当 H+MM……）：
+        9      → 09:00:00        1524   → 15:24:00
+        930    → 09:30:00        152413 → 15:24:13
+    分隔符 `: - . 点 时 分 秒` 都当冒号（全角也认），少写分秒一律补 0。
+
+    **只做"变整齐"，不做"猜时间"**：25 点、99 分这种越界的一律返回 ""，
+    让对话框去报错，别偷偷取模变成别的时刻。
+    """
+    raw = _half_digits(s).strip()
+    if not raw:
+        return ""
+    for ch in (":", "-", ".", "点", "时", "分", "秒"):
+        raw = raw.replace(ch, ":")
+    segs = [x for x in raw.split(":") if x != ""]
+    if not segs or not all(x.isdigit() for x in segs):
+        return ""
+    if len(segs) == 1:
+        d = segs[0]
+        n = len(d)
+        if n <= 2:                        # 9 / 18        → 时
+            h, m, sec = d, "0", "0"
+        elif n == 3:                      # 930           → 9:30
+            h, m, sec = d[0], d[1:], "0"
+        elif n == 4:                      # 1524          → 15:24
+            h, m, sec = d[:2], d[2:], "0"
+        elif n == 5:                      # 15241         → 1:52:41
+            h, m, sec = d[0], d[1:3], d[3:]
+        elif n == 6:                      # 152413        → 15:24:13
+            h, m, sec = d[:2], d[2:4], d[4:]
+        else:
+            return ""
+    elif len(segs) <= 3:
+        while len(segs) < 3:
+            segs.append("0")
+        h, m, sec = segs
+        if len(h) > 2 or len(m) > 2 or len(sec) > 2:
+            return ""
+    else:
+        return ""
+    try:
+        H, M, S = int(h), int(m), int(sec)
+    except ValueError:
+        return ""
+    if not (0 <= H <= 23 and 0 <= M <= 59 and 0 <= S <= 59):
+        return ""
+    return "%02d:%02d:%02d" % (H, M, S)
+
+
+def norm_day(s):
+    """日期串 → "YYYY-MM-DD"；认不出返回 ""。
+
+    除了 2026-10-15 / 2026/10/15 / 2026年10月15日，也认纯数字：
+        20261015 → 2026-10-15        1015 → 今年 10-15
+    （4 位一律按今年算 —— 跨年那种猜测越猜越乱，需要明年就直接打 8 位。）
+    """
+    raw = _half_digits(s).strip()
+    if not raw:
+        return ""
+    raw = raw.replace("/", "-").replace(".", "-")
+    for ch in ("年", "月", "日"):
+        raw = raw.replace(ch, "-")
+    txt = raw.strip("-")
+    if not txt:
+        return ""
+    if txt.isdigit():
+        n = len(txt)
+        if n == 8:
+            txt = "%s-%s-%s" % (txt[:4], txt[4:6], txt[6:])
+        elif n == 4:
+            txt = "%d-%s-%s" % (today().year, txt[:2], txt[2:])
+    d = s2d(txt)
+    return d2s(d) if d else ""
+
+
+def dial_angle(x, y, cx, cy):
+    """鼠标位置相对盘心 → 从 12 点开始顺时针的角度（0~360）。
+
+    屏幕坐标 y 向下，atan2 给的是"从 3 点开始逆时针"，所以先 +90 再取模。
+    """
+    deg = math.degrees(math.atan2(y - cy, x - cx))
+    return (deg + 90.0) % 360.0
+
+
+def dial_slot(angle, n=12):
+    """角度 → 第几格（0 在最上面，顺时针数）。12 格 = 整点/5 分钟档，60 格 = 每分每秒。"""
+    return int(round((angle % 360.0) / (360.0 / n))) % n
+
+
+def dial_hour(angle):
+    """角度 → 小时（0~23）。**单圈 24 格**：顶部 00，顺时针一格格到 23。
+
+    试过手表那种"内圈 1~12 + 外圈 13~23"的双圈：196px 的盘上同一角度竖着两个数字，
+    字号再拉开也还是像写重了（截图肉眼验收时一眼就看出乱）。24 小时单圈每格 15°，
+    一格一个数字，**点哪个就读到哪个**，不用先想"这是内圈还是外圈"。
+    """
+    return dial_slot(angle, 24)
+
+
+def dial_unit(angle):
+    """角度 → 0~59（分 / 秒）。真钟表的秒针分针就是这么走的。"""
+    return dial_slot(angle, 60)
+
+
 def month_grid(year, month):
     """某个月的日历网格：[[date 或 None] × 7, …]，**周一开头**（跟 date.weekday 一致）。
 
@@ -1753,6 +1889,153 @@ def hint_set(e, text):
         e._hint_on = True
         e.configure(fg=C_INK3)
         e.insert(0, e._hint)
+
+
+class ClockDial(tk.Canvas):
+    """24 小时表盘 —— 「点着选时间」那一半（另一半仍然是打字）。
+
+    三种模式，由外面那排「时 / 分 / 秒」切：
+      · 时：**双圈**，内圈 1~12（大字深色）、外圈 00 与 13~23（小字浅灰）——
+            一圈看全 24 小时，既不用点 AM/PM，也不用在心里换算"现在算上午还是下午"
+      · 分 / 秒：60 格刻度 + 一圈 5 的倍数，点哪就是哪一分/秒
+
+    点一下 → on_change(h, m, s) 把**整个**时刻交回去。表盘自己记 h/m/s，
+    所以"先点小时、再切到分点一下"不必让外面来回拼。
+
+    为什么不做成"表盘只选小时、分钟另配按钮"：37 分要点 37 下，比打字还慢。
+
+    **内外圈的视觉层次必须拉开**（内圈 -15 号深色、外圈 -9 号浅灰、中间一道细环）：
+    两圈字号和颜色一样时，同一角度的两个数字看着就是"写重了"，试过，很乱。
+    """
+
+    SIZE = 196          # 画布边长
+    R_FACE = 92         # 盘面半径
+    R_NUM = 78          # 数字那一圈（两种模式共用）
+    R_HUB = 32          # 中心读数区：点这里不算选择
+
+    def __init__(self, parent, h=0, m=0, s=0, on_change=None):
+        tk.Canvas.__init__(self, parent, width=self.SIZE, height=self.SIZE,
+                           bg=C_WHITE, highlightthickness=0, cursor="hand2")
+        self._h, self._m, self._s = int(h) % 24, int(m) % 60, int(s) % 60
+        self.mode = "h"
+        self.on_change = on_change
+        self.bind("<Button-1>", self._click)
+        self.draw()
+
+    # -------------------------------------------------------------- 坐标
+
+    def center(self):
+        return self.SIZE / 2.0, self.SIZE / 2.0
+
+    def point_of(self, k, n, r):
+        """第 k 格（0 在正上方、顺时针，共 n 格）在半径 r 处的画布坐标。
+        自己点自己、自测算点击位置都走它，免得两处正负号写反。"""
+        c, _ = self.center()
+        a = math.radians(k * 360.0 / n)
+        return c + r * math.sin(a), c - r * math.cos(a)
+
+    # -------------------------------------------------------------- 状态
+
+    def get_time(self):
+        return self._h, self._m, self._s
+
+    def set_time(self, h, m, s=None):
+        """外面（输入框、下拉、快捷按钮）改了值 → 表盘跟着动。**不回调**，免得打转。"""
+        self._h = int(h) % 24
+        self._m = int(m) % 60
+        if s is not None:
+            self._s = int(s) % 60
+        self.draw()
+
+    def set_mode(self, mode):
+        if mode in ("h", "m", "s") and mode != self.mode:
+            self.mode = mode
+            self.draw()
+
+    # -------------------------------------------------------------- 绘制
+
+    def draw(self):
+        self.delete("all")
+        C, _ = self.center()
+        R = self.R_FACE
+        self.create_oval(C - R, C - R, C + R, C + R, fill="#fffdf9", outline=C_LINE)
+
+        # marks: (格号, 总格数, 半径, 文字, 字号, 是否选中)
+        marks = []
+        if self.mode == "h":
+            # 24 根刻度：0/6/12/18 这四个方向长一点，其余短一点，当骨架用
+            for i in range(24):
+                x1, y1 = self.point_of(i, 24, R - 3)
+                x2, y2 = self.point_of(i, 24, R - (10 if i % 6 == 0 else 6))
+                self.create_line(x1, y1, x2, y2,
+                                 fill=("#cfc6b6" if i % 6 == 0 else "#e7e0d3"),
+                                 width=(1 if i % 6 else 2))
+            for k in range(24):
+                marks.append((k, 24, self.R_NUM, "%02d" % k, -11,
+                              k == self._h))
+        else:
+            unit = self._m if self.mode == "m" else self._s
+            for i in range(60):                   # 60 格刻度：每 5 格一根长线
+                x1, y1 = self.point_of(i, 60, R - 3)
+                x2, y2 = self.point_of(i, 60, R - (10 if i % 5 == 0 else 6))
+                self.create_line(x1, y1, x2, y2,
+                                 fill=("#cfc6b6" if i % 5 == 0 else "#e7e0d3"),
+                                 width=(2 if i % 5 == 0 else 1))
+            for k in range(12):
+                marks.append((k, 12, self.R_NUM, "%02d" % (k * 5), -12, False))
+
+        for k, n, r, txt, size, sel in marks:
+            x, y = self.point_of(k, n, r)
+            if sel:
+                self.create_oval(x - 11, y - 11, x + 11, y + 11,
+                                 fill=C_INK, outline=C_INK)
+                self.create_text(x, y, text=txt, fill="#ffffff",
+                                 font=("Microsoft YaHei UI", size, "bold"))
+            else:
+                self.create_text(x, y, text=txt, fill=C_INK2,
+                                 font=("Microsoft YaHei UI", size))
+
+        # 指针只画分/秒两档：**时**那一档用"数字反白"表示点了哪个就够了，
+        # 再插一根针会穿过数字，反而更乱。
+        if self.mode != "h":
+            a = math.radians((self._m if self.mode == "m" else self._s) * 6)
+            r1, r2 = self.R_HUB + 6, self.R_NUM - 14
+            self.create_line(C + r1 * math.sin(a), C - r1 * math.cos(a),
+                             C + r2 * math.sin(a), C - r2 * math.cos(a),
+                             fill=C_INK, width=2, capstyle="round")
+
+        self.create_text(C, C - 7, text="%02d:%02d:%02d" % (self._h, self._m, self._s),
+                         font=("Microsoft YaHei UI", -14, "bold"), fill=C_INK)
+        self.create_text(C, C + 12, text={"h": "点时", "m": "点分", "s": "点秒"}[self.mode],
+                         font=F_TINY, fill=C_INK3)
+
+    # -------------------------------------------------------------- 点击
+
+    def _click(self, e):
+        C, _ = self.center()
+        dist = math.hypot(e.x - C, e.y - C)
+        if dist < self.R_HUB or dist > self.R_FACE:
+            return                      # 点中心读数 / 点盘外：不当作选择，别乱改值
+        ang = dial_angle(e.x, e.y, C, C)
+        if self.mode == "h":
+            self._h = dial_hour(ang)
+        elif self.mode == "m":
+            self._m = dial_unit(ang)
+        else:
+            self._s = dial_unit(ang)
+        self.draw()
+        if self.on_change:
+            self.on_change(self._h, self._m, self._s)
+
+    def pick_at(self, k, n=None):
+        """按"第几格"点一下（自测用：比算像素坐标稳，也不会点到读数区）。
+
+        时模式 k 就是小时（0~23），分/秒模式 k 是 0~59。
+        """
+        if n is None:
+            n = 24 if self.mode == "h" else 60
+        x, y = self.point_of(k, n, self.R_NUM)
+        self.event_generate("<Button-1>", x=int(round(x)), y=int(round(y)))
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -4473,21 +4756,26 @@ class App:
         · 只填时间 → 默认按今天算（不逼用户再补一遍日期）
         · error 非空 = 格式不对，value 为 ""（对话框拿它显示红字）
 
+        两格都先过一遍 norm_day() / norm_clock()：斜杠、年月日、全角、以及
+        **不打冒号的纯数字**（152413）都在那里变成标准形状，这里只管拼和判空。
+
+        注意"认不出"要跟"没填"分开：归一后是 ""、而原值非空 → 那就是写错了，
+        得回红字；不然用户打了 25:99 会被悄悄当成"整天截止"存进去。
+
         抽成独立方法是为了能直接测：对话框一开就 grab_set，测试里不好碰。
         """
-        day = str(day or "").strip().replace("/", "-").replace(".", "-")
-        day = day.replace("年", "-").replace("月", "-").replace("日", "")
-        clock = str(clock or "").strip().replace("：", ":").replace("。", ":")
-        clock = clock.replace("点", ":").replace("时", ":")
+        raw_day = str(day or "").strip()
+        raw_clock = str(clock or "").strip()
+        day, clock = norm_day(raw_day), norm_clock(raw_clock)
+        if raw_day and not day:
+            return "", "日期格式不对，应为 2026-10-15"
+        if raw_clock and not clock:
+            return "", "时间格式不对，应为 18:30 或 18:30:05（也可直接打 183005）"
         if not day and not clock:
             return "", ""
         if not day:
             day = d2s(today())
-        if not s2d(day):
-            return "", "日期格式不对，应为 2026-10-15"
         if clock:
-            if not parse_dt("%s %s" % (day, clock)):
-                return "", "时间格式不对，应为 18:30 或 18:30:05"
             return norm_due("%s %s" % (day, clock)), ""
         return norm_due(day), ""
 
@@ -4536,15 +4824,21 @@ class App:
 
         用户的原话：「时间应该既可以手动填写，也可以筛选的形式，用浅色在输入框
         提示默认格式，这样输入的时候就可以手写或者选择时间。」
+        第二版追加：「选日期下面有日历很方便，选时间也应该有类似的时钟；
+        有提示之后就没必要每次还打一个冒号。」
 
-        所以这个框里有四样东西，改的都是同一份状态（就是那两个输入框）：
+        所以这个框里的东西改的都是同一份状态（就是那两个输入框）：
           ① 两个输入框，空着时显示**浅色格式提示**（2026-10-15 / 18:30:05）
           ② 每个框右边一个「▾」：日期给常用日期，时间给常用时刻 + 整点
-          ③ 日期框下面一张**常驻小日历**，点哪天就填哪天（不用拉下拉再翻）
+          ③ 左边一张**常驻小日历**，右边一只**常驻钟面**，并排 —— 点哪天/哪一刻
+             就直接写进上面那个框，不用拉下拉再翻
           ④ 底下实时预览「→ 2026-10-15 18:30:00（周四）」，写错当场红字提示
 
-        小日历常驻而不是弹窗：弹窗要抢 grab，跟对话框自己的模态叠在一起容易出怪事
-        （本项目已经踩过"模态一开主窗冻住"的坑），常驻只是多占一点高度。
+        日历、钟面都常驻而不是弹窗：弹窗要抢 grab，跟对话框自己的模态叠在一起
+        容易出怪事（本项目已经踩过"模态一开主窗冻住"的坑），常驻只是多占一点位置。
+
+        打字这一侧由 norm_day() / norm_clock() 兜底：斜杠、年月日、全角、
+        **不打冒号的纯数字**（152413）都认，离开输入框时再顺手整理成标准形状。
         """
         cur = parse_dt(t.get("due", ""))
         cur_day = cur.strftime("%Y-%m-%d") if cur else ""
@@ -4586,14 +4880,20 @@ class App:
         if cur_clock:
             hint_set(tent, cur_clock)
 
-        tk.Label(dlg, text="时间留空 = 那一整天都算没到点；秒可以不写。",
+        tk.Label(dlg, text="时间留空 = 那一整天都算没到点；冒号和秒都能省（打 1830 就是 18:30）。",
                  font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18,
                                                         pady=(6, 0))
 
+        # ---- 上半：左边日历、右边钟面，并排（uniform 让两列一样宽，nsew 让两框一样高）----
+        pane = tk.Frame(dlg, bg=C_BG)
+        pane.pack(fill="x", padx=18, pady=(8, 0))
+        pane.grid_columnconfigure(0, weight=1, uniform="pane")
+        pane.grid_columnconfigure(1, weight=1, uniform="pane")
+
         # ---- 常驻小日历 ----
-        cal = tk.Frame(dlg, bg=C_WHITE, highlightthickness=1,
+        cal = tk.Frame(pane, bg=C_WHITE, highlightthickness=1,
                        highlightbackground=C_LINE)
-        cal.pack(fill="x", padx=18, pady=(8, 0))
+        cal.grid(row=0, column=0, sticky="nsew")
         chead = tk.Frame(cal, bg=C_WHITE)
         chead.pack(fill="x", padx=6, pady=(6, 0))
         base = cur.date() if cur else today()
@@ -4609,7 +4909,47 @@ class App:
                   activeforeground=C_INK, cursor="hand2", highlightthickness=0,
                   command=lambda: shift_month(+1)).pack(side="right")
         cgrid = tk.Frame(cal, bg=C_WHITE)
-        cgrid.pack(padx=6, pady=(2, 6))
+        cgrid.pack(padx=6, pady=(2, 6), expand=True)
+
+        # ---- 常驻钟面（跟日历并排）----
+        cbx = tk.Frame(pane, bg=C_WHITE, highlightthickness=1,
+                       highlightbackground=C_LINE)
+        cbx.grid(row=0, column=1, sticky="nsew", padx=(10, 0))
+        _now = datetime.datetime.now()
+        h0, m0, s0 = (cur.hour, cur.minute, cur.second) if cur_clock else \
+                     (_now.hour, _now.minute, _now.second)
+        dial = ClockDial(cbx, h0, m0, s0)   # on_change 等闭包都定义好再挂（见下）
+        tab_bar = tk.Frame(cbx, bg=C_WHITE)
+        tab_bar.pack(pady=(6, 0))
+        tab_btns = {}
+        tip = tk.Label(cbx, text="", font=F_TINY, bg=C_WHITE, fg=C_INK3)
+
+        def paint_tabs():
+            """三个 tab 的样子、以及下面那行说明 —— 都只在这一个出口改。"""
+            for k, b in tab_btns.items():
+                on = (k == dial.mode)
+                b.configure(bg=(C_INK if on else C_WHITE),
+                            fg=("#ffffff" if on else C_INK3))
+            tip.configure(text={
+                "h": "一圈 00-23，点哪就是几点",
+                "m": "点盘上哪一格就是哪一分",
+                "s": "点盘上哪一格就是哪一秒",
+            }[dial.mode])
+
+        def switch_mode(k):
+            dial.set_mode(k)
+            paint_tabs()
+
+        for _k, _label in (("h", "时"), ("m", "分"), ("s", "秒")):
+            _b = tk.Button(tab_bar, text=_label, font=F_SMALL, bd=0, relief="flat",
+                           width=3, pady=1, cursor="hand2", highlightthickness=0,
+                           activebackground="#e8e0d2", activeforeground=C_INK,
+                           command=lambda k=_k: switch_mode(k))
+            _b.pack(side="left", padx=2)
+            tab_btns[_k] = _b
+        paint_tabs()
+        dial.pack(pady=(4, 2))
+        tip.pack(pady=(0, 6))       # 顺序 tab → 钟面 → 说明，所以它最后 pack
 
         def shift_month(delta):
             nm = add_months(datetime.date(st["y"], st["m"], 1), delta)
@@ -4624,7 +4964,7 @@ class App:
             for i, wd in enumerate("一二三四五六日"):
                 tk.Label(cgrid, text=wd, font=F_TINY, bg=C_WHITE, fg=C_INK3,
                          width=3).grid(row=0, column=i, pady=(0, 2))
-            sel_txt = hint_value(dent)
+            sel_txt = norm_day(hint_value(dent))   # 手打 20261026 也要能高亮
             sel = s2d(sel_txt) if sel_txt else None
             T = today()
             for ri, week in enumerate(month_grid(st["y"], st["m"]), start=1):
@@ -4637,18 +4977,39 @@ class App:
                     bg = C_INK if is_sel else ("#f2ece0" if d == T else C_WHITE)
                     fg = "#ffffff" if is_sel else (C_INK if d >= T else C_INK3)
                     lb = tk.Label(cgrid, text=str(d.day), font=F_SMALL, bg=bg, fg=fg,
-                                  width=3, pady=2, cursor="hand2")
+                                  width=3, pady=4, cursor="hand2")
                     lb.grid(row=ri, column=ci, padx=1, pady=1)
                     lb.bind("<Button-1>", lambda e, dd=d: pick_day(dd))
-            st["drawn"] = sel_txt
+            # 记的是**框里的原文**（不是归一值）：refresh 拿原文比，
+            # 否则手打 "20261026" 会每敲一个键都被判成"变了"而重画。
+            st["drawn"] = hint_value(dent)
 
         pv = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg=C_INK2)
         pv.pack(anchor="w", padx=18, pady=(8, 0))
         err_lb = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
         err_lb.pack(anchor="w", padx=18)
 
+        def tidy_entry(e, kind):
+            """离开输入框时把随手打的数字整理成标准形状（152413 → 15:24:13）。
+
+            **只整理认得出的**：认不出就原样留着，让底下那行红字继续说"该写成什么样"。
+            （所以这里不能用 due_from_input —— 它会报错，而这一步只该悄悄美化。）
+            """
+            v = hint_value(e)
+            if not v:
+                return
+            good = norm_clock(v) if kind == "t" else norm_day(v)
+            if good and good != v:
+                hint_set(e, good)
+
         def refresh(*_a):
-            """两格内容 → 「会存成什么」的实时预览 + 格式检查。"""
+            """两格内容 → 「会存成什么」的实时预览 + 格式检查 + 表盘跟随。"""
+            # 时间框里不管有没有冒号，只要 norm_clock 认得，表盘就跟着转
+            clk = norm_clock(hint_value(tent))
+            if clk:
+                t3 = tuple(int(x) for x in clk.split(":"))
+                if t3 != dial.get_time():
+                    dial.set_time(*t3)
             val, err = self.due_from_input(hint_value(dent), hint_value(tent))
             if err:
                 err_lb.configure(text=err)
@@ -4681,6 +5042,17 @@ class App:
             hint_set(tent, v)
             refresh()
 
+        def on_dial(h, m, s):
+            """钟面被点了一下 —— 把整个时刻写回时间框（时和分秒一起）。
+
+            写回的是**完整** HH:MM:SS：点完小时切到"分"再点，前一次选的时还在，
+            用户不用回头补。
+            """
+            hint_set(tent, "%02d:%02d:%02d" % (h, m, s))
+            refresh()
+
+        dial.on_change = on_dial
+
         def quick(days):
             hint_set(dent, d2s(today() + datetime.timedelta(days=days)))
             refresh()
@@ -4699,6 +5071,8 @@ class App:
             draw_cal()
 
         def apply():
+            tidy_entry(dent, "d")
+            tidy_entry(tent, "t")           # 先把"152413"整理成"15:24:13"再判
             val, err = self.due_from_input(hint_value(dent), hint_value(tent))
             if err:
                 err_lb.configure(text=err)      # 不关窗，让人就地改
@@ -4709,6 +5083,9 @@ class App:
         for e in (dent, tent):
             e.bind("<KeyRelease>", refresh)
             e.bind("<Return>", lambda _e: apply())
+        # 离开框就把打出来的数字理整齐（add="+" 保留 _hint_entry 自己那个"空了回提示"）
+        dent.bind("<FocusOut>", lambda _e: tidy_entry(dent, "d"), add="+")
+        tent.bind("<FocusOut>", lambda _e: tidy_entry(tent, "t"), add="+")
 
         # 两个「▾」的菜单也要 refresh/draw_cal，所以等这几个闭包都定义好再挂
         ddn.configure(command=lambda: self._popup(self.build_due_date_menu(fill_d),
@@ -4736,6 +5113,8 @@ class App:
         dlg._due_refresh = refresh
         dlg._due_apply = apply
         dlg._due_entries = (dent, tent)
+        dlg._due_dial = dial
+        dlg._due_tabs = (tab_btns, switch_mode)
         draw_cal()
         refresh()
         # **焦点给对话框本身，不给日期框**：给输入框的话 FocusIn 会立刻把浅色

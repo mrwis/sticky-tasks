@@ -3077,6 +3077,120 @@ print("\n-- 截止时间既能手写，也能点着选 --")
 # 用户的原话：「时间应该既可以手动填写，也可以筛选的形式，用浅色在输入框
 # 提示默认格式，这样输入的时候就可以手写或者选择时间。」
 
+# ---- 全角 → 半角 ----
+check("全角数字/标点转半角", sticky._half_digits("１２３：４５") == "123:45",
+      "实际 %r" % sticky._half_digits("１２３：４５"))
+check("汉字不受影响", sticky._half_digits("明天18点") == "明天18点",
+      "实际 %r" % sticky._half_digits("明天18点"))
+
+# ---- 时间：打纯数字也认（用户要的就是这个）----
+check("★ 152413 → 15:24:13（省掉两个冒号）",
+      sticky.norm_clock("152413") == "15:24:13",
+      "实际 %r" % sticky.norm_clock("152413"))
+check("4 位按 HHMM", sticky.norm_clock("1524") == "15:24:00",
+      "实际 %r" % sticky.norm_clock("1524"))
+check("3 位按 H+MM", sticky.norm_clock("930") == "09:30:00",
+      "实际 %r" % sticky.norm_clock("930"))
+check("1~2 位按小时", sticky.norm_clock("9") == "09:00:00"
+      and sticky.norm_clock("18") == "18:00:00",
+      "实际 %r / %r" % (sticky.norm_clock("9"), sticky.norm_clock("18")))
+check("5 位按 H+MM+SS", sticky.norm_clock("15241") == "01:52:41",
+      "实际 %r" % sticky.norm_clock("15241"))
+check("少写分/秒补零，单位数补两位",
+      sticky.norm_clock("18:30") == "18:30:00"
+      and sticky.norm_clock("18:30:5") == "18:30:05"
+      and sticky.norm_clock("9:5:5") == "09:05:05",
+      "实际 %r / %r" % (sticky.norm_clock("18:30:5"), sticky.norm_clock("9:5:5")))
+check("全角数字和全角冒号也认", sticky.norm_clock("１８：３０") == "18:30:00",
+      "实际 %r" % sticky.norm_clock("１８：３０"))
+check("「9点30」这种口语也认", sticky.norm_clock("9点30") == "09:30:00",
+      "实际 %r" % sticky.norm_clock("9点30"))
+check("破了范围/位数太长/混字母 → 认不出（不许悄悄取模成别的时刻）",
+      sticky.norm_clock("25:99") == "" and sticky.norm_clock("1234567") == ""
+      and sticky.norm_clock("abc") == "" and sticky.norm_clock("12:34:56:78") == "",
+      "实际 %r / %r" % (sticky.norm_clock("25:99"), sticky.norm_clock("1234567")))
+
+# ---- 日期也认纯数字 ----
+check("★ 20261026 → 2026-10-26",
+      sticky.norm_day("20261026") == "2026-10-26",
+      "实际 %r" % sticky.norm_day("20261026"))
+check("4 位按「今年 + 月日」",
+      sticky.norm_day("1026") == "%d-10-26" % datetime.date.today().year,
+      "实际 %r" % sticky.norm_day("1026"))
+check("斜杠 / 年月日照样认", sticky.norm_day("2026/10/26") == "2026-10-26"
+      and sticky.norm_day("2026年10月26日") == "2026-10-26",
+      "实际 %r" % sticky.norm_day("2026年10月26日"))
+check("日期认不出返回空，不瞎猜",
+      sticky.norm_day("乱写") == "" and sticky.norm_day("2026") == "",
+      "实际 %r / %r" % (sticky.norm_day("乱写"), sticky.norm_day("2026")))
+
+# ---- 表盘：角度 ↔ 小时/分秒 ----
+_dcx = _dcy = sticky.ClockDial.SIZE / 2.0
+check("表盘正上方 = 0°、正右 = 90°、正下 = 180°",
+      abs(sticky.dial_angle(_dcx, _dcy - 20, _dcx, _dcy)) < 0.01
+      and abs(sticky.dial_angle(_dcx + 20, _dcy, _dcx, _dcy) - 90) < 0.01
+      and abs(sticky.dial_angle(_dcx, _dcy + 20, _dcx, _dcy) - 180) < 0.01,
+      "实际 %r / %r" % (sticky.dial_angle(_dcx, _dcy - 20, _dcx, _dcy),
+                        sticky.dial_angle(_dcx + 20, _dcy, _dcx, _dcy)))
+check("★ 24 小时单圈：顶部 = 00 点，顺时针一格一小时",
+      sticky.dial_hour(0) == 0 and sticky.dial_hour(15) == 1
+      and sticky.dial_hour(345) == 23,
+      "实际 %r / %r / %r" % (sticky.dial_hour(0), sticky.dial_hour(15),
+                             sticky.dial_hour(345)))
+check("一圈读得对：3 点方向 = 06、6 点方向 = 12、9 点方向 = 18",
+      sticky.dial_hour(90) == 6 and sticky.dial_hour(180) == 12
+      and sticky.dial_hour(270) == 18,
+      "实际 %r / %r / %r" % (sticky.dial_hour(90), sticky.dial_hour(180),
+                             sticky.dial_hour(270)))
+check("分/秒按 60 格走：6° = 1、354° = 59",
+      sticky.dial_unit(0) == 0 and sticky.dial_unit(6) == 1
+      and sticky.dial_unit(354) == 59,
+      "实际 %r / %r" % (sticky.dial_unit(6), sticky.dial_unit(354)))
+
+# ---- 表盘控件：真的点一下 ----
+_cf = tk.Frame(root, bg=sticky.C_WHITE)
+_cf.pack()
+_dial = sticky.ClockDial(_cf, 8, 15, 30)
+_dial.pack()          # 不 pack 就不 mapped，event_generate 派发不到（踩过一次）
+_cf.update()
+_got = []
+_dial.on_change = lambda h, m, s: _got.append((h, m, s))
+check("表盘默认按传入的时刻开", _dial.get_time() == (8, 15, 30),
+      "实际 %r" % (_dial.get_time(),))
+_dial.pick_at(3)
+_cf.update()
+check("点 3 点方向 → 3 点，并且回调带着完整时刻",
+      _dial.get_time()[0] == 3 and _got[-1] == (3, 15, 30),
+      "实际 %r / %r" % (_dial.get_time(), _got[-1:]))
+_dial.pick_at(0)
+_cf.update()
+check("点顶部 → 00 点", _dial.get_time()[0] == 0,
+      "实际 %r" % (_dial.get_time(),))
+_dial.pick_at(22)
+_cf.update()
+check("★ 点 22 那一格 → 22 点（一圈 24 小时，不用想上午下午）",
+      _dial.get_time()[0] == 22, "实际 %r" % (_dial.get_time(),))
+_dial.set_mode("m")
+_dial.pick_at(37)
+_cf.update()
+check("切到「分」点第 37 格 → 37 分", _dial.get_time() == (22, 37, 30),
+      "实际 %r" % (_dial.get_time(),))
+_dial.set_mode("s")
+_dial.pick_at(5)
+_cf.update()
+check("切到「秒」点第 5 格 → 5 秒", _dial.get_time() == (22, 37, 5),
+      "实际 %r" % (_dial.get_time(),))
+_before = _dial.get_time()
+_dial.event_generate("<Button-1>", x=int(_dcx), y=int(_dcy))
+_cf.update()
+check("点中心读数区不算选择（那里只是显示）", _dial.get_time() == _before,
+      "实际 %r" % (_dial.get_time(),))
+_dial.set_time(23, 59, 59)
+_cf.update()
+check("外面改值 → 表盘跟着走", _dial.get_time() == (23, 59, 59),
+      "实际 %r" % (_dial.get_time(),))
+_cf.destroy()
+
 # ---- 日历网格 ----
 _g = sticky.month_grid(2026, 10)
 check("日历每行 7 天", all(len(w) == 7 for w in _g), "实际 %s" % [len(w) for w in _g])
@@ -3180,6 +3294,53 @@ check("点「确定」后写进了任务（秒也补齐）",
       _dt_task["due"] == "2026-11-03 08:15:00", "实际 %r" % _dt_task["due"])
 check("点「确定」后对话框关掉了", not _dlg.winfo_exists())
 app.tasks.remove(_dt_task)
+app.save()
+app.redraw()
+root.update()
+
+# ---- 对话框里的钟面：点一下，时间框就写好 ----
+_dt2 = mk("钟面点出来的截止时间")
+app.ask_due(_dt2)
+root.update()
+_dlg2 = [w for w in root.winfo_children()
+         if isinstance(w, tk.Toplevel) and w.winfo_exists()][-1]
+_r1, _r2 = _dlg2._due_entries
+_d2 = _dlg2._due_dial
+_tabs2, _switch2 = _dlg2._due_tabs
+check("对话框里有一只表盘，默认停在「时」", _d2.mode == "h",
+      "实际 %r" % _d2.mode)
+_switch2("m")
+check("切到「分」：三个 tab 有选中态、别的回到白底",
+      _d2.mode == "m" and _tabs2["m"].cget("bg") == sticky.C_INK
+      and _tabs2["h"].cget("bg") == sticky.C_WHITE,
+      "实际 %r / %r" % (_tabs2["m"].cget("bg"), _tabs2["h"].cget("bg")))
+_switch2("h")
+_d2.pick_at(22)                      # 22 点那一格
+_switch2("m")
+_d2.pick_at(37)                      # 第 37 格 = 37 分
+root.update()
+_txt = sticky.hint_value(_r2)
+check("★ 先点小时、再点分 → 时间框直接写上 22:37:xx",
+      _txt.startswith("22:37:") and len(_txt) == 8, "实际 %r" % _txt)
+
+# ---- 离开输入框，随手打的数字自动变整齐 ----
+sticky.hint_set(_r2, "152413")
+_r2.event_generate("<FocusOut>")
+root.update()
+check("★ 打 152413 离开框就自动变成 15:24:13（不用敲冒号）",
+      sticky.hint_value(_r2) == "15:24:13", "实际 %r" % sticky.hint_value(_r2))
+sticky.hint_set(_r1, "20261231")
+_r1.event_generate("<FocusOut>")
+root.update()
+check("日期打 20261231 也自动变成 2026-12-31",
+      sticky.hint_value(_r1) == "2026-12-31", "实际 %r" % sticky.hint_value(_r1))
+_dlg2._due_refresh()
+root.update()
+_dlg2._due_apply()
+root.update()
+check("点「确定」存下的是整理后的完整时刻",
+      _dt2["due"] == "2026-12-31 15:24:13", "实际 %r" % _dt2["due"])
+app.tasks.remove(_dt2)
 app.save()
 app.redraw()
 root.update()
