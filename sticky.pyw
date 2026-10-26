@@ -192,6 +192,12 @@
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
+  · 改"两台电脑共用一个文件" → _write_data 里保存前比对 _disk_stamp
+                      （有没有被别人碰过）、_follow_disk()（对方更新就整份换）、
+                      _park_disk_copy()（对方那份留底）。比较"谁新"用数据里的
+                      updated_at，**别用 mtime**（网盘同步会把它改乱）。
+                      ★ 写完必须把 _base_updated 更新成刚写的值，否则下次心跳
+                      会把自己写的当成"对方改的"
   · 改"哪些操作能撤销" → 撤销点只在**用户动作**那一层埋（_edit_undo() 包一下：
                       拍快照 → 执行 → _flash_undo）。别加进 set_title/set_note
                       内部 —— 它们还有"程序自己恢复旧值"的调用点，那种不该占位
@@ -1141,6 +1147,22 @@ HELP_SECTIONS = [
            "先把原文件原样另存成 tasks.broken-日期-时间.json，再用示例数据启动，"
            "并且弹窗告诉你留底在哪 —— 不会一声不响就把你的数据盖掉"),
     ("p",  "换电脑只要把这个文件夹连同 tasks.json 一起拷过去就行。"),
+
+    ("h2", "两台电脑共用一个数据文件（放网盘里）"),
+    ("p",  "把整个程序目录放进同步盘（OneDrive / 坚果云之类），笔记本和台式机各用"
+           "自己那份 exe —— 表面上两个程序，数据其实是同一个 tasks.json。"
+           "程序不会让两边的改动互相覆盖："),
+    ("n",  "· 每次保存前先看一眼磁盘：如果这个文件在我上次读写之后被别人改过，"
+           "先把对方那份原样另存成 tasks.remote-日期-时间.json，再写我这一份"),
+    ("n",  "· 谁后改谁赢：按数据里自己记的 updated_at 比，不看文件时间 ——"
+           "网盘同步会把文件时间改得乱七八糟，靠它会判断反"),
+    ("n",  "· 我这边还没动、对方已经存了更新的版本 → 板面自己换成对方的，"
+           "并在状态栏说一声。正在拖卡片 / 正在打字的时候不切换，"
+           "免得把手里正动的东西抽走"),
+    ("n",  "· 不做自动合并：同一条任务两边改了不同字段，谁对谁错判断不了。"
+           "冲突那份就在旁边，要合自己看一眼 —— 至少数据一条没丢"),
+    ("n",  "· 老数据没有 updated_at 就退回用文件时间，只能算个大概；"
+           "升级之后新存的都有这个字段"),
 ]
 
 
@@ -2430,8 +2452,13 @@ class App:
         self.load_warning = ""
         # True = 这次运行绝不覆盖 tasks.json（原文件还没能改名留底的时候）
         self.save_blocked = False
+        # 跨机冲突用：这份数据的 updated_at（判断"谁新"），以及上次读/写完之后
+        # 磁盘文件长什么样（判断"有没有被别人碰过"）—— 见 _follow_disk。
+        self._base_updated = 0.0
+        self._disk_stamp = self._disk_stamp_now()
         if not os.path.exists(DATA_FILE):
             self.tasks = self._seed()
+            self._base_updated = now_ts()
             return
         try:
             with open(DATA_FILE, "r", encoding="utf-8") as f:
@@ -2465,6 +2492,12 @@ class App:
                 "原文件没有改动 —— 修好再重开就行。")
         if not isinstance(self.ui, dict):
             self.ui = {}
+        # 谁新看 updated_at；老数据没有这个字段就退回文件 mtime（它至少能反映
+        # "上次写的时间"，只是网盘同步会把它改得不太准 —— 所以只当兜底）
+        if isinstance(raw, dict):
+            self._base_updated = _norm_num(raw.get("updated_at"))
+        if self._base_updated <= 0:
+            self._base_updated = (self._disk_stamp or (0.0, 0))[0]
 
         self.mode = self.ui.get("mode", "matrix")
         self.filter = self.ui.get("filter", "all")
@@ -2564,10 +2597,20 @@ class App:
         return DATA_FILE
 
     def _write_data(self):
-        """把当前状态写进 tasks.json。先写 .tmp 再 os.replace，避免写坏原文件。"""
+        """把当前状态写进 tasks.json。先写 .tmp 再 os.replace，避免写坏原文件。
+
+        写之前先看一眼磁盘：**如果这个文件在我上次读/写之后被别人改过**
+        （另一台机器、或者网盘把对方的版本同步下来了），先把磁盘那份另存
+        留底，再写我这一份 —— 谁后写谁赢，但输的那份不能凭空消失。
+        """
         path = self._write_path()
+        parked = ""
+        if path == DATA_FILE and self._disk_stamp_now() not in (None, self._disk_stamp):
+            parked = self._park_disk_copy()
+        upd = now_ts()          # 这一版的时间戳，写完要记进 _base_updated
         data = {
             "v": 3,
+            "updated_at": upd,
             "ui": {
                 "mode": self.mode, "filter": self.filter,
                 "quick_p": self.quick_p, "topmost": bool(self.topmost),
@@ -2589,6 +2632,10 @@ class App:
             with open(tmp, "w", encoding="utf-8") as f:
                 json.dump(data, f, ensure_ascii=False, indent=2)
             os.replace(tmp, path)
+            self._disk_stamp = self._disk_stamp_now()
+            # 刚存下去的就是"我的时间基准"——不更新的话下一次心跳会把自己
+            # 刚写的版本当成"对方更新的"，白重载一遍还弹一句提示
+            self._base_updated = upd
         except Exception as e:
             # 存盘失败**不能静默**。源码版跑在仓库里，写不进去基本不可能发生；
             # 但打包成 exe 之后，用户很容易把它丢进 C:\Program Files 这类受保护
@@ -2609,10 +2656,87 @@ class App:
                         % (path, e))
                 except Exception:
                     pass
+        return parked
 
     def save(self):
-        self._write_data()
+        parked = self._write_data()
         self._maybe_daily_backup()
+        if parked:
+            self.status.configure(
+                text="另一台机器也改过：对方那份已另存为 %s"
+                     % os.path.basename(parked))
+
+    # ------------------------------------------------------------ 跨机冲突
+    #
+    # 场景：把整个程序目录放进网盘（OneDrive / 坚果云），笔记本和台式机各用各的
+    # 那份 exe，数据其实是同一个 tasks.json。两个人同时开着改，后写的那次会把
+    # 先写的整个盖掉。
+    #
+    # 能自动合并吗？**不能**（也没有工具能）—— 同一条任务在两边改了不同字段，
+    # 谁对谁错无法判断，"把两边并起来"只会造出没人编辑过的新状态。
+    # 所以按用户定的规则来：**以最后修改的为准，另一份原样留底**。
+    #   ① 我正要保存，说明我的这次修改是最新的 → 我赢，磁盘那份存成
+    #      tasks.remote-<时间>.json
+    #   ② 磁盘那份比我新（对方刚存完，我这边还没动）→ 直接换成它，
+    #      板面刷新成对方的样子
+    #
+    # 判断"谁新"不看文件 mtime（网盘同步会把 mtime 改得乱七八糟），
+    # 看数据里自己记的 updated_at；老数据没有这个字段才退回 mtime。
+
+    def _disk_stamp_now(self):
+        """磁盘上数据文件的 (mtime, size)；文件不在 → None。
+
+        只用来判断"有没有被别人碰过"，不用来判断谁新（那个看 updated_at）。
+        """
+        try:
+            st = os.stat(DATA_FILE)
+            return (st.st_mtime, st.st_size)
+        except OSError:
+            return None
+
+    def _read_disk_updated(self):
+        """磁盘那份的 updated_at；读不出来 / 老数据返回 0。"""
+        try:
+            with open(DATA_FILE, "r", encoding="utf-8") as f:
+                raw = json.load(f)
+        except Exception:
+            return 0.0
+        if isinstance(raw, dict):
+            return _norm_num(raw.get("updated_at"))
+        return 0.0
+
+    def _park_disk_copy(self):
+        """把磁盘上那一份原样另存留底，返回路径（失败返回 ""）。
+
+        用 copy 不用 move：留底之后我马上要覆盖它，move 走就白留了。
+        """
+        # 带上毫秒：同一秒里连着两次冲突也不至于互相覆盖
+        stamp = datetime.datetime.now().strftime("%Y%m%d-%H%M%S-%f")[:-3]
+        dst = os.path.join(os.path.dirname(DATA_FILE),
+                           "tasks.remote-%s.json" % stamp)
+        try:
+            shutil.copy2(DATA_FILE, dst)
+        except Exception:
+            return ""
+        return dst
+
+    def _follow_disk(self):
+        """磁盘那份比我新 → 换成它。返回 True 表示真的换了。
+
+        只在没有拖拽 / 没有就地编辑时调（心跳里已经这么挡了一道），
+        否则会把用户正在动的东西从手里抽走。
+        """
+        if self._read_disk_updated() <= self._base_updated:
+            self._disk_stamp = self._disk_stamp_now()   # 只是被 touch 了，内容没变
+            return False
+        mode, flt, qp = self.mode, self.filter, self.quick_p
+        self.load()
+        # 视图（在哪个象限看、筛了什么）是"我这边"的习惯，别被对方的数据冲掉
+        self.mode, self.filter, self.quick_p = mode, flt, qp
+        self.refresh_quick()
+        self.redraw()
+        self.status.configure(text="另一台机器改过任务，已经换成那边的版本")
+        return True
 
     # ============================================================ 每日自动备份
 
@@ -5093,6 +5217,11 @@ class App:
                 self._day_seen = T
                 if not self.drag and not self.editor:
                     self.redraw()
+            # 顺带看一眼数据文件有没有被另一台机器改过（只在空闲时切换，
+            # 免得把正在拖 / 正在打字的东西抽走）
+            if (not self.drag and not self.editor
+                    and self._disk_stamp_now() not in (None, self._disk_stamp)):
+                self._follow_disk()
             w = self._stats_win
             if live and w is not None and w.winfo_exists():
                 self._render_stats()
