@@ -192,6 +192,7 @@
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
+  · 改"搜索怎么算命中" → search_hit()（**唯一**出口，visible() 和描边都用它）
   · 改"导出 / 按月统计" → export_rows()（CSV 的行，纯函数）+ export_csv()
                       （写文件，**编码必须 utf-8-sig**，否则 Excel 中文乱码）+
                       month_stats()（按月口径，面板和自测共用）
@@ -1082,6 +1083,15 @@ HELP_SECTIONS = [
     ("n",  "· 以前建的老任务没有创建时间，会拿它的排序时间粗略顶上；"
            "实在判断不出来的就不显示这一行"),
 
+    ("h2", "搜索：多个词一起搜，还能排除"),
+    ("p",  "顶栏那个搜索框搜的是标题、备注和子任务文字（不分大小写）。"
+           "空格分开几个词 = 每个都要有，不用按顺序、不用连在一起。"),
+    ("n",  "· 搜「复盘 日志」→ 只出同时带这两个词的任务（不是找「复盘 日志」这串字）"),
+    ("n",  "· 前面加减号可以排除：「复盘 -服务器」= 要复盘、但别带服务器的"),
+    ("n",  "· 命中的卡片边框会加深一道，扫一眼就知道哪几张里有；清空搜索框就恢复"),
+    ("n",  "· 搜索时不受「已完成次日收起」限制 —— 找东西就该找得到，"
+           "哪怕它已经收起来了"),
+
     ("h2", "把完成记录拿出去看（导出 CSV / 按月回顾）"),
     ("p",  "板面上只留「今天完成的」，可一年下来几百条记录不会自己变成"
            "「这个月我干了什么」。两条路，一条往外拿、一条就地看："),
@@ -1516,6 +1526,28 @@ def sub_meta_text(s):
     if s.get("done"):
         return fmt_ts(done_ts(s))
     return fmt_ts(created_ts(s))
+
+
+def search_hit(t, q):
+    """这条任务是不是命中搜索词。**空格分开多个词 = 都要出现（AND）**，
+    前面带 `-` 表示排除（`复盘 -服务器` = 有复盘但别带服务器）。
+
+    为什么拆词：任务多了以后，原来那种"整串子串匹配"根本不够用 ——
+    搜「复盘 服务器」明明脑子里是两个条件，程序却当成一个不存在的长字符串。
+    搜的是标题 + 备注 + 所有子任务文字（跟原来一样），全局小写比较。
+    """
+    q = " ".join(str(q or "").lower().split())
+    if not q:
+        return True
+    hay = " ".join([str(t.get("title", "")), str(t.get("note", "")),
+                    " ".join(str(s.get("text", "")) for s in subs_of(t))]).lower()
+    for w in q.split(" "):
+        if w.startswith("-"):
+            if len(w) > 1 and w[1:] in hay:
+                return False
+        elif w not in hay:
+            return False
+    return True
 
 
 def visible_subs(t):
@@ -3394,10 +3426,8 @@ class App:
     # ============================================================ 过滤
 
     def visible(self, t):
-        if self.q:
-            hay = " ".join([t["title"], t["note"]] + [s["text"] for s in subs_of(t)])
-            if self.q.lower() not in hay.lower():
-                return False
+        if self.q and not search_hit(t, self.q):
+            return False
         T = today()
         due = s2d(t["due"]) if t["due"] else None
         f = self.filter
@@ -3726,8 +3756,13 @@ class App:
         self.regions.append(("card", t["id"], x, y, x2, y2))
 
         # 阴影 + 主体
+        # 搜索时命中卡片的框加深一道：文字里逐字高亮要拆开重画标题（宽度测量、
+        # 折行、裁剪全得跟着改，风险大收益小），描个深框一样能一眼扫到"哪几张有"。
+        hit = bool(self.q) and search_hit(t, self.q)
         cv.create_rectangle(x + 2, y + 3, x2 + 2, y2 + 3, fill=C_SHADOW, outline="", tags=(tag,))
-        cv.create_rectangle(x, y, x2, y2, fill=bg, outline="#e7e1d6", width=1, tags=(tag,))
+        cv.create_rectangle(x, y, x2, y2, fill=bg,
+                            outline=("#a89573" if hit else "#e7e1d6"),
+                            width=(2 if hit else 1), tags=(tag,))
         # 顶部色带
         cv.create_rectangle(x + 1, y + 1, x2 - 1, y + 5,
                             fill=(C_LINE if t["done"] else pr["band"]), outline="", tags=(tag,))

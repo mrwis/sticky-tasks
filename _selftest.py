@@ -3630,6 +3630,77 @@ check("再点「下月」回来", _mr._mr_ym() == _ym_now, "实际 %r" % _mr._mr
 _mr.destroy()
 root.update()
 
+print("\n-- 搜索：多词 AND + 排除词 + 命中描边 --")
+
+
+def _st(title, note="", subs=None):
+    return {"id": "s" + str(abs(hash(title)) % 10000), "title": title,
+            "note": note, "subs": subs or [], "p": 0, "due": "", "done": False,
+            "order": 1.0, "created_at": 0, "logs": {}, "timer": 0}
+
+
+_s1 = _st("复盘今天的涨停")
+_s2 = _st("复盘服务器日志")
+_s3 = _st("买牛奶", "顺便看看复盘")
+_s4 = _st("整理截图", "", [{"id": "z1", "text": "复盘模板也整理一下"}])
+
+check("单个词命中标题", sticky.search_hit(_s1, "涨停"))
+check("单个词也命中备注", sticky.search_hit(_s3, "复盘"))
+check("单个词也命中子任务文字", sticky.search_hit(_s4, "模板"))
+check("★ 多个词要都在（AND），不是整串匹配",
+      sticky.search_hit(_s2, "复盘 日志")
+      and not sticky.search_hit(_s1, "复盘 日志"),
+      "整串匹配的话 _s1 会被当成「复盘 日志」不存在而漏掉")
+check("★ 减号排除：要复盘、但不要服务器",
+      sticky.search_hit(_s1, "复盘 -服务器")
+      and not sticky.search_hit(_s2, "复盘 -服务器"),
+      "_s2 含服务器，应该被排除")
+check("大小写不敏感",
+      sticky.search_hit(_st("Review the PPT"), "review")
+      and sticky.search_hit(_st("Review the PPT"), "PPT"))
+check("空查询 = 全命中（清空搜索框要能看到全部）",
+      sticky.search_hit(_s3, "") and sticky.search_hit(_s3, "   "))
+check("单个减号不当排除词（排除词至少两个字）",
+      sticky.search_hit(_st("a-b"), "-"))
+
+app.q = "复盘 日志"
+check("visible() 走的是同一套判据（不会两处写法不一致）",
+      app.visible(_s2) and not app.visible(_s1))
+app.q = ""
+
+# ---- 命中描边（文字逐字高亮要拆标题渲染，风险大；加深边框一样能扫到）----
+_keep_ts = app.tasks
+app.tasks = [_s1]
+try:
+    app.q = "复盘"
+    app.redraw()
+    root.update()
+    _rects = [i for i in app.cv.find_withtag("card" + _s1["id"])
+              if app.cv.type(i) == "rectangle"]
+    check("★ 搜索命中时卡片描边加深（一眼看出哪几张有）",
+          len(_rects) >= 2
+          and app.cv.itemcget(_rects[1], "outline") == "#a89573"
+          and float(app.cv.itemcget(_rects[1], "width")) == 2.0,
+          "实际 %r / %r" % (app.cv.itemcget(_rects[1], "outline")
+                            if _rects else None,
+                            app.cv.itemcget(_rects[1], "width") if _rects else None))
+    app.q = ""
+    app.redraw()
+    root.update()
+    _rects2 = [i for i in app.cv.find_withtag("card" + _s1["id"])
+               if app.cv.type(i) == "rectangle"]
+    check("不搜索时还是原来的浅边 + 1px",
+          len(_rects2) >= 2
+          and app.cv.itemcget(_rects2[1], "outline") == "#e7e1d6"
+          and float(app.cv.itemcget(_rects2[1], "width")) == 1.0,
+          "实际 %r" % (app.cv.itemcget(_rects2[1], "outline")
+                       if len(_rects2) >= 2 else None,))
+finally:
+    app.q = ""
+    app.tasks = _keep_ts
+    app.redraw()
+    root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
