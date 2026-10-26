@@ -182,6 +182,9 @@
   · 改"卡片上那行时间显示什么" → meta_line()（**唯一**出口）；开关是模块级
                       SHOW_TIME + set_show_time()，菜单在 build_more_menu。
                       改完记得两处一起对：block_h() 和 _draw_card 都调 meta_line
+  · 改"截止时间那个框"   → ask_due()（浅色提示走 _hint_entry/hint_value，
+                      日历走 month_grid + draw_cal，下拉走 build_due_date_menu /
+                      build_due_time_menu，两格 → 存盘值走 due_from_input）
   · 改"截止日期/时间怎么存怎么比" → 只有两个形状："YYYY-MM-DD" 和
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
@@ -926,6 +929,15 @@ HELP_SECTIONS = [
     ("h2", "截止日期可以精确到时分秒"),
     ("p",  "点卡片底部那颗「＋ 日期」，左边填日期、右边填时间 —— 时间留空就表示"
            "「那一整天都算没到点」，跟以前一样。"),
+    ("p",  "两格都能直接打字，空着时框里会有一行浅灰的格式提示"
+           "（2026-10-15 / 18:30:05），照着一模一样敲就行；点进哪一格，那一格的提示"
+           "才让位。写错不关窗，底下会用红字告诉你该写成什么样。"),
+    ("n",  "· 不想打字就点：日期框右边「▾」给常用日期（今天 / 明天 / 后天 / 本周末 / "
+           "下周一 / 一个月后），时间框右边「▾」给常用时刻和上午、下午整点"),
+    ("n",  "· 日期下面还有一张日历，点哪天就填哪天；「上月 / 下月」翻页，"
+           "今天那格是浅色的、选中的那天是深色的"),
+    ("n",  "· 填好之后底下会实时写一行「→ 2026-10-15 18:30:00（周四）」，"
+           "确认无误再按「确定」"),
     ("n",  "· 填了时间之后：过了那个点就变红显示「已过 2 小时」；"
            "没到点显示「今天 18:30」「明天 09:00」"),
     ("n",  "· 到点提醒也跟着精确：填了时间的任务，到那个时刻才弹，"
@@ -1672,6 +1684,75 @@ def usage_text(t):
     d, r = divmod(sec, 86400)
     h = r // 3600
     return "用时 %d 天" % d if h == 0 else "用时 %d 天 %d 小时" % (d, h)
+
+
+def month_grid(year, month):
+    """某个月的日历网格：[[date 或 None] × 7, …]，**周一开头**（跟 date.weekday 一致）。
+
+    行数按实际需要给（4~6 行），不满的那一行右边补 None —— 固定 6 行会让
+    2 月那种小月份底下多出一条空白，日历看着像坏了。
+    """
+    first = datetime.date(int(year), int(month), 1)
+    ndays = calendar.monthrange(int(year), int(month))[1]
+    weeks, week = [], [None] * first.weekday()
+    for i in range(ndays):
+        week.append(first + datetime.timedelta(days=i))
+        if len(week) == 7:
+            weeks.append(week)
+            week = []
+    if week:
+        weeks.append(week + [None] * (7 - len(week)))
+    return weeks
+
+
+def _hint_entry(parent, hint, width=12, font=None):
+    """空着的时候显示**浅色格式提示**的输入框。
+
+    聚焦 → 提示自动清掉、字变深；失焦还空着 → 提示放回去。
+    **提示不是值**：取值一律走 hint_value()，否则"没填时间"会被读成
+    "18:30:05"，一个本来整天截止的任务就变成了到点提醒。
+    """
+    e = tk.Entry(parent, font=font or F_BODY, width=width, bg=C_WHITE, fg=C_INK3,
+                 relief="flat", highlightthickness=1, highlightbackground=C_LINE,
+                 highlightcolor="#c0ae8e", insertbackground=C_INK)
+    e._hint = str(hint)
+    e._hint_on = True
+    e.insert(0, e._hint)
+
+    def on_in(_e=None):
+        if e._hint_on:
+            e.delete(0, "end")
+            e._hint_on = False
+            e.configure(fg=C_INK)
+
+    def on_out(_e=None):
+        if not e.get().strip():
+            hint_set(e, "")
+
+    e.bind("<FocusIn>", on_in)
+    e.bind("<FocusOut>", on_out)
+    return e
+
+
+def hint_value(e):
+    """输入框里**真正的值** —— 正显示着浅色提示时算空。"""
+    if getattr(e, "_hint_on", False):
+        return ""
+    return e.get().strip()
+
+
+def hint_set(e, text):
+    """写值：有值就正常显示；空值 → 回到浅色提示。"""
+    text = str(text or "").strip()
+    e.delete(0, "end")
+    if text:
+        e._hint_on = False
+        e.configure(fg=C_INK)
+        e.insert(0, text)
+    else:
+        e._hint_on = True
+        e.configure(fg=C_INK3)
+        e.insert(0, e._hint)
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -4385,13 +4466,91 @@ class App:
         finally:
             m.grab_release()
 
-    def ask_due(self, t):
-        """设置截止日期 —— **可以精确到时分秒**。
+    def due_from_input(self, day, clock):
+        """把「日期 + 时间」两格的内容解析成存盘值。返回 (value, error)。
 
-        两格分开填：左边日期（必填）、右边时间（留空 = 整天截止）。
-        分两格而不是让用户背一个"2026-10-15 18:30:05"的完整格式：
-        绝大多数时候他只改日期，时间那格空着就行。
+        · 两格都空 → ("", "")：清除截止时间
+        · 只填时间 → 默认按今天算（不逼用户再补一遍日期）
+        · error 非空 = 格式不对，value 为 ""（对话框拿它显示红字）
+
+        抽成独立方法是为了能直接测：对话框一开就 grab_set，测试里不好碰。
         """
+        day = str(day or "").strip().replace("/", "-").replace(".", "-")
+        day = day.replace("年", "-").replace("月", "-").replace("日", "")
+        clock = str(clock or "").strip().replace("：", ":").replace("。", ":")
+        clock = clock.replace("点", ":").replace("时", ":")
+        if not day and not clock:
+            return "", ""
+        if not day:
+            day = d2s(today())
+        if not s2d(day):
+            return "", "日期格式不对，应为 2026-10-15"
+        if clock:
+            if not parse_dt("%s %s" % (day, clock)):
+                return "", "时间格式不对，应为 18:30 或 18:30:05"
+            return norm_due("%s %s" % (day, clock)), ""
+        return norm_due(day), ""
+
+    def build_due_date_menu(self, fill):
+        """日期框右边「▾」的菜单内容（拆出来才能被测，同 build_filter_menu 的惯例）。"""
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        T = today()
+        items = [("今天", 0), ("明天", 1), ("后天", 2),
+                 ("本周末", (5 - T.weekday()) % 7 or 7),
+                 ("下周一", (7 - T.weekday()) % 7 or 7)]
+        for label, days in items:
+            target = d2s(T + datetime.timedelta(days=days))
+            m.add_command(label="%s　%s" % (label, target[5:]),
+                          command=lambda v=target: fill(v))
+        m.add_command(label="一个月后　%s" % d2s(add_months(T, 1))[5:],
+                      command=lambda v=d2s(add_months(T, 1)): fill(v))
+        m.add_separator()
+        m.add_command(label="清空日期", command=lambda: fill(""))
+        return m
+
+    def build_due_time_menu(self, fill):
+        """时间框右边「▾」的菜单内容：常用时刻 + 上下午整点。
+
+        到"分"就够用了；要精确到秒就手写（22:15:30 这种没人想在下拉里翻）。
+        """
+        m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        for v in ("09:00", "12:00", "14:00", "18:00", "20:00", "22:00"):
+            m.add_command(label=v, command=lambda x=v: fill(x))
+        m.add_separator()
+        am = tk.Menu(m, tearoff=0, font=F_SMALL)
+        pm = tk.Menu(m, tearoff=0, font=F_SMALL)
+        for h in range(12):
+            am.add_command(label="%02d:00" % h, command=lambda x="%02d:00" % h: fill(x))
+        for h in range(12, 24):
+            pm.add_command(label="%02d:00" % h, command=lambda x="%02d:00" % h: fill(x))
+        m.add_cascade(label="上午整点", menu=am)
+        m.add_cascade(label="下午 / 晚上整点", menu=pm)
+        m.add_separator()
+        m.add_command(label="现在（到秒）",
+                      command=lambda: fill(datetime.datetime.now().strftime("%H:%M:%S")))
+        m.add_command(label="清空时间（改成整天）", command=lambda: fill(""))
+        return m
+
+    def ask_due(self, t):
+        """设置截止日期 / 时间：**直接打字、或者点着选**，两条路都留着。
+
+        用户的原话：「时间应该既可以手动填写，也可以筛选的形式，用浅色在输入框
+        提示默认格式，这样输入的时候就可以手写或者选择时间。」
+
+        所以这个框里有四样东西，改的都是同一份状态（就是那两个输入框）：
+          ① 两个输入框，空着时显示**浅色格式提示**（2026-10-15 / 18:30:05）
+          ② 每个框右边一个「▾」：日期给常用日期，时间给常用时刻 + 整点
+          ③ 日期框下面一张**常驻小日历**，点哪天就填哪天（不用拉下拉再翻）
+          ④ 底下实时预览「→ 2026-10-15 18:30:00（周四）」，写错当场红字提示
+
+        小日历常驻而不是弹窗：弹窗要抢 grab，跟对话框自己的模态叠在一起容易出怪事
+        （本项目已经踩过"模态一开主窗冻住"的坑），常驻只是多占一点高度。
+        """
+        cur = parse_dt(t.get("due", ""))
+        cur_day = cur.strftime("%Y-%m-%d") if cur else ""
+        cur_clock = cur.strftime("%H:%M:%S") \
+            if (cur and due_has_time(t.get("due"))) else ""
+
         dlg = tk.Toplevel(self.root)
         dlg.title("设置截止时间")
         dlg.configure(bg=C_BG)
@@ -4399,64 +4558,163 @@ class App:
         self._follow_top(dlg)
         dlg.grab_set()
 
-        tk.Label(dlg, text="日期  2026-10-15        时间  18:30:05",
-                 font=F_SMALL, bg=C_BG, fg=C_INK2)\
-            .pack(anchor="w", padx=18, pady=(16, 2))
-        tk.Label(dlg, text="时间可以留空（= 那一整天都算没到点）。秒也可以不写。",
-                 font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18, pady=(0, 6))
+        fields = tk.Frame(dlg, bg=C_BG)
+        fields.pack(fill="x", padx=18, pady=(16, 0))
 
-        row = tk.Frame(dlg, bg=C_BG)
-        row.pack(fill="x", padx=18)
-        dent = tk.Entry(row, font=F_BODY, width=14, bg=C_WHITE, relief="flat",
-                        highlightthickness=1, highlightbackground=C_LINE,
-                        highlightcolor="#c0ae8e", insertbackground=C_INK)
-        dent.pack(side="left", ipady=5)
-        tk.Label(row, text="  ", font=F_SMALL, bg=C_BG).pack(side="left")
-        tent = tk.Entry(row, font=F_BODY, width=10, bg=C_WHITE, relief="flat",
-                        highlightthickness=1, highlightbackground=C_LINE,
-                        highlightcolor="#c0ae8e", insertbackground=C_INK)
-        tent.pack(side="left", ipady=5)
+        tk.Label(fields, text="日期", font=F_SMALL, bg=C_BG, fg=C_INK2)\
+            .grid(row=0, column=0, padx=(0, 6))
+        dent = _hint_entry(fields, "2026-10-15", width=12)
+        dent.grid(row=0, column=1, ipady=5)
+        ddn = tk.Button(fields, text="▾", font=F_SMALL, bd=0, relief="flat", padx=6,
+                        bg=C_WHITE, fg=C_INK3, activebackground="#f0e9dc",
+                        activeforeground=C_INK, cursor="hand2", highlightthickness=1,
+                        highlightbackground=C_LINE)
+        ddn.grid(row=0, column=2, padx=(3, 16), ipady=1)
 
-        cur = parse_dt(t.get("due", ""))
-        if cur:
-            dent.insert(0, cur.strftime("%Y-%m-%d"))
-            if due_has_time(t.get("due")):
-                tent.insert(0, cur.strftime("%H:%M:%S"))
-        dent.focus_set()
-        dent.select_range(0, "end")
+        tk.Label(fields, text="时间", font=F_SMALL, bg=C_BG, fg=C_INK2)\
+            .grid(row=0, column=3, padx=(0, 6))
+        tent = _hint_entry(fields, "18:30:05", width=9)
+        tent.grid(row=0, column=4, ipady=5)
+        tdn = tk.Button(fields, text="▾", font=F_SMALL, bd=0, relief="flat", padx=6,
+                        bg=C_WHITE, fg=C_INK3, activebackground="#f0e9dc",
+                        activeforeground=C_INK, cursor="hand2", highlightthickness=1,
+                        highlightbackground=C_LINE)
+        tdn.grid(row=0, column=5, padx=(3, 0), ipady=1)
 
-        err = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
-        err.pack(anchor="w", padx=18)
+        if cur_day:
+            hint_set(dent, cur_day)
+        if cur_clock:
+            hint_set(tent, cur_clock)
 
-        def apply(day=None, clock=None):
-            day = (dent.get() if day is None else day).strip()
-            clock = (tent.get() if clock is None else clock).strip()
-            clock = clock.replace("：", ":").replace("。", ":")
-            if not day and not clock:
-                self.set_due(t, "")
-                dlg.destroy()
+        tk.Label(dlg, text="时间留空 = 那一整天都算没到点；秒可以不写。",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18,
+                                                        pady=(6, 0))
+
+        # ---- 常驻小日历 ----
+        cal = tk.Frame(dlg, bg=C_WHITE, highlightthickness=1,
+                       highlightbackground=C_LINE)
+        cal.pack(fill="x", padx=18, pady=(8, 0))
+        chead = tk.Frame(cal, bg=C_WHITE)
+        chead.pack(fill="x", padx=6, pady=(6, 0))
+        base = cur.date() if cur else today()
+        st = {"y": base.year, "m": base.month}
+        tk.Button(chead, text="上月", font=F_SMALL, bd=0, relief="flat", padx=5,
+                  bg=C_WHITE, fg=C_INK3, activebackground="#f0e9dc",
+                  activeforeground=C_INK, cursor="hand2", highlightthickness=0,
+                  command=lambda: shift_month(-1)).pack(side="left")
+        ctitle = tk.Label(chead, text="", font=F_SMALL, bg=C_WHITE, fg=C_INK)
+        ctitle.pack(side="left", expand=True)
+        tk.Button(chead, text="下月", font=F_SMALL, bd=0, relief="flat", padx=5,
+                  bg=C_WHITE, fg=C_INK3, activebackground="#f0e9dc",
+                  activeforeground=C_INK, cursor="hand2", highlightthickness=0,
+                  command=lambda: shift_month(+1)).pack(side="right")
+        cgrid = tk.Frame(cal, bg=C_WHITE)
+        cgrid.pack(padx=6, pady=(2, 6))
+
+        def shift_month(delta):
+            nm = add_months(datetime.date(st["y"], st["m"], 1), delta)
+            st["y"], st["m"] = nm.year, nm.month
+            draw_cal()
+
+        def draw_cal():
+            """重画这一页日历（换月、选中变化都走它 —— 只有这一处建格子）。"""
+            for w in cgrid.winfo_children():
+                w.destroy()
+            ctitle.configure(text="%d 年 %d 月" % (st["y"], st["m"]))
+            for i, wd in enumerate("一二三四五六日"):
+                tk.Label(cgrid, text=wd, font=F_TINY, bg=C_WHITE, fg=C_INK3,
+                         width=3).grid(row=0, column=i, pady=(0, 2))
+            sel_txt = hint_value(dent)
+            sel = s2d(sel_txt) if sel_txt else None
+            T = today()
+            for ri, week in enumerate(month_grid(st["y"], st["m"]), start=1):
+                for ci, d in enumerate(week):
+                    if d is None:
+                        tk.Label(cgrid, text="", width=3, bg=C_WHITE)\
+                            .grid(row=ri, column=ci, padx=1, pady=1)
+                        continue
+                    is_sel = (sel == d)
+                    bg = C_INK if is_sel else ("#f2ece0" if d == T else C_WHITE)
+                    fg = "#ffffff" if is_sel else (C_INK if d >= T else C_INK3)
+                    lb = tk.Label(cgrid, text=str(d.day), font=F_SMALL, bg=bg, fg=fg,
+                                  width=3, pady=2, cursor="hand2")
+                    lb.grid(row=ri, column=ci, padx=1, pady=1)
+                    lb.bind("<Button-1>", lambda e, dd=d: pick_day(dd))
+            st["drawn"] = sel_txt
+
+        pv = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg=C_INK2)
+        pv.pack(anchor="w", padx=18, pady=(8, 0))
+        err_lb = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
+        err_lb.pack(anchor="w", padx=18)
+
+        def refresh(*_a):
+            """两格内容 → 「会存成什么」的实时预览 + 格式检查。"""
+            val, err = self.due_from_input(hint_value(dent), hint_value(tent))
+            if err:
+                err_lb.configure(text=err)
+                pv.configure(text="")
                 return
-            if not day:
-                # 只填了时间 → 默认今天。不逼着用户再去补一遍日期。
-                day = d2s(today())
-                dent.delete(0, "end")
-                dent.insert(0, day)
-            if not s2d(day):
-                err.configure(text="日期格式不对，应为 2026-10-15")
-                dent.focus_set()
+            err_lb.configure(text="")
+            if not val:
+                pv.configure(text="不设截止时间（卡片底部只剩「＋ 日期」）")
                 return
-            val = day
-            if clock:
-                if not parse_dt("%s %s" % (day, clock)):
-                    err.configure(text="时间格式不对，应为 18:30 或 18:30:05")
-                    tent.focus_set()
-                    return
-                val = "%s %s" % (day, clock)
+            dt = parse_dt(val)
+            wd = "周" + "一二三四五六日"[dt.weekday()]
+            tail = "" if due_has_time(val) else " 全天"
+            pv.configure(text="→ %s%s（%s）" % (due_label(val), tail, wd))
+            # 手写日期也要让日历跟着高亮 —— 但只在"选中那天真的变了"时重画，
+            # 不然每敲一个键都重建四十个格子会闪。
+            if hint_value(dent) != st.get("drawn"):
+                draw_cal()
+
+        def pick_day(d):
+            hint_set(dent, d2s(d))
+            refresh()
+            draw_cal()
+
+        def fill_d(v):
+            hint_set(dent, v)
+            refresh()
+            draw_cal()
+
+        def fill_t(v):
+            hint_set(tent, v)
+            refresh()
+
+        def quick(days):
+            hint_set(dent, d2s(today() + datetime.timedelta(days=days)))
+            refresh()
+            draw_cal()
+
+        def quick_now():
+            hint_set(dent, d2s(today()))
+            hint_set(tent, datetime.datetime.now().strftime("%H:%M:%S"))
+            refresh()
+            draw_cal()
+
+        def clear_both():
+            hint_set(dent, "")
+            hint_set(tent, "")
+            refresh()
+            draw_cal()
+
+        def apply():
+            val, err = self.due_from_input(hint_value(dent), hint_value(tent))
+            if err:
+                err_lb.configure(text=err)      # 不关窗，让人就地改
+                return
             self.set_due(t, val)
             dlg.destroy()
 
-        def quick(days):
-            apply(d2s(today() + datetime.timedelta(days=days)))
+        for e in (dent, tent):
+            e.bind("<KeyRelease>", refresh)
+            e.bind("<Return>", lambda _e: apply())
+
+        # 两个「▾」的菜单也要 refresh/draw_cal，所以等这几个闭包都定义好再挂
+        ddn.configure(command=lambda: self._popup(self.build_due_date_menu(fill_d),
+                                                  ddn))
+        tdn.configure(command=lambda: self._popup(self.build_due_time_menu(fill_t),
+                                                  tdn))
 
         bar = tk.Frame(dlg, bg=C_BG)
         bar.pack(fill="x", padx=18, pady=(8, 4))
@@ -4464,22 +4722,29 @@ class App:
         self._btn(bar, "明天", lambda: quick(1)).pack(side="left", padx=(0, 6))
         self._btn(bar, "本周末", lambda: quick((5 - today().weekday()) % 7 or 7))\
             .pack(side="left", padx=(0, 6))
-        self._btn(bar, "现在", lambda: apply(d2s(today()),
-                                          datetime.datetime.now().strftime("%H:%M:%S")))\
-            .pack(side="left", padx=(0, 6))
-        self._btn(bar, "清除", lambda: apply("", "")).pack(side="left")
+        self._btn(bar, "现在", quick_now).pack(side="left", padx=(0, 6))
+        self._btn(bar, "清除", clear_both).pack(side="left")
 
         bar2 = tk.Frame(dlg, bg=C_BG)
         bar2.pack(fill="x", padx=18, pady=(4, 16))
-        self._btn(bar2, "确定", lambda: apply(), primary=True).pack(side="right")
+        self._btn(bar2, "确定", apply, primary=True).pack(side="right")
         self._btn(bar2, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
-        for ent in (dent, tent):
-            ent.bind("<Return>", lambda e: apply())
 
         dlg.bind("<Escape>", lambda e: dlg.destroy())
+        dlg.bind("<Return>", lambda e: apply())
+        # 供自测/截图直接触发（真实用户走的是 KeyRelease → refresh）
+        dlg._due_refresh = refresh
+        dlg._due_apply = apply
+        dlg._due_entries = (dent, tent)
+        draw_cal()
+        refresh()
+        # **焦点给对话框本身，不给日期框**：给输入框的话 FocusIn 会立刻把浅色
+        # 格式提示清掉，"该写成什么样"的例子就再也看不到了（这正是用户提的问题）。
+        # 点进哪一格，那一格的提示才让位。
+        dlg.focus_set()
         dlg.update_idletasks()
         px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
-        py = self.root.winfo_y() + 160
+        py = self.root.winfo_y() + 90
         dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
 
     def set_title(self, t, txt):

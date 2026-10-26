@@ -3072,6 +3072,118 @@ check("时间精度用例的测试任务已清理",
       all(app.task_by_id(x["id"]) is None
           for x in (_un, _fin, _ndt, _r_fut, _r_past, _dc)))
 
+print("\n-- 截止时间既能手写，也能点着选 --")
+
+# 用户的原话：「时间应该既可以手动填写，也可以筛选的形式，用浅色在输入框
+# 提示默认格式，这样输入的时候就可以手写或者选择时间。」
+
+# ---- 日历网格 ----
+_g = sticky.month_grid(2026, 10)
+check("日历每行 7 天", all(len(w) == 7 for w in _g), "实际 %s" % [len(w) for w in _g])
+check("2026 年 10 月正好 31 天，一个月只有一份", 
+      len([d for w in _g for d in w if d]) == 31,
+      "实际 %d" % len([d for w in _g for d in w if d]))
+check("10 月 1 日是周四 → 那行前面补 3 个空位（周一开头）",
+      _g[0][:4] == [None, None, None, datetime.date(2026, 10, 1)],
+      "实际 %r" % (_g[0][:4],))
+check("小月份不多画一行空行（2026 年 2 月 28 天）",
+      len(sticky.month_grid(2026, 2)) <= 5,
+      "实际 %d 行" % len(sticky.month_grid(2026, 2)))
+
+# ---- 提示输入框：提示不算值 ----
+_frm = tk.Frame(root)
+_he = sticky._hint_entry(_frm, "2026-10-15", width=10)
+check("空着时显示浅色格式提示",
+      _he.get() == "2026-10-15" and _he.cget("fg") == sticky.C_INK3,
+      "实际 %r / %r" % (_he.get(), _he.cget("fg")))
+check("★ 提示不算值（否则没填时间会被读成 18:30:05）",
+      sticky.hint_value(_he) == "", "实际 %r" % sticky.hint_value(_he))
+sticky.hint_set(_he, "2026-11-03")
+check("写进值后变深色、能读出来",
+      sticky.hint_value(_he) == "2026-11-03" and _he.cget("fg") == sticky.C_INK,
+      "实际 %r / %r" % (sticky.hint_value(_he), _he.cget("fg")))
+sticky.hint_set(_he, "")
+check("清空后又回到浅色提示",
+      _he.get() == "2026-10-15" and sticky.hint_value(_he) == ""
+      and _he.cget("fg") == sticky.C_INK3)
+_frm.destroy()
+
+# ---- 两格 → 存盘值的解析 ----
+check("只填日期 = 整天", app.due_from_input("2026-10-15", "") == ("2026-10-15", ""))
+check("日期 + 时间 → 补全到秒",
+      app.due_from_input("2026-10-15", "18:30") == ("2026-10-15 18:30:00", ""),
+      "实际 %r" % (app.due_from_input("2026-10-15", "18:30"),))
+check("只填时间 → 默认按今天算",
+      app.due_from_input("", "18:30:05")[0]
+      == "%s 18:30:05" % datetime.date.today().isoformat(),
+      "实际 %r" % (app.due_from_input("", "18:30:05"),))
+check("两格都空 = 清除", app.due_from_input("", "") == ("", ""))
+check("斜杠 / 年月日 也认（别逼用户记死格式）",
+      app.due_from_input("2026/10/15", "")[0] == "2026-10-15"
+      and app.due_from_input("2026年10月15日", "9点30")[0] == "2026-10-15 09:30:00",
+      "实际 %r" % (app.due_from_input("2026年10月15日", "9点30"),))
+check("全角冒号也认", app.due_from_input("2026-10-15", "18：30")[0]
+      == "2026-10-15 18:30:00")
+_v, _err = app.due_from_input("乱写", "")
+check("日期写错 → 给出提示、不返回值", _v == "" and "日期格式" in _err, "实际 %r" % _err)
+_v2, _err2 = app.due_from_input("2026-10-15", "25:99")
+check("时间写错 → 给出提示、不返回值", _v2 == "" and "时间格式" in _err2, "实际 %r" % _err2)
+
+# ---- 下拉菜单内容 ----
+_picked = []
+_dm = app.build_due_date_menu(lambda v: _picked.append(v))
+_dlabels = [_dm.entrycget(i, "label") for i in range(_dm.index("end") + 1)
+            if _dm.type(i) != "separator"]
+check("日期下拉里有常用日期",
+      all(any(l.startswith(k) for l in _dlabels)
+          for k in ("今天", "明天", "后天", "本周末", "下周一", "一个月后")),
+      "实际 %s" % _dlabels)
+check("日期下拉里能清空", any("清空日期" in l for l in _dlabels), "实际 %s" % _dlabels)
+_i = [i for i in range(_dm.index("end") + 1)
+      if _dm.type(i) != "separator" and _dm.entrycget(i, "label").startswith("今天")][0]
+_dm.invoke(_i)
+check("点「今天」真的把日期交回去", _picked == [datetime.date.today().isoformat()],
+      "实际 %r" % _picked)
+_dm.destroy()
+
+_picked2 = []
+_tm = app.build_due_time_menu(lambda v: _picked2.append(v))
+_tlabels = [_tm.entrycget(i, "label") for i in range(_tm.index("end") + 1)
+            if _tm.type(i) != "separator"]
+check("时间下拉里有常用时刻和整点分组",
+      "18:00" in _tlabels and "上午整点" in _tlabels
+      and "下午 / 晚上整点" in _tlabels, "实际 %s" % _tlabels)
+_i2 = [i for i in range(_tm.index("end") + 1)
+       if _tm.type(i) != "separator" and _tm.entrycget(i, "label") == "20:00"][0]
+_tm.invoke(_i2)
+check("点「20:00」把时间交回去", _picked2 == ["20:00"], "实际 %r" % _picked2)
+_tm.destroy()
+
+# ---- 对话框端到端：开窗 → 填 → 确定 ----
+_dt_task = mk("对话框里的截止时间")
+app.ask_due(_dt_task)
+root.update()
+_dlg = [w for w in root.winfo_children()
+        if isinstance(w, tk.Toplevel) and w.winfo_exists()][-1]
+_e1, _e2 = _dlg._due_entries
+check("对话框打开时两格都是浅色格式提示",
+      _e1.get() == "2026-10-15" and _e2.get() == "18:30:05"
+      and sticky.hint_value(_e1) == "" and sticky.hint_value(_e2) == "",
+      "实际 %r / %r" % (_e1.get(), _e2.get()))
+sticky.hint_set(_e1, "2026-11-03")
+sticky.hint_set(_e2, "08:15")
+_dlg._due_refresh()
+root.update()
+_dlg._due_apply()
+root.update()
+check("点「确定」后写进了任务（秒也补齐）",
+      _dt_task["due"] == "2026-11-03 08:15:00", "实际 %r" % _dt_task["due"])
+check("点「确定」后对话框关掉了", not _dlg.winfo_exists())
+app.tasks.remove(_dt_task)
+app.save()
+app.redraw()
+root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
