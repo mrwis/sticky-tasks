@@ -192,6 +192,9 @@
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
+  · 改"提醒弹什么 / 什么时候弹" → due_reminders()（挑哪些）+ reminder_head()
+                      （顶上那句话）。**程序没开就不会响**，所以配套有
+                      autostart_get/set/command（只写 HKCU 的 Run 项）
   · 改"数据文件读不出来怎么办" → load() 里的 except 分支：坏文件用
                       _quarantine_broken() **改名留底**后再用示例数据启动，
                       弹窗在 _warn_load_problem()。连改名都失败时置
@@ -491,6 +494,67 @@ APP_VERSION = "1.0.0"
 # exe 是单文件，用户会把**它自己**（而不是整个文件夹）拷来拷去，
 # 所以「数据存在哪」这件事得说清楚 —— 见 _write_data() 的失败提示。
 FROZEN = bool(getattr(sys, "frozen", False))
+
+# ---------------------------------------------------------------- 开机自启
+# 只写 HKCU 的 Run 项（当前用户、不需要管理员、不动系统级设置）。
+# 为什么要这个：提醒挂在心跳上，程序不开就什么都不会发生 —— 而便利贴
+# 偏偏是"想起来才打开"的工具，最容易漏的就是没人提醒的那一刻。
+RUN_KEY = r"Software\Microsoft\Windows\CurrentVersion\Run"
+RUN_NAME = "逍遥便利贴"
+
+
+def autostart_command():
+    """开机时要执行的那条命令行。
+
+    · 打包版：就是 exe 自己
+    · 源码版：用**同目录的 pythonw.exe**，不能用 python.exe ——
+      后者每次开机弹一个黑窗口，很丑；找不到 pythonw 才退回 python。
+    两段都带引号：路径里有空格（C:\\Program Files、中文目录）也不会被拆开。
+    """
+    if FROZEN:
+        return '"%s"' % sys.executable
+    exe = sys.executable
+    pyw = os.path.join(os.path.dirname(exe), "pythonw.exe")
+    if os.path.exists(pyw):
+        exe = pyw
+    return '"%s" "%s"' % (exe, os.path.abspath(__file__))
+
+
+def autostart_get():
+    """当前登记的开机自启命令；没登记 / 读不出来都返回 ""。
+
+    读不出来不算错 —— 第一次运行时这个键根本不存在，那是正常状态。
+    """
+    try:
+        import winreg
+        with winreg.OpenKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            v, _t = winreg.QueryValueEx(k, RUN_NAME)
+            return str(v or "")
+    except Exception:
+        return ""
+
+
+def autostart_set(on):
+    """开 / 关开机自启。成功返回 True；写不进去返回 False（调用方去提示）。
+
+    关的时候键不存在也算成功 —— 幂等，用户连点两下不该报错。
+    """
+    try:
+        import winreg
+    except Exception:
+        return False
+    try:
+        with winreg.CreateKey(winreg.HKEY_CURRENT_USER, RUN_KEY) as k:
+            if on:
+                winreg.SetValueEx(k, RUN_NAME, 0, winreg.REG_SZ, autostart_command())
+            else:
+                try:
+                    winreg.DeleteValue(k, RUN_NAME)
+                except FileNotFoundError:
+                    pass
+        return True
+    except Exception:
+        return False
 
 # 象限数量是**可变**的（1 ~ MAX_QUADS）：它的本质是分类方式，4 个只是出厂那套。
 # 颜色由"配色板下标 c"决定，跟着**格子**走、不跟位置走 —— 删掉中间一格时
@@ -1014,6 +1078,16 @@ HELP_SECTIONS = [
     ("n",  "· 以前建的老任务没有创建时间，会拿它的排序时间粗略顶上；"
            "实在判断不出来的就不显示这一行"),
 
+    ("h2", "提醒：程序开着才会响，所以可以设开机自启"),
+    ("p",  "到点提醒挂在程序内部的心跳上 —— 程序没开，就什么都不会发生。"
+           "而便利贴偏偏是「想起来才打开」的工具，最容易漏的恰恰是没人提醒的那一刻。"),
+    ("n",  "· 顶栏「更多 ▾ → 开机自动启动」打开，之后开机会自己跑起来"
+           "（只写当前用户，不需要管理员；不想用了再点一下就取消）"),
+    ("n",  "· 关着的时候错过的不会丢：下次打开，那些已经过点的任务照样会弹出来，"
+           "标题里会写明「其中 N 条是之前就逾期的」"),
+    ("n",  "· 提醒只在「今天到期」和「已逾期」里挑 —— 还没到日子的不打扰"),
+    ("n",  "· 哪天不想被提醒了：「更多 ▾ → 到点提醒」关掉，任务本身不受影响"),
+
     ("h2", "键盘快捷键"),
     ("k", ("回车",     "输入框里 = 添加任务；「编辑任务」框里 = 保存（Shift+回车 = 备注换行）")),
     ("k", ("Esc",      "清空输入框 / 取消就地编辑 / 关闭对话框")),
@@ -1113,6 +1187,20 @@ def fmt_ts(ts, ref=None):
     if d.year != ref.year:
         return d.strftime("%y-%m-%d %H:%M:%S")
     return d.strftime("%m-%d %H:%M:%S")
+
+
+def reminder_head(items):
+    """提醒窗顶上那句「有 N 件事到点了（其中 M 条是之前就逾期的）」。
+
+    程序没开着的时候到点的活儿，重开之后照样会弹（remind_key 还没记），
+    所以得说清"有几条其实是更早的"，不然用户会以为是刚到的。
+    """
+    T = today()
+    late = [t for t in items if (s2d(t.get("due")) or T) < T]
+    head = "有 %d 件事到点了" % len(items)
+    if late:
+        head += "（其中 %d 条是之前就逾期的）" % len(late)
+    return head
 
 
 def due_point(s):
@@ -2858,8 +2946,28 @@ class App:
         m.add_command(label="象限设置…（增删 / 改名）", command=lambda: self.ask_quads())
         m.add_separator()
         m.add_command(label="打开数据文件夹", command=lambda: self._open_path(APP_DIR))
+        m.add_command(label="开机自动启动：%s" % ("开" if autostart_get() else "关"),
+                      command=self.toggle_autostart)
         m.add_command(label="清空已完成", command=self.do_clear_done)
         return m
+
+    def toggle_autostart(self):
+        """开机自启开关。**只写 HKCU**（当前用户），不需要管理员。
+
+        为什么要这个：提醒是挂在心跳上的，程序不开就什么都不会发生 ——
+        而便利贴是"想起来才打开"的工具，最容易漏的恰恰是没人提醒的那一刻。
+        """
+        on = bool(autostart_get())
+        if not autostart_set(not on):
+            tkmb.showwarning("改不了开机自启",
+                             "写注册表失败（HKCU\\%s）。\n\n"
+                             "常见原因：安全软件拦了写启动项。\n"
+                             "实在不行就把 exe 的快捷方式丢进"
+                             "「开始菜单 → 启动」文件夹。" % RUN_KEY,
+                             parent=self.root)
+            return
+        self.status.configure(
+            text=("已设成开机自动启动" if not on else "已取消开机自动启动"))
 
     def show_more_menu(self):
         self._popup(self.build_more_menu(), self.more_btn)
@@ -6406,9 +6514,10 @@ class App:
         T = today()
         pad = tk.Frame(w, bg=C_BG)
         pad.pack(fill="both", expand=True, padx=18, pady=(16, 14))
-        tk.Label(pad, text="有 %d 件事到点了" % len(items), font=F_BRAND,
+        tk.Label(pad, text=reminder_head(items), font=F_BRAND,
                  bg=C_BG, fg=C_INK, anchor="w").pack(fill="x")
-        tk.Label(pad, text="点某一条可以直接跳过去", font=F_SMALL, bg=C_BG,
+        tk.Label(pad, text="点某一条可以直接跳过去；程序关着时错过的也会在这里补上",
+                 font=F_SMALL, bg=C_BG,
                  fg=C_INK3, anchor="w").pack(fill="x", pady=(2, 10))
 
         for t in items[:8]:
