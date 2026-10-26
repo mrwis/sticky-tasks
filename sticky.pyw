@@ -192,6 +192,9 @@
                       "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
+  · 改"导出 / 按月统计" → export_rows()（CSV 的行，纯函数）+ export_csv()
+                      （写文件，**编码必须 utf-8-sig**，否则 Excel 中文乱码）+
+                      month_stats()（按月口径，面板和自测共用）
   · 改"提醒弹什么 / 什么时候弹" → due_reminders()（挑哪些）+ reminder_head()
                       （顶上那句话）。**程序没开就不会响**，所以配套有
                       autostart_get/set/command（只写 HKCU 的 Run 项）
@@ -467,6 +470,7 @@
 import os
 import re
 import sys
+import csv
 import json
 import math
 import shutil
@@ -1078,6 +1082,21 @@ HELP_SECTIONS = [
     ("n",  "· 以前建的老任务没有创建时间，会拿它的排序时间粗略顶上；"
            "实在判断不出来的就不显示这一行"),
 
+    ("h2", "把完成记录拿出去看（导出 CSV / 按月回顾）"),
+    ("p",  "板面上只留「今天完成的」，可一年下来几百条记录不会自己变成"
+           "「这个月我干了什么」。两条路，一条往外拿、一条就地看："),
+    ("n",  "· 「更多 ▾ → 导出完成记录（CSV）…」把全部完成记录导成一个表格："
+           "完成日期 / 完成时刻 / 标题 / 象限 / 截止日期 / 创建时间 / 用时（分钟）/ "
+           "子任务完成数 / 备注。UTF-8 带 BOM，Excel 双击打开中文不乱码，"
+           "可以直接丢进透视表"),
+    ("n",  "· 「更多 ▾ → 按月回顾…」就在程序里看一眼：这个月完成了几条、覆盖了几天、"
+           "平均用时多久、每天完成的柱状条、以及落在哪一格里的分布；"
+           "「上月 / 下月」翻，底部可以把这一个月单独导出去"),
+    ("n",  "· 两条用的是同一份口径（都是「完成时间落在哪一天」），所以导出的数"
+           "和面板上的数一定对得上"),
+    ("n",  "· 用时算的是「创建 → 完成」，跟卡片底部那颗药丸是同一个值；"
+           "老任务没有创建时间的那条用时留空，不瞎猜"),
+
     ("h2", "提醒：程序开着才会响，所以可以设开机自启"),
     ("p",  "到点提醒挂在程序内部的心跳上 —— 程序没开，就什么都不会发生。"
            "而便利贴偏偏是「想起来才打开」的工具，最容易漏的恰恰是没人提醒的那一刻。"),
@@ -1187,6 +1206,83 @@ def fmt_ts(ts, ref=None):
     if d.year != ref.year:
         return d.strftime("%y-%m-%d %H:%M:%S")
     return d.strftime("%m-%d %H:%M:%S")
+
+
+def export_rows(tasks):
+    """把已完成的任务整理成 CSV 的行（第一行是表头）。
+
+    抽成纯函数是有意的：导出最怕"写出去才发现列错了"，而 CSV 文件里有时间戳
+    和引号转义，自测里逐字节比很脆 —— 直接比这几行最省事。
+
+    用时按秒算再换算成分钟（保留一位小数）：复盘关心的是"这件事拖了多久"，
+    给个 0.3 分钟比给 18 秒更好比大小。
+    """
+    head = ["完成日期", "完成时刻", "标题", "象限", "截止日期",
+            "创建时间", "用时（分钟）", "子任务", "备注"]
+    rows = [head]
+    done = [t for t in tasks if t.get("done")]
+    done.sort(key=lambda t: done_ts(t) or 0)
+    for t in done:
+        dts, cts = done_ts(t), created_ts(t)
+        d = datetime.datetime.fromtimestamp(dts) if dts > 0 else None
+        c = datetime.datetime.fromtimestamp(cts) if cts > 0 else None
+        used = ""
+        if dts > 0 and cts > 0 and dts >= cts:
+            used = "%.1f" % ((dts - cts) / 60.0)
+        subs = subs_of(t)
+        n_done = len([s for s in subs if s.get("done")])
+        pr = PRIO_BY_P.get(_norm_p(t.get("p", 0))) or PRIOS[0]
+        rows.append([
+            d.strftime("%Y-%m-%d") if d else "",
+            d.strftime("%H:%M:%S") if d else "",
+            t.get("title", ""),
+            pr["name"] + ((" · " + pr["act"]) if pr["act"] else ""),
+            t.get("due", ""),
+            c.strftime("%Y-%m-%d %H:%M:%S") if c else "",
+            used,
+            ("%d/%d" % (n_done, len(subs))) if subs else "",
+            t.get("note", ""),
+        ])
+    return rows
+
+
+def month_stats(tasks, ym):
+    """某个月（"2026-10"）的完成情况。**纯函数**，面板和自测共用这一份口径。
+
+    返回：
+      n        完成条数
+      useds    [(完成日, 用时秒)]，只收"两个时间戳都靠谱"的
+      by_p     象限下标 → 条数
+      by_day   日 → 条数（只有这个月里真正有完成的那些天）
+      days     这个月有完成记录的天数
+    """
+    ym = str(ym or "")
+    out = {"n": 0, "useds": [], "by_p": {}, "by_day": {}, "days": 0}
+    for t in tasks:
+        if not t.get("done"):
+            continue
+        day = done_day(t)
+        if not day or day[:7] != ym:
+            continue
+        out["n"] += 1
+        p = _norm_p(t.get("p", 0))
+        out["by_p"][p] = out["by_p"].get(p, 0) + 1
+        d = int(day[8:10])
+        out["by_day"][d] = out["by_day"].get(d, 0) + 1
+        dts, cts = done_ts(t), created_ts(t)
+        if dts > 0 and cts > 0 and dts >= cts:
+            out["useds"].append((day, dts - cts))
+    out["days"] = len(out["by_day"])
+    return out
+
+
+def month_label(ym):
+    """"2026-10" → "2026 年 10 月"。"""
+    try:
+        y, m = str(ym).split("-")
+        return "%s 年 %d 月" % (y, int(m))
+    except Exception:
+        return str(ym or "")
 
 
 def reminder_head(items):
@@ -2946,10 +3042,188 @@ class App:
         m.add_command(label="象限设置…（增删 / 改名）", command=lambda: self.ask_quads())
         m.add_separator()
         m.add_command(label="打开数据文件夹", command=lambda: self._open_path(APP_DIR))
+        m.add_command(label="导出完成记录（CSV）…", command=self.export_csv)
+        m.add_command(label="按月回顾…", command=self.open_month_review)
         m.add_command(label="开机自动启动：%s" % ("开" if autostart_get() else "关"),
                       command=self.toggle_autostart)
         m.add_command(label="清空已完成", command=self.do_clear_done)
         return m
+
+    # ---------------------------------------------------- 导出与按月回顾
+
+    def export_csv(self, path=None, ym=None):
+        """把完成记录导出成 CSV（给 Excel / 透视表用）。
+
+        path 留空就走「另存为」对话框（自测传临时路径直接写）。
+        ym 非空只导这个月（"2026-10"）。
+
+        编码用 **utf-8-sig**（带 BOM）：Excel 双击打开中文才不乱码 ——
+        纯 utf-8 它会按本地编码猜，中文列就变成一堆问号。这是 Excel 的老毛病。
+        """
+        rows = export_rows([t for t in self.tasks
+                            if not ym or done_day(t)[:7] == ym])
+        if len(rows) <= 1:
+            if path is None:
+                tkmb.showinfo("没有可导出的记录",
+                              "还没有已完成的任务。" if not ym
+                              else "%s 没有完成记录。" % month_label(ym),
+                              parent=self.root)
+            return ""
+        if path is None:
+            path = tkfd.asksaveasfilename(
+                parent=self.root, title="导出完成记录", defaultextension=".csv",
+                initialfile="便利贴完成记录-%s.csv" % (ym or d2s(today())),
+                filetypes=[("CSV 文件", "*.csv"), ("所有文件", "*.*")])
+            if not path:
+                return ""
+        try:
+            with open(path, "w", encoding="utf-8-sig", newline="") as f:
+                csv.writer(f).writerows(rows)
+        except Exception as e:
+            tkmb.showwarning("导出失败",
+                             "写不进这个文件：\n\n%s\n\n%s" % (path, e),
+                             parent=self.root)
+            return ""
+        self.status.configure(text="已导出 %d 条完成记录 → %s"
+                                   % (len(rows) - 1, os.path.basename(path)))
+        return path
+
+    def open_month_review(self):
+        """按月回顾：这个月完成了多少、集中在哪几天、花在哪一格里。
+
+        为什么要有它：一年下来几百条完成记录，「已完成」筛选只能一条条翻；
+        想看「这个月到底干了什么」得有个汇总。导出 CSV 是给外部工具用的，
+        这个窗是"当下看一眼"的，所以只放一眼能读的数字和一根小柱图。
+        """
+        dlg = tk.Toplevel(self.root)
+        dlg.title("按月回顾")
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        self._follow_top(dlg)
+        dlg.grab_set()
+
+        st = {"ym": d2s(today())[:7]}
+        head = tk.Frame(dlg, bg=C_BG)
+        head.pack(fill="x", padx=18, pady=(14, 0))
+        tk.Button(head, text="‹ 上月", font=F_SMALL, bd=0, relief="flat", padx=6,
+                  bg=C_WHITE, fg=C_INK3, activebackground="#f0e9dc",
+                  activeforeground=C_INK, cursor="hand2", highlightthickness=1,
+                  highlightbackground=C_LINE,
+                  command=lambda: shift(-1)).pack(side="left")
+        ttl = tk.Label(head, text="", font=F_BRAND, bg=C_BG, fg=C_INK)
+        ttl.pack(side="left", expand=True)
+        tk.Button(head, text="下月 ›", font=F_SMALL, bd=0, relief="flat", padx=6,
+                  bg=C_WHITE, fg=C_INK3, activebackground="#f0e9dc",
+                  activeforeground=C_INK, cursor="hand2", highlightthickness=1,
+                  highlightbackground=C_LINE,
+                  command=lambda: shift(+1)).pack(side="right")
+
+        line = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg=C_INK2)
+        line.pack(fill="x", padx=18, pady=(8, 0))
+
+        box = tk.Frame(dlg, bg=C_WHITE, highlightthickness=1,
+                       highlightbackground=C_LINE)
+        box.pack(fill="x", padx=18, pady=(10, 0))
+        cv = tk.Canvas(box, width=352, height=76, bg=C_WHITE,
+                       highlightthickness=0)
+        cv.pack(padx=10, pady=(10, 2))
+        foot = tk.Label(box, text="每天完成的条数", font=F_TINY, bg=C_WHITE,
+                        fg=C_INK3)
+        foot.pack(pady=(0, 8))
+
+        qbox = tk.Frame(dlg, bg=C_BG)
+        qbox.pack(fill="x", padx=18, pady=(10, 0))
+
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18, pady=(12, 14))
+        self._btn(bar, "导出这个月（CSV）", lambda: self.export_csv(
+            ym=st["ym"])).pack(side="left")
+        self._btn(bar, "关闭", dlg.destroy, primary=True).pack(side="right")
+
+        def ym_shift(ym, delta):
+            y, m = [int(x) for x in ym.split("-")]
+            d = add_months(datetime.date(y, m, 1), delta)
+            return "%04d-%02d" % (d.year, d.month)
+
+        def shift(delta):
+            st["ym"] = ym_shift(st["ym"], delta)
+            draw()
+
+        def fmt_used(sec):
+            """平均用时 —— 跟卡片底部那颗药丸同一套量级写法。"""
+            sec = int(round(sec))
+            if sec < 60:
+                return "%d 秒" % sec
+            if sec < 3600:
+                return "%d 分" % (sec // 60)
+            if sec < 86400:
+                h, m = sec // 3600, sec % 3600 // 60
+                return "%d 小时 %d 分" % (h, m) if m else "%d 小时" % h
+            d = sec // 86400
+            return "%d 天" % d
+
+        def draw():
+            """换月、刷新都走它 —— 只有这一处建文字和柱子。"""
+            m = month_stats(self.tasks, st["ym"])
+            ttl.configure(text=month_label(st["ym"]))
+            if not m["n"]:
+                line.configure(text="这个月还没有完成记录")
+            else:
+                avg = (sum(s for _d, s in m["useds"]) / len(m["useds"])
+                       if m["useds"] else 0)
+                tail = ("　平均用时 %s" % fmt_used(avg)) if m["useds"] else ""
+                line.configure(text="完成 %d 条　覆盖 %d 天%s"
+                                    % (m["n"], m["days"], tail))
+            # ---- 每天完成数的小柱图 ----
+            cv.delete("all")
+            y0, mth = int(st["ym"][5:7]), int(st["ym"][:4])
+            ndays = calendar.monthrange(mth, 1)[1]
+            top = max(list(m["by_day"].values()) or [1])
+            bw, gap = 8, 3
+            x0 = (352 - ndays * (bw + gap)) / 2.0
+            base = 62
+            for i in range(ndays):
+                x = x0 + i * (bw + gap)
+                n = m["by_day"].get(i + 1, 0)
+                if n:
+                    h = max(3, int(round(base * n / float(top))))
+                    cv.create_rectangle(x, base - h, x + bw, base,
+                                        fill="#c0ae8e", outline="")
+                else:
+                    cv.create_line(x, base, x + bw, base, fill="#e6dfd2")
+                if (i + 1) % 5 == 0 or i == 0:
+                    cv.create_text(x + bw / 2.0, 70, text=str(i + 1),
+                                   font=F_TINY, fill=C_INK3)
+            # ---- 落在哪一格 ----
+            for w in qbox.winfo_children():
+                w.destroy()
+            if m["n"]:
+                mx = max(m["by_p"].values()) or 1
+                for p in sorted(m["by_p"]):
+                    pr = PRIO_BY_P.get(p) or PRIOS[0]
+                    row = tk.Frame(qbox, bg=C_BG)
+                    row.pack(fill="x", pady=1)
+                    tk.Label(row, text=pr["name"], font=F_SMALL, bg=C_BG,
+                             fg=C_INK2, width=10, anchor="w")\
+                        .pack(side="left")
+                    w_bar = int(120 * m["by_p"][p] / float(mx))
+                    c = tk.Canvas(row, width=124, height=10, bg=C_BG,
+                                  highlightthickness=0)
+                    c.pack(side="left", padx=(4, 6))
+                    c.create_rectangle(0, 2, max(2, w_bar), 9,
+                                       fill=pr["band"], outline="")
+                    tk.Label(row, text="%d 条" % m["by_p"][p], font=F_TINY,
+                             bg=C_BG, fg=C_INK3).pack(side="left")
+
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
+        # 供自测用（真实用户点上下月按钮）
+        dlg._mr_shift = shift
+        dlg._mr_ym = lambda: st["ym"]
+        draw()
+        dlg.update_idletasks()
+        px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
+        py = self.root.winfo_y() + 120
+        dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
 
     def toggle_autostart(self):
         """开机自启开关。**只写 HKCU**（当前用户），不需要管理员。
