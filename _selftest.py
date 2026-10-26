@@ -706,9 +706,9 @@ check("收起时可见 2 条", len(sticky.visible_subs(ht)) == 2,
 check("收起时那条也在可见序列之外（它排在最后）",
       [s["text"] for s in sticky.visible_subs(ht)] == ["A", "B"])
 _h1 = sticky.block_h(ht)
-sticky.SUB_SHOW_DONE.add(ht["id"])
+sticky.SUB_SHOW_DONE[ht["id"]] = sticky.d2s(sticky.today())
 _h2 = sticky.block_h(ht)
-sticky.SUB_SHOW_DONE.discard(ht["id"])
+sticky.SUB_SHOW_DONE.pop(ht["id"], None)
 check("摊开后卡片正好高出一行（3 条可见，还没到第二页）",
       _h2 - _h1 == sticky.SUB_LINE, "收 %s 开 %s" % (_h1, _h2))
 
@@ -730,16 +730,16 @@ check("拖拽落点的两个方向能对上（屏幕行号 ↔ 列表下标）",
 for _s in sticky.subs_of(sd):
     _s["done"] = True
     _s["done_at"] = sticky.now_ts() - 86400 * 2
-sticky.SUB_SHOW_DONE.discard(sd["id"])
+sticky.SUB_SHOW_DONE.pop(sd["id"], None)
 app.redraw()
 root.update()
 check("全收起时可见条数是 0", len(sticky.visible_subs(sd)) == 0)
 check("但「已完成 4」那个胶囊还在（不然就再也点不开了）",
       region(app, "subtos:" + sd["id"], sd["id"]) is not None)
 _h_zero = sticky.block_h(sd)
-sticky.SUB_SHOW_DONE.add(sd["id"])
+sticky.SUB_SHOW_DONE[sd["id"]] = sticky.d2s(sticky.today())
 _h_all = sticky.block_h(sd)
-sticky.SUB_SHOW_DONE.discard(sd["id"])
+sticky.SUB_SHOW_DONE.pop(sd["id"], None)
 check("全收起时按 0 行算（摊开后正好多出 min(4,3)=3 行，不留空档）",
       _h_all - _h_zero == sticky.SUB_MAX * sticky.SUB_LINE,
       "零 %s 全 %s" % (_h_zero, _h_all))
@@ -783,12 +783,125 @@ check("可见的正好是没完成的那三条",
 
 app.tasks = [t for t in app.tasks
              if t["id"] not in (sd["id"], od["id"], pgd["id"])]
-sticky.SUB_SHOW_DONE.discard(sd["id"])
+sticky.SUB_SHOW_DONE.pop(sd["id"], None)
 app.set_filter("all")
 app.redraw()
 root.update()
 check("子任务沉底用例的测试任务已清理",
       all(app.task_by_id(x) is None for x in (sd["id"], od["id"], pgd["id"])))
+
+print("\n-- 子任务也有创建/完成时间，而且摊开只算当天 --")
+
+# ---- 时间戳：新建就记上 ----
+_ct = mk("子任务时间")
+app.add_subs(_ct, ["第一条"])
+_cs = sticky.subs_of(_ct)[0]
+check("★ 新建子任务自动记创建时间",
+      sticky._norm_num(_cs.get("created_at")) > 1e9,
+      "实际 %r" % _cs.get("created_at"))
+check("刚建的子任务还没完成时间", sticky._norm_num(_cs.get("done_at")) == 0)
+
+app.toggle_sub(_ct, _cs["id"])
+check("★ 勾上完成就记完成时间（并和主任务一样能读出来）",
+      sticky._norm_num(_cs.get("done_at")) > 1e9
+      and sticky.done_day(_cs) == sticky.d2s(sticky.today()),
+      "实际 %r" % _cs.get("done_at"))
+
+# ---- 行右端那行小字：未完成显示创建时间、已完成显示完成时间 ----
+_old_show = sticky.SHOW_TIME
+try:
+    sticky.SHOW_TIME = True
+    _ct2 = mk("子任务时间文字")
+    app.add_subs(_ct2, ["没做的一条", "做完的一条"])
+    _a, _b = sticky.subs_of(_ct2)
+    _b["done"] = True
+    _b["done_at"] = sticky.now_ts()
+    check("★ 未完成的行显示创建时间",
+          sticky.sub_meta_text(_a) == sticky.fmt_ts(sticky.created_ts(_a))
+          and sticky.sub_meta_text(_a) != "",
+          "实际 %r" % sticky.sub_meta_text(_a))
+    check("★ 已完成的行显示完成时间（不是创建时间）",
+          sticky.sub_meta_text(_b) == sticky.fmt_ts(sticky.done_ts(_b))
+          and sticky.sub_meta_text(_b) != "",
+          "实际 %r" % sticky.sub_meta_text(_b))
+    check("时间精确到秒（14 个字符那种格式）",
+          len(sticky.sub_meta_text(_a)) == len("10-26 15:04:09"),
+          "实际 %r" % sticky.sub_meta_text(_a))
+
+    # 关掉显示开关 → 一行都不画（跟卡片上那行时间同一个开关）
+    sticky.SHOW_TIME = False
+    check("关掉「显示时间」后子任务也没有时间小字",
+          sticky.sub_meta_text(_a) == "" and sticky.sub_meta_text(_b) == "")
+    sticky.SHOW_TIME = True
+
+    # 画布上确实画了
+    app.redraw()
+    root.update()
+    check("★ 卡片上真的画出了子任务的时间小字",
+          sticky.sub_meta_text(_a) in all_texts(app),
+          "画布上的时间类文字 %s"
+          % [t for t in all_texts(app) if "-" in t and ":" in t][:6])
+
+    # 老数据（没有 created_at）→ 不显示，别拿父任务的时间顶上
+    _old = {"id": sticky.new_sid(), "text": "老子任务", "done": False}
+    check("老数据子任务没有创建时间就不画（不拿父任务的时间骗人）",
+          sticky.sub_meta_text(_old) == "", "实际 %r" % sticky.sub_meta_text(_old))
+finally:
+    sticky.SHOW_TIME = _old_show
+
+# ---- 摊开状态只算当天（用户报的「完成好几天还在卡片上」）----
+_op = mk("摊开只算当天")
+app.add_subs(_op, ["甲", "乙", "丙"])
+for _s in sticky.subs_of(_op)[1:]:
+    _s["done"] = True
+    _s["done_at"] = sticky.now_ts() - 86400 * 3          # 三天前完成
+_sticky_T = sticky.d2s(sticky.today())
+check("三天前完成的子任务默认就不画",
+      [s["text"] for s in sticky.visible_subs(_op)] == ["甲"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(_op)])
+
+sticky.SUB_SHOW_DONE[_op["id"]] = _sticky_T               # 今天摊开
+check("今天点开「已完成 2」→ 摊开、全都画出来",
+      sticky.sub_open(_op) and len(sticky.visible_subs(_op)) == 3,
+      "实际 %d 条" % len(sticky.visible_subs(_op)))
+
+sticky.SUB_SHOW_DONE[_op["id"]] = "2000-01-01"            # 昨天（更早）摊开的
+check("★ 跨天自动收回：昨天摊开的今天不再画已完成的那几条",
+      (not sticky.sub_open(_op))
+      and [s["text"] for s in sticky.visible_subs(_op)] == ["甲"],
+      "实际 %s" % [s["text"] for s in sticky.visible_subs(_op)])
+check("跨天收回后，「已完成 2」胶囊又出现了（还能点开）",
+      sticky.hidden_sub_n(_op) == 2)
+
+# 真点一下胶囊：记的是"今天"，状态栏也要说清会收回
+sticky.SUB_SHOW_DONE.pop(_op["id"], None)
+app.redraw()
+root.update()
+_cap = region(app, "subtos:" + _op["id"], _op["id"])
+_cx2, _cy2 = (_cap[0] + _cap[2]) / 2.0, (_cap[1] + _cap[3]) / 2.0
+app.on_press(E(_cx2, _cy2))
+app.on_release(E(_cx2, _cy2))
+check("点胶囊后记下的是今天的日期（不是布尔值）",
+      sticky.SUB_SHOW_DONE.get(_op["id"]) == _sticky_T,
+      "实际 %r" % sticky.SUB_SHOW_DONE.get(_op["id"]))
+check("状态栏说的是「第二天会自动收回」",
+      "第二天" in app.status.cget("text"), "实际 %r" % app.status.cget("text"))
+check("★ 状态栏条数是 2（先算再改状态，不是 0）",
+      "2 条" in app.status.cget("text"), "实际 %r" % app.status.cget("text"))
+
+# ---- 跨零点：程序开着过夜，界面也得自己收拾干净 ----
+_ds_bak = app._day_seen
+app._day_seen = "2000-01-01"
+app._tick()
+check("★ 跨天后心跳把「今天是哪天」推到今天（顺手重绘一次）",
+      app._day_seen == _sticky_T, "实际 %r" % app._day_seen)
+app._day_seen = _ds_bak
+
+app.tasks = [t for t in app.tasks if t["id"] not in (_ct["id"], _ct2["id"], _op["id"])]
+sticky.SUB_SHOW_DONE.pop(_op["id"], None)
+app.save()
+app.redraw()
+root.update()
 
 print("\n-- 创建时间 / 完成时间：自动记，显示可选 --")
 

@@ -193,9 +193,12 @@
                       比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
                       别拿它去比时刻
   · 改子任务的显示顺序/收起规则 → visible_subs()（**唯一**出口）+
-                      SUB_SHOW_DONE（摊开状态）+ hidden_sub_n()（收起条数）。
+                      SUB_SHOW_DONE（摊开状态，记的是"哪天摊开的"）+
+                      sub_open()（摊开只在当天有效）+ hidden_sub_n()（收起条数）。
                       **block_h / _draw_subs / turn_sub_page / 拖拽折算四处
                       都要用可见条数**，少改一处就是"算的行数和画的行数对不上"
+  · 改子任务行右端那行小字 → sub_meta_text()（**唯一**出口，受 SHOW_TIME
+                      控制）。_draw_subs 里折行前要把它的宽度扣掉
   · 状态栏那行提示  → 改 HINT_TEXT。**改完先用 tkfont.measure() 量宽度**：
                       窗口缩到最小（MIN_W=760）时，左边提示 + 右边统计数字
                       + 撤销按钮要一起装得下
@@ -404,12 +407,21 @@
          摊开的入口（主任务有「已完成」筛选兜着，子任务没有第二层入口）。
        · 胶囊的判据是 `n_hid or is_open`，**不能只看 n_hid**：摊开之后
          n_hid 变成 0，只看它的话胶囊当场消失，那就再也收不回去了。
-       · 摊开状态存在模块级 `SUB_SHOW_DONE`（一组 tid），跟 SHOW_TIME 同样
-         的理由放模块级 —— block_h 拿不到 App 实例。它**只活在内存里**，
-         不落库。
+       · 摊开状态存在模块级 `SUB_SHOW_DONE`（**tid → "哪一天摊开的"**），跟
+         SHOW_TIME 同样的理由放模块级 —— block_h 拿不到 App 实例。它只活在
+         内存里、不落库。
+         ★ **记日期而不是"点过没点过"**：用户报过"完成好几天的子任务还在卡片
+         上"，原因就是原来只记了布尔值，程序开着不关就永远摊着。判据统一走
+         `sub_open(t)`，跨天自动失效。心跳 `_tick` 里盯着 `_day_seen`，跨零点
+         主动 redraw 一次，过夜也能自己收拾干净。
        · 子任务的完成时间在 `sub.done_at`（_norm_subs 归一化时会顺手把
          "没完成却留着 done_at"清掉）。老数据没有它 → sub_done_day() 返回
          ""，按"早就完成了"处理，也就是直接收起。
+       · 子任务的创建时间在 `sub.created_at`（新建 / 重复任务下一轮 / 拖成
+         子任务时都会写）。**老数据没有就不显示**，绝不拿父任务的时间顶上。
+         每行右端那行小字是 `sub_meta_text()`：未完成显示创建时间、已完成显示
+         完成时间，**不带「建于/完成」前缀**（行太窄），受同一个 SHOW_TIME
+         开关控制。折行时要先把这段宽度扣掉，否则文字会压到时间上。
 
   ⑯ 象限是可增删的，名字/说明也能改（PRIOS / apply_quads / QUAD_PALETTE）
     象限本质上是一种**分类方式**，不同的人分法不一样：有人就用出厂那四个
@@ -687,6 +699,7 @@ F_TINY    = ("Microsoft YaHei UI", -10, "bold")
 F_BRAND   = ("Microsoft YaHei UI", -15, "bold")
 F_HEAD    = ("Microsoft YaHei UI", -12, "bold")
 F_SUB     = ("Microsoft YaHei UI", -11)
+F_SUB_T   = ("Microsoft YaHei UI", -9)      # 子任务行右端那行时间（比正文小一号）
 # 使用帮助窗里两级标题。比正文大一点、粗一点就够了，别用太大字号
 # （帮助正文行数多，字号一大就要频繁滚动，反而不好读）。
 F_H1      = ("Microsoft YaHei UI", -16, "bold")
@@ -906,9 +919,15 @@ HELP_SECTIONS = [
            "一眼看不出还剩几条要干。所以子任务跟主任务用同一套规矩："),
     ("n",  "· 划掉的自动排到最后面（当天划掉的仍然留着，方便手滑点错时点回来）"),
     ("n",  "· 第二天起自动不再显示 —— 它们没有删，只是不占位置了"),
-    ("n",  "· 标题行右边那个「已完成 N」就是被收起来的那几条，点一下摊开看，再点一下收起"),
+    ("n",  "· 标题行右边那个「已完成 N」就是被收起来的那几条，点一下摊开看，再点一下收起。"
+           "「摊开」只算当天：第二天会自动收回去，不会一直摊着"),
     ("n",  "· 摊开之后如果超过 3 条，照样用「‹ 1/2 ›」翻页"),
     ("n",  "· 卡面上写的「子任务 2/5」永远是总共的进度，收起不影响这个数"),
+    ("n",  "· 每条子任务行「右端还有一行小字」：没做完的显示创建时间、做完了的显示"
+           "完成时间（精确到秒，跟卡片标题后面那行是同一种写法）。子任务行窄，"
+           "所以省掉了「建于 / 完成」两个字 —— 勾没勾上已经说明了"),
+    ("n",  "· 那行小字跟着「更多 ▾ → 显示时间」一起开关；老数据没有时间就不显示，"
+           "不会拿父任务的时间顶上"),
     ("n",  "· 想改顺序：直接拖子任务行（同一张卡里上下拖）。显示顺序和实际顺序是两回事，"
            "但拖的时候程序会自己折算，照常拖就行"),
 
@@ -985,6 +1004,8 @@ HELP_SECTIONS = [
            "不用另写一句「当天完成」"),
     ("n",  "· 不想看见可以关掉：顶栏「更多 ▾」→「卡片上显示时间」；"
            "关掉只是不显示，两个时间一样在记，随时能再打开"),
+    ("n",  "· 子任务也有一份：每行右端那行更小的字，没做完显示创建时间、做完了显示"
+           "完成时间（同样跟这个开关走）"),
     ("n",  "· 以前建的老任务没有创建时间，会拿它的排序时间粗略顶上；"
            "实在判断不出来的就不显示这一行"),
 
@@ -1258,12 +1279,24 @@ def sub_done_n(t):
     return len([s for s in subs_of(t) if s.get("done")])
 
 
-# 哪些卡片把"收起的已完成子任务"临时摊开了（存任务 id）。
+# 哪些卡片把"收起的已完成子任务"临时摊开了：{任务 id: "哪一天摊开的"}。
 #
 # 放模块级的唯一原因还是 block_h()：它是纯函数、拿不到 App 实例，而
 # **算高度和画卡片必须用同一个判断**（见机制⑪/⑭，SHOW_TIME 也是这个道理）。
 # 只活在内存里、不落库 —— 重开程序回到"收起"，因为收起才是常态下想看的。
-SUB_SHOW_DONE = set()
+#
+# **记的是日期而不是"点过没点过"**：主任务板面第二天就把已完成的收起来，
+# 子任务没理由一直摊着。用户报过「完成好几天的子任务还在卡片上」，
+# 原因就是这里原来只记了"点过"，程序开着不关就一直摊着。
+SUB_SHOW_DONE = {}
+
+
+def sub_open(t):
+    """这张卡的「已完成子任务」现在是不是摊开的 —— **只在当天有效**。
+
+    跨天自动失效（跟主任务"已完成次日从板面收起"同一套规则）。
+    """
+    return SUB_SHOW_DONE.get(t.get("id")) == d2s(today())
 
 
 def sub_done_day(s):
@@ -1279,6 +1312,20 @@ def sub_done_day(s):
     return ts_day(ts) if ts > TS_OK else ""
 
 
+def sub_meta_text(s):
+    """子任务那一行右端的小字：**未完成显示创建时间、已完成显示完成时间**。
+
+    规则跟任务卡片的 meta_line() 一样（同一个 SHOW_TIME 开关、同一个 fmt_ts
+    格式），区别只是**不带「建于 / 完成」前缀** —— 子任务一行才两百来像素，
+    得把位置留给子任务本身；勾选框已经在说完成没完成了，前缀是多余的。
+    """
+    if not SHOW_TIME:
+        return ""
+    if s.get("done"):
+        return fmt_ts(done_ts(s))
+    return fmt_ts(created_ts(s))
+
+
 def visible_subs(t):
     """卡片上真正要画的那些子任务：**未完成的在前、已完成的沉底**，
     而且已完成里"不是今天完成的"直接不画（跟主任务板面那套规则对称）。
@@ -1288,13 +1335,14 @@ def visible_subs(t):
     也方便手滑点错时点回来），第二天自动收起。
 
     收起的那部分不是没了 —— 卡片上会写「已完成 N」并给一个能点开的胶囊，
-    点开就临时摊平（`App.toggle_sub_done_view`，状态存在 SUB_SHOW_DONE 里）。
+    点开就临时摊平（`App.toggle_sub_done_view`，状态存在 SUB_SHOW_DONE 里，
+    **也只摊开当天**）。
 
     **排序只发生在显示层**：数据里的 order 是用户一条条拖出来的，不能动 ——
     否则取消完成之后它自己会跑到别的地方去。
     """
     subs = subs_of(t)
-    if t.get("id") not in SUB_SHOW_DONE:
+    if not sub_open(t):
         T = d2s(today())
         subs = [s for s in subs
                 if not (s.get("done") and sub_done_day(s) != T)]
@@ -1462,11 +1510,14 @@ def _norm_num(v):
 
 
 def _norm_subs(raw):
-    """把 subs 归一成 [{"id","text","done","done_at"}]，顺带容忍「纯字符串列表」这种简写。
+    """把 subs 归一成 [{"id","text","done","done_at","created_at"}]，顺带容忍「纯字符串列表」这种简写。
 
     done_at 是**子任务的完成时间戳**：卡片上"已完成次日收起"靠它判断。
     老数据没有这个字段，读出来是 0 → sub_done_day() 会当成"早就完成了"
     （也就是直接收起），这个取舍是有意的。
+
+    created_at 是子任务的创建时间（卡片行右端那行小字用）。老数据同样没有 →
+    读出来 0 → 那一行就不画时间，绝不拿父任务的时间顶上（会骗人）。
     """
     out = []
     if isinstance(raw, list):
@@ -1478,10 +1529,11 @@ def _norm_subs(raw):
                     out.append({"id": s.get("id") or new_sid(),
                                 "text": txt, "done": done,
                                 # 没完成就不该留着完成时间（取消完成要清干净）
-                                "done_at": _norm_num(s.get("done_at")) if done else 0.0})
+                                "done_at": _norm_num(s.get("done_at")) if done else 0.0,
+                                "created_at": _norm_num(s.get("created_at"))})
             elif isinstance(s, str) and s.strip():
                 out.append({"id": new_sid(), "text": s.strip(), "done": False,
-                            "done_at": 0.0})
+                            "done_at": 0.0, "created_at": 0.0})
     return out
 
 
@@ -2087,6 +2139,9 @@ class App:
         # REMIND_MS"，主窗口还没显示就先蹦出一个提醒框。
         # 启动时的那次检查交给下面单独的 after() 去做。
         self._last_remind_check = now_ts()
+        # 心跳里比这个日期，一旦跨天就重绘一次（已完成的卡片、摊开的子任务
+        # 都只活到当天结束，程序开着过夜也得自己收拾干净）
+        self._day_seen = d2s(today())
 
         self.load()
         self.topmost = bool(self.ui.get("topmost"))
@@ -2189,9 +2244,12 @@ class App:
             {"id": new_id(), "title": "把季度复盘 PPT 改完，明天下午 3 点前发出去",
              "note": "重点补上留存率那一页", "p": 0, "due": d2s(d + datetime.timedelta(days=1)),
              "done": False, "order": 1.0, "created_at": born(2),
-             "subs": [{"id": new_sid(), "text": "补留存率那一页的数据", "done": True},
-                      {"id": new_sid(), "text": "改封面和字体统一", "done": False},
-                      {"id": new_sid(), "text": "发到评审群里", "done": False}],
+             "subs": [{"id": new_sid(), "text": "补留存率那一页的数据", "done": True,
+                       "done_at": born(0.02), "created_at": born(2)},
+                      {"id": new_sid(), "text": "改封面和字体统一", "done": False,
+                       "created_at": born(2)},
+                      {"id": new_sid(), "text": "发到评审群里", "done": False,
+                       "created_at": born(1)}],
              "logs": {d2s(d - datetime.timedelta(days=1)): 2700.0,
                       d2s(d): 1800.0},
              "timer": 0},
@@ -3360,7 +3418,10 @@ class App:
 
         画的是 visible_subs()：**未完成在前、已完成沉底、不是今天完成的不画**
         （跟 block_h 里按可见条数算高度是同一套判断）。收起的那几条不是没了 ——
-        「子任务 x/y」右边有个「已完成 N」的胶囊，点一下临时摊开。
+        「子任务 x/y」右边有个「已完成 N」的胶囊，点一下临时摊开（只摊当天）。
+
+        每行右端还带一行小字（sub_meta_text）：未完成显示创建时间、
+        已完成显示完成时间 —— 同一行放得下，所以行高不变，block_h 不用跟着改。
         """
         cv = self.cv
         subs = subs_of(t)
@@ -3386,7 +3447,7 @@ class App:
         #
         # 注意判据是「有收起的 **或** 现在正摊着」：摊开之后 n_hid 变成 0，
         # 只看 n_hid 的话胶囊会当场消失 —— 那就再也收不回去了。
-        is_open = t["id"] in SUB_SHOW_DONE
+        is_open = sub_open(t)
         if n_hid or is_open:
             lbl = "收起" if is_open else "已完成 %d" % n_hid
             cw = _font_of(F_SUB).measure(lbl) + 16
@@ -3417,13 +3478,20 @@ class App:
                                  bx - 3, by - 3, bx + SUB_BOX + 3, by + SUB_BOX + 3))
 
             sx = bx + SUB_BOX + 6
-            ln = self._wrap(s["text"], F_SUB, (x + w - 10) - sx, 1)
+            # 右端那行时间先算宽度，折行时把这段让出来 —— 否则文字会压到时间上
+            mt = sub_meta_text(s)
+            mw = (_font_of(F_SUB_T).measure(mt) + 8) if mt else 0
+            ln = self._wrap(s["text"], F_SUB, max(40, (x + w - 10) - sx - mw), 1)
             txt = ln[0] if ln else ""
             cv.create_text(sx, y, anchor="nw", text=txt, font=F_SUB,
                            fill=(C_SUB_DONE if sd else C_INK2), tags=(tag,))
             if sd and txt:
                 cv.create_line(sx, y + 8, sx + tkfont.Font(font=F_SUB).measure(txt), y + 8,
                                fill=C_SUB_DONE, tags=(tag,))
+            if mt:
+                cv.create_text(x + w - 10, y + 1, anchor="ne", text=mt,
+                               font=F_SUB_T,
+                               fill=(C_SUB_DONE if sd else C_INK3), tags=(tag,))
             self.regions.append(("st:" + s["id"], t["id"], sx - 3, y - 2, x + w - 8, y + 15))
             # 子任务行的 y 区间（按**显示顺序**）—— 子任务拖拽排序时用来算落点
             self._sub_rows.setdefault(t["id"], []).append((s["id"], y - 2, y + 13))
@@ -4337,7 +4405,7 @@ class App:
             "due": next_date(t["due"], rp), "done": False,
             "order": self._order_end(t["p"]),
             "subs": [{"id": new_sid(), "text": s["text"], "done": False,
-                      "done_at": 0.0}
+                      "done_at": 0.0, "created_at": now_ts()}
                      for s in subs_of(t)],
             "logs": {}, "timer": 0, "repeat": rp, "done_at": 0,
             # 新一轮从**现在**算起，而不是继承上一轮的创建时间 ——
@@ -4514,6 +4582,14 @@ class App:
             live = [t for t in self.tasks if t.get("timer")]
             if live and not self.drag and not self.editor:
                 self.redraw()
+            # **跨零点也要刷一次**：板面上"已完成只留到当天结束"，摊开的
+            # 「已完成子任务」也只摊当天 —— 不刷的话程序开着过夜，第二天
+            # 界面上还是昨天的样子（用户报的"完成好几天还在卡片上"）。
+            T = d2s(today())
+            if T != self._day_seen:
+                self._day_seen = T
+                if not self.drag and not self.editor:
+                    self.redraw()
             w = self._stats_win
             if live and w is not None and w.winfo_exists():
                 self._render_stats()
@@ -4547,15 +4623,19 @@ class App:
         入口是「子任务 x/y」右边那个「已完成 N」胶囊。**状态只存在内存里**
         （SUB_SHOW_DONE，跟翻页页码一样不落库）：重开程序回到收起状态，
         因为"只看见还没做的"才是常态下想要的样子。
+
+        **摊开只算当天**（记的是"哪一天摊开的"）：第二天自动收回，
+        跟主任务"已完成次日从板面收起"对齐。
         """
-        if t["id"] in SUB_SHOW_DONE:
-            SUB_SHOW_DONE.discard(t["id"])
+        tid = t["id"]
+        if sub_open(t):
+            SUB_SHOW_DONE.pop(tid, None)
             self.status.configure(text="已收起的子任务又收起来了")
         else:
-            SUB_SHOW_DONE.add(t["id"])
+            n = hidden_sub_n(t)          # 注意要在改状态**之前**算
+            SUB_SHOW_DONE[tid] = d2s(today())
             self.status.configure(
-                text="摊开了 %d 条已完成的子任务（它们是次日自动收起的）"
-                     % hidden_sub_n(t))
+                text="摊开了 %d 条已完成的子任务（第二天会自动收回）" % n)
         self.redraw()
 
     def add_subs(self, t, lines):
@@ -4566,7 +4646,7 @@ class App:
             txt = str(ln).strip()
             if txt:
                 subs.append({"id": new_sid(), "text": txt, "done": False,
-                             "done_at": 0.0})
+                             "done_at": 0.0, "created_at": now_ts()})
                 added += 1
         if added:
             self.save()
@@ -4612,10 +4692,16 @@ class App:
         snap = self._snapshot()
         self._stop_timer_data(t)               # 先把计时收掉，别留个孤儿 timer
         dst = target.setdefault("subs", [])
-        dst.append({"id": new_sid(), "text": t["title"], "done": bool(t["done"])})
+        # 时间戳跟着搬：这个任务本来就有创建时间，变成子任务后接着算才对
+        # （done_at 也一样 —— 它要是几天前完成的，搬过来就该照样收起）。
+        dst.append({"id": new_sid(), "text": t["title"], "done": bool(t["done"]),
+                    "done_at": done_ts(t),
+                    "created_at": created_ts(t) or now_ts()})
         for s in subs:
             dst.append({"id": new_sid(), "text": s["text"],
-                        "done": bool(s.get("done"))})
+                        "done": bool(s.get("done")),
+                        "done_at": _norm_num(s.get("done_at")) if s.get("done") else 0.0,
+                        "created_at": _norm_num(s.get("created_at"))})
         try:
             self.tasks.remove(t)
         except ValueError:
