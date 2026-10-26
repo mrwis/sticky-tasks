@@ -49,7 +49,8 @@
       title   标题（不允许为空）
       note    备注
       p       优先级，0~3，对应 PRIOS 里的四个象限
-      due     截止日期 "2026-10-15"，空串表示没设
+      due     截止 "2026-10-15" 或 "2026-10-15 18:30:05"
+              （带时刻的是后面这种；空串 = 没设。一律走 norm_due() 归一）
       done    是否已完成
       order   排序用的分数，越小越靠前；完成时会被刷新到最末
       subs    子任务列表 [{"id":..., "text":..., "done":..., "done_at":...}, ...]
@@ -58,8 +59,9 @@
       timer   正在计时的起始时间戳；0 表示没在计时
       repeat  重复周期 ""/"daily"/"weekly"/"monthly"/"yearly"，空串=不重复
       done_at 完成时间戳；0 表示未完成。复盘面板的热力图靠它
-      created_at  创建时间戳，新建任务时自动写。卡片底下那行「建于 …」用它
-      remind_key  今天已经提醒过的那个日期；同一天不再重复弹提醒
+      created_at  创建时间戳，新建任务时自动写。卡片上「建于 …」用它（显示到秒）
+      remind_key  已经提醒过的标记：整天的按日期存、带时刻的按时刻串存
+                  （见 remind_key_for()，否则 09:00 弹过之后 18:00 那条就不弹了）
 
   数据文件顶层除了 tasks 还有两样东西：
       ui      界面状态（窗口位置、当前筛选、备份设置、提醒开关…）
@@ -180,6 +182,10 @@
   · 改"卡片上那行时间显示什么" → meta_line()（**唯一**出口）；开关是模块级
                       SHOW_TIME + set_show_time()，菜单在 build_more_menu。
                       改完记得两处一起对：block_h() 和 _draw_card 都调 meta_line
+  · 改"截止日期/时间怎么存怎么比" → 只有两个形状："YYYY-MM-DD" 和
+                      "YYYY-MM-DD HH:MM:SS"。归一 norm_due()、解析 parse_dt()、
+                      比较 due_point()/is_overdue()。**s2d() 永远只给"哪一天"**，
+                      别拿它去比时刻
   · 改子任务的显示顺序/收起规则 → visible_subs()（**唯一**出口）+
                       SUB_SHOW_DONE（摊开状态）+ hidden_sub_n()（收起条数）。
                       **block_h / _draw_subs / turn_sub_page / 拖拽折算四处
@@ -354,8 +360,11 @@
          同一套判断：order 小于 1e9 就当它是"第几位"的排序号，不认）。
 
        · 显示层（开关控制）
-         meta_line(t) 是**唯一**决定"卡片底下那行写什么"的地方：
-         未完成 →「建于 10-13」，已完成 →「10-13 → 10-15 · 2 天」。
+         meta_line(t) 是**唯一**决定"标题右端那行小字写什么"的地方：
+         未完成 →「建于 10-26 15:04:09」，已完成 →「完成 10-26 18:22:41」。
+         格式化只走 fmt_ts()（到秒；不是今年就带两位年）。
+         「用了多久」在 usage_text()，画在卡片底部那颗药丸上 —— 标题那行
+         放不下"两个时刻 + 一个时长"，而用户要的是精确时刻。
          开关是模块级 SHOW_TIME（ui.show_time 的镜像），切换走
          set_show_time()。
 
@@ -908,9 +917,24 @@ HELP_SECTIONS = [
     ("k", ("P0 立刻做",   "优先级和它的行动建议")),
     ("k", ("逾期 3 天",   "已经过了截止日期（红色）")),
     ("k", ("今天",        "今天到期")),
+    ("k", ("今天 18:30",  "今天到期，而且指定了时刻（过了点会变成「已过 2 小时」）")),
+    ("k", ("用时 2 天 3 小时", "已完成的任务从创建到划掉花了多久")),
     ("k", ("每天 / 每周", "重复任务：标记完成后会自动排下一次")),
     ("k", ("1时05分",     "累计投入的计时")),
     ("k", ("2/5",         "子任务完成进度")),
+
+    ("h2", "截止日期可以精确到时分秒"),
+    ("p",  "点卡片底部那颗「＋ 日期」，左边填日期、右边填时间 —— 时间留空就表示"
+           "「那一整天都算没到点」，跟以前一样。"),
+    ("n",  "· 填了时间之后：过了那个点就变红显示「已过 2 小时」；"
+           "没到点显示「今天 18:30」「明天 09:00」"),
+    ("n",  "· 到点提醒也跟着精确：填了时间的任务，到那个时刻才弹，"
+           "不会一早上就提醒你晚上 8 点的事"),
+    ("n",  "· 「今天」「明天」「本周末」三个按钮只改日期、保留你已经填的时间；"
+           "「现在」= 今天此刻（到秒）；「清除」把这个任务的截止时间整个去掉"),
+    ("n",  "· 重复任务的下一次会保持同一个时刻（每天 18:30 的活，明天还是 18:30）"),
+    ("n",  "· 只填时间不填日期也行 —— 默认按今天算"),
+    ("n",  "· 老数据里只有日期的任务不受影响：照旧按「过了那一整天」算逾期"),
 
     ("h2", "已完成的任务第二天就不在板面上了"),
     ("p",  "勾上完成的任务会留在象限里到当天结束，第二天自动收起 —— "
@@ -925,11 +949,16 @@ HELP_SECTIONS = [
     ("n",  "· 搜索时不受影响：搜到了照样显示，哪怕它已经收起"),
     ("n",  "· 想彻底清掉：右键空白处 →「清空已完成」，会先进回收站，还能撤销"),
 
-    ("h2", "创建时间 / 完成时间"),
-    ("p",  "新建任务会自动记下创建时间，勾完成会自动记下完成时间 —— 卡片底下那行"
-           "小字就是它们。复盘时看的就是「从写下来到划掉花了几天」。"),
-    ("n",  "· 未完成的写「建于 10-13」；已完成的写「10-13 → 10-15 · 2 天」"),
-    ("n",  "· 同一天创建、同一天划掉的写「10-15 创建并完成」，不会写「0 天」"),
+    ("h2", "创建时间 / 完成时间（精确到秒）"),
+    ("p",  "新建任务会自动记下创建时间，勾完成会自动记下完成时间，精确到秒 —— "
+           "卡片标题右端那行小字就是它们。复盘时既看得出「哪天」，也看得出"
+           "「几点几分几秒」。"),
+    ("n",  "· 未完成的写「建于 10-26 15:04:09」；已完成的写「完成 10-26 18:22:41」"),
+    ("n",  "· 用了多久写在卡片底部那颗灰色小药丸上（原来放「＋ 日期」的位置）："
+           "不到一分钟说到秒，一小时内说到分秒，再长说到小时 / 天"),
+    ("n",  "· 不是今年的会带上两位年（「25-12-31 08:00:00」），跨年时不至于看叉"),
+    ("n",  "· 同一天创建、同一天划掉的，两个时刻摆在一起自然看得出来，"
+           "不用另写一句「当天完成」"),
     ("n",  "· 不想看见可以关掉：顶栏「更多 ▾」→「卡片上显示时间」；"
            "关掉只是不显示，两个时间一样在记，随时能再打开"),
     ("n",  "· 以前建的老任务没有创建时间，会拿它的排序时间粗略顶上；"
@@ -963,11 +992,122 @@ def d2s(d):
     return d.strftime("%Y-%m-%d")
 
 
-def s2d(s):
-    try:
-        return datetime.datetime.strptime(s, "%Y-%m-%d").date()
-    except Exception:
+def parse_dt(s):
+    """把存盘里的日期字符串解析成 datetime。认两种形态：
+
+      · "2026-10-15"             —— 只有日期（老数据、以及"天"粒度的截止）
+      · "2026-10-15 18:30:05"    —— 带时分秒（用户在「＋ 日期」里填了时刻）
+    少写秒的 "2026-10-15 18:30" 也认。认不出返回 None。
+
+    **为什么还留着只给日期的 s2d()**：全项目几十处拿它的结果跟 date 比
+    （今天要做 / 已逾期 / 热力图 / 重复任务）。让它继续只返回"哪一天"，
+    这些地方一个都不用动；要看具体时刻的走 due_point()。两套并存，
+    改动面最小 —— 这是这次改日期精度能不影响别处的前提。
+    """
+    txt = str(s or "").strip()
+    if not txt:
         return None
+    for fmt in ("%Y-%m-%d %H:%M:%S", "%Y-%m-%d %H:%M", "%Y-%m-%d"):
+        try:
+            return datetime.datetime.strptime(txt, fmt)
+        except Exception:
+            pass
+    return None
+
+
+def due_has_time(s):
+    """这个日期串带不带具体时刻。
+
+    判据就是"有没有冒号" —— 比 parse 之后再比时分秒稳：用户真填了
+    "18:00" 就该按时刻算，哪怕它正好是整点。
+    """
+    return ":" in str(s or "")
+
+
+def norm_due(s):
+    """归一成存盘格式：带时刻的 "YYYY-MM-DD HH:MM:SS"，只有日期的 "YYYY-MM-DD"。
+    认不出返回 ""。**日期串在库里只有这一种形状**，别在别处自己拼。"""
+    dt = parse_dt(s)
+    if not dt:
+        return ""
+    if due_has_time(s):
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%Y-%m-%d")
+
+
+def s2d(s):
+    dt = parse_dt(s)
+    return dt.date() if dt else None
+
+
+def fmt_ts(ts, ref=None):
+    """时间戳 → 卡面上那行小字：'10-15 14:23:05'（不是今年就带两位年）。
+
+    ts<=0 表示判不出来（老数据没有 created_at，order 又不像时间戳），
+    返回 "" —— 调用方据此决定不画。
+    """
+    try:
+        ts = float(ts)
+    except (TypeError, ValueError):
+        return ""
+    if ts <= 0:
+        return ""
+    ref = ref or today()
+    try:
+        d = datetime.datetime.fromtimestamp(ts)
+    except Exception:
+        return ""
+    if d.year != ref.year:
+        return d.strftime("%y-%m-%d %H:%M:%S")
+    return d.strftime("%m-%d %H:%M:%S")
+
+
+def due_point(s):
+    """截止"时刻"：带时间的按那个时间点；只有日期的按当天 23:59:59（整天都算没到期）。
+
+    这样"是否逾期"只有一种判法（now > due_point），不用到处写两个分支。
+    """
+    dt = parse_dt(s)
+    if not dt:
+        return None
+    if not due_has_time(s):
+        dt = dt.replace(hour=23, minute=59, second=59, microsecond=0)
+    return dt
+
+
+def is_overdue(t):
+    """这条任务是不是已经逾期了。
+
+    · 带时刻的：过了那个时间点就算逾期（今天 09:00 的活，15:00 就该红）
+    · 只有日期的：过了那一整天（跟以前一样，今天到期的不算逾期）
+    """
+    if t.get("done") or not t.get("due"):
+        return False
+    p = due_point(t["due"])
+    return bool(p and datetime.datetime.now() > p)
+
+
+def remind_key_for(t):
+    """这条任务这次提醒该记的 key。
+
+    整天的按天（每天只弹一次）；带时刻的按那个时刻串（那次到点只弹一次）——
+    不然今天 09:00 的活提醒过之后，18:00 的那条就再也不弹了。
+    """
+    if due_has_time(t.get("due")):
+        return norm_due(t.get("due"))
+    return d2s(today())
+
+
+def due_label(s):
+    """给人看的日期串（菜单/提示里用）：带时刻的连时刻一起写，整点的省掉秒。"""
+    dt = parse_dt(s)
+    if not dt:
+        return ""
+    if not due_has_time(s):
+        return dt.strftime("%Y-%m-%d")
+    if dt.second:
+        return dt.strftime("%Y-%m-%d %H:%M:%S")
+    return dt.strftime("%Y-%m-%d %H:%M")
 
 
 def new_id():
@@ -1358,7 +1498,7 @@ def _norm_task(t):
         "title": str(t.get("title", "")),
         "note": str(t.get("note", "")),
         "p": _norm_p(p),
-        "due": t.get("due", "") if s2d(t.get("due", "")) else "",
+        "due": norm_due(t.get("due", "")),
         "done": bool(t.get("done")),
         "order": float(t.get("order", 0) or 0) or now_ts(),
         "subs": _norm_subs(t.get("subs")),
@@ -1416,19 +1556,32 @@ def next_date(due_s, repeat, base=None):
             d = add_months(d, 12)
         if d > T:
             break
+    # 原来带具体时刻的（每天 18:30 这种），下一次也保持同一时刻 ——
+    # 用户设的是"每天下班前"，不是"每天零点"。
+    dt0 = parse_dt(due_s)
+    if dt0 and due_has_time(due_s):
+        return "%s %s" % (d2s(d), dt0.strftime("%H:%M:%S"))
     return d2s(d)
 
 
-def done_day(t):
-    """任务是在哪一天完成的（复盘热力图要用）。
-    优先取 done_at；老数据没有这个字段，就用 order 兜底 —— 但只在
-    order 看着确实像时间戳时才用，免得把「第 3 位」这种排序号当成 1970 年。"""
+def done_ts(t):
+    """完成时间戳（秒级）；判断不出来返回 0。
+
+    优先 done_at；老数据没有这个字段就用 order 兜底，但只在 order 看着
+    确实像时间戳时才用 —— 免得把「第 3 位」这种排序号当成 1970 年。
+    """
     if not t.get("done"):
-        return ""
+        return 0.0
     ts = _norm_num(t.get("done_at"))
-    if ts <= 0:
-        o = _norm_num(t.get("order"))
-        ts = o if o > 1e9 else 0
+    if ts > 0:
+        return ts
+    o = _norm_num(t.get("order"))
+    return o if o > 1e9 else 0.0
+
+
+def done_day(t):
+    """任务是在哪一天完成的（复盘热力图要用）。"""
+    ts = done_ts(t)
     return ts_day(ts) if ts > 0 else ""
 
 
@@ -1462,41 +1615,63 @@ def short_day(s, ref):
 
 
 def meta_line(t, ref=None):
-    """卡片上「创建 / 完成时间」写什么。返回 "" = 不显示。
-
-    它现在贴在**标题第一行的右端**，不再单独占一行（用户要的："直接用小字
-    在标题后面就好，不需要多占一行"）。所以文案必须短 —— 标题本来就只宽
-    两百来像素，这里多一个字，标题就少放一个字。
+    """卡片标题右端那行小字：创建 / 完成时间，**精确到秒**。
 
     两种样子：
-      未完成 → 「建于 10-13」
-      已完成 → 「用时 2 天」（同一天创建并完成 → 「当天完成」）
+      未完成 → 「建于 10-15 14:23:05」
+      已完成 → 「完成 10-17 09:12:33」
 
-    复盘时要看的"效率"就是这个天数：一条任务从写下来到划掉花了几天，
-    比"这周完成了几条"更能说明问题。已完成的具体日期不写在卡面上 ——
-    数据里有（done_at），卡面宽度要留给标题。
+    用户的原话：「日期应该要精确到具体的小时分钟和秒，当前只有年月日」。
+    所以这里不再压缩成「建于 10-15」这种只到日期的写法 —— 复盘时要能看出
+    「这件事是上午建的还是晚上建的、是当天上午还是拖到半夜才划掉的」。
+    同一天建当天完，这两个时刻摆在一起自然就看得出来，不用再说"当天完成"。
 
-    没开显示（SHOW_TIME 假）时返回 ""。**注意这时候标题会拿回全部宽度**，
+    「用了多久」挪到卡片底部那颗药丸上（usage_text）—— 标题这一行放不下
+    两个时间点，而"什么时候建的 / 什么时候完的"才是用户要的精确时刻。
+
+    没开显示（SHOW_TIME 假）时返回 ""。**这时候标题会拿回全部宽度**，
     折行结果也跟着变，所以宽度只能走 _title_w()，别在别处另算一份。
     """
     if not SHOW_TIME:
         return ""
     ref = ref or today()
-    c_ts = created_ts(t)
-    # created_ts 判不出来时返回 0，**这时候不能拿它去 ts_day()** ——
-    # 那会算出 1970-01-01，卡片上就冒出「建于 70-01-01」。
-    c_s = ts_day(c_ts) if c_ts > 0 else ""
-    c_short = short_day(c_s, ref)
+    if t.get("done"):
+        d = fmt_ts(done_ts(t), ref)
+        # 老数据既没有 done_at 也没有像样的 order：只能退回"建于"
+        if d:
+            return "完成 " + d
+    c = fmt_ts(created_ts(t), ref)
+    return ("建于 " + c) if c else ""
+
+
+def usage_text(t):
+    """已完成的任务用了多久 —— 显示在底部徽章行（原来放「＋ 日期」那个位置）。
+
+    精度跟着量级走，别写「0 天」也别写「7200 秒」：
+      不到 1 分钟 → 用时 38 秒
+      不到 1 小时 → 用时 12 分 05 秒
+      不到 1 天   → 用时 3 小时 12 分
+      更长        → 用时 2 天 3 小时
+    两个时间戳都拿不到就返回 ""（那种卡片的这个位置就不画了）。
+    """
     if not t.get("done"):
-        return "建于 %s" % c_short if c_short else ""
-    dd = done_day(t)
-    if not dd:
-        return "建于 %s" % c_short if c_short else ""
-    if not c_s:
-        return "完成于 %s" % short_day(dd, ref)
-    if c_s == dd:
-        return "当天完成"
-    return "用时 %d 天" % (s2d(dd) - s2d(c_s)).days
+        return ""
+    a, b = created_ts(t), done_ts(t)
+    if a <= 0 or b <= 0 or b < a:
+        return ""
+    sec = int(round(b - a))
+    if sec < 60:
+        return "用时 %d 秒" % sec
+    if sec < 3600:
+        m, r = divmod(sec, 60)
+        return "用时 %d 分" % m if r == 0 else "用时 %d 分 %02d 秒" % (m, r)
+    if sec < 86400:
+        h, r = divmod(sec, 3600)
+        m = r // 60
+        return "用时 %d 小时" % h if m == 0 else "用时 %d 小时 %d 分" % (h, m)
+    d, r = divmod(sec, 86400)
+    h = r // 3600
+    return "用时 %d 天" % d if h == 0 else "用时 %d 天 %d 小时" % (d, h)
 
 
 def round_rect(cv, x1, y1, x2, y2, r, **kw):
@@ -2347,7 +2522,7 @@ class App:
         if f == "due":
             return (not t["done"]) and due is not None and due <= T
         if f == "overdue":
-            return (not t["done"]) and due is not None and due < T
+            return (not t["done"]) and is_overdue(t)
         if f == "running":
             return bool(t.get("timer")) and not t["done"]
         if f == "done":
@@ -2791,21 +2966,30 @@ class App:
                        fill="#ffffff", tags=(tag,))
         self.regions.append(("prio", t["id"], px1, ry - 2, px1 + bw, ry + 20))
 
-        # 截止日期：只有在「不跟计时器打架」时才画，否则宁可不画也不许溢出
+        # 截止日期：只有在「不跟计时器打架」时才画，否则宁可不画也不许溢出。
+        # 已完成的任务不再需要「＋ 日期」这个入口，这个位置改放**用了多久** ——
+        # 标题那行已经被两个精确时刻占满，放不下第三个数字了。
         dx = px1 + bw + 8
-        dtext, dcls = self._due_text(t)
-        if not dtext:
-            dtext, dcls = "+ 日期", "empty"
+        if t["done"]:
+            dtext, dcls = usage_text(t), "usage"
+        else:
+            dtext, dcls = self._due_text(t)
+            if not dtext:
+                dtext, dcls = "+ 日期", "empty"
         dwn = tkfont.Font(font=F_SMALL).measure(dtext) + 18
-        if dx + dwn <= coin_x - 8:
+        if dtext and dx + dwn <= coin_x - 8:
             fill = {"overdue": "#ffd9d9", "today": "#fff0ce",
-                    "soon": "#e4eeff", "empty": "#ffffff"}.get(dcls, "#ffffff")
+                    "soon": "#e4eeff", "empty": "#ffffff",
+                    "usage": "#efeee7"}.get(dcls, "#ffffff")
             ink = {"overdue": "#b4242a", "today": "#8a5200",
-                   "soon": "#2c5c9e", "empty": "#bdb6a9"}.get(dcls, C_INK2)
+                   "soon": "#2c5c9e", "empty": "#bdb6a9",
+                   "usage": "#7d766a"}.get(dcls, C_INK2)
             round_rect(cv, dx, ry, dx + dwn, ry + 18, 9, fill=fill, outline="", tags=(tag,))
             cv.create_text(dx + dwn / 2, ry + 9, text=dtext, font=F_SMALL,
                            fill=ink, tags=(tag,))
-            self.regions.append(("due", t["id"], dx, ry - 2, dx + dwn, ry + 20))
+            if not t["done"]:
+                # 「用时」是纯展示，不做成按钮（点它开日期对话框只会让人困惑）
+                self.regions.append(("due", t["id"], dx, ry - 2, dx + dwn, ry + 20))
 
     def _draw_subs(self, t, x, y, w, pr, tag):
         """画卡片里的子任务区。返回画完后的 y（方便以后往下面接着加东西）。
@@ -2996,21 +3180,38 @@ class App:
         return x1
 
     def _due_text(self, t):
+        """卡片底部那颗日期药丸写什么。返回 ("", "") 表示没设日期（或已完成）。
+
+        带时刻的会把时刻一起写出来（「今天 18:30」「10/15 18:30:05」），
+        而"逾期"按**时间点**判：今天 09:00 的活，15:00 就该红。
+        """
         if t["done"] or not t["due"]:
             return "", ""
         d = s2d(t["due"])
         if not d:
             return "", ""
+        dt = parse_dt(t["due"])
+        clock = ""
+        if dt and due_has_time(t["due"]):
+            clock = " %02d:%02d" % (dt.hour, dt.minute)
+            if dt.second:                       # 秒是用户自己填的才写出来
+                clock += ":%02d" % dt.second
         delta = (d - today()).days
-        if delta < 0:
+        if is_overdue(t):
+            if delta == 0:
+                # 今天已经过了那个时刻：说「已过 2 小时」比说「今天」有用得多
+                mins = int((datetime.datetime.now() - dt).total_seconds() // 60)
+                if mins < 60:
+                    return "已过 %d 分钟" % max(1, mins), "overdue"
+                return "已过 %d 小时" % (mins // 60), "overdue"
             return "逾期 %d 天" % (-delta), "overdue"
         if delta == 0:
-            return "今天", "today"
+            return ("今天" + clock) if clock else "今天", "today"
         if delta == 1:
-            return "明天", "soon"
+            return ("明天" + clock) if clock else "明天", "soon"
         if delta <= 7:
-            return "%d 天后" % delta, "soon"
-        return d.strftime("%m/%d"), ""
+            return ("%d 天后" % delta) + clock, "soon"
+        return d.strftime("%m/%d") + clock, ""
 
     def _wrap(self, text, font, maxw, maxlines):
         """按像素宽度折行。**规则本体在模块级 _wrap_lines**，这里只是转一下 ——
@@ -3027,7 +3228,7 @@ class App:
         all_ = self.tasks
         open_ = [t for t in all_ if not t["done"]]
         hot = [t for t in open_ if t["due"] and s2d(t["due"]) and s2d(t["due"]) <= T]
-        late = [t for t in open_ if t["due"] and s2d(t["due"]) and s2d(t["due"]) < T]
+        late = [t for t in open_ if is_overdue(t)]
         run = [t for t in open_ if t.get("timer")]
         arch = len(self.archived_done())
 
@@ -3749,7 +3950,8 @@ class App:
         if nxt:
             self.status.configure(
                 text="已完成「%s」，下一次已排到 %s"
-                     % (ellipsis(t["title"], 10), nxt["due"] or "（未设日期）"))
+                     % (ellipsis(t["title"], 10),
+                        due_label(nxt["due"]) or "（未设日期）"))
 
     def set_repeat(self, t, r):
         t["repeat"] = r if r in REPEAT_LABEL else ""
@@ -3793,10 +3995,17 @@ class App:
         self.redraw()
 
     def set_due(self, t, s):
+        """设置截止日期/时间。传 "" 清除。
+
+        存的形状只有两种（走 norm_due，别在这里自己拼）：
+          "2026-10-15"              —— 只有日期，整天都算没到点
+          "2026-10-15 18:30:05"     —— 带时刻，过了这个点就算逾期
+        """
         if s:
-            if not s2d(s):
+            val = norm_due(s)
+            if not val:
                 return                      # 非法格式直接忽略，保持原值
-            t["due"] = s
+            t["due"] = val
         else:
             t["due"] = ""
         self.save()
@@ -4177,30 +4386,72 @@ class App:
             m.grab_release()
 
     def ask_due(self, t):
+        """设置截止日期 —— **可以精确到时分秒**。
+
+        两格分开填：左边日期（必填）、右边时间（留空 = 整天截止）。
+        分两格而不是让用户背一个"2026-10-15 18:30:05"的完整格式：
+        绝大多数时候他只改日期，时间那格空着就行。
+        """
         dlg = tk.Toplevel(self.root)
-        dlg.title("设置截止日期")
+        dlg.title("设置截止时间")
         dlg.configure(bg=C_BG)
         dlg.resizable(False, False)
         self._follow_top(dlg)
         dlg.grab_set()
 
-        tk.Label(dlg, text="日期格式  2026-10-15", font=F_SMALL, bg=C_BG, fg=C_INK2)\
-            .pack(anchor="w", padx=18, pady=(16, 4))
-        ent = tk.Entry(dlg, font=F_BODY, width=22, bg=C_WHITE, relief="flat",
-                       highlightthickness=1, highlightbackground=C_LINE,
-                       highlightcolor="#c0ae8e", insertbackground=C_INK)
-        ent.pack(padx=18, ipady=5)
-        ent.insert(0, t.get("due", ""))
-        ent.focus_set()
-        ent.select_range(0, "end")
+        tk.Label(dlg, text="日期  2026-10-15        时间  18:30:05",
+                 font=F_SMALL, bg=C_BG, fg=C_INK2)\
+            .pack(anchor="w", padx=18, pady=(16, 2))
+        tk.Label(dlg, text="时间可以留空（= 那一整天都算没到点）。秒也可以不写。",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18, pady=(0, 6))
+
+        row = tk.Frame(dlg, bg=C_BG)
+        row.pack(fill="x", padx=18)
+        dent = tk.Entry(row, font=F_BODY, width=14, bg=C_WHITE, relief="flat",
+                        highlightthickness=1, highlightbackground=C_LINE,
+                        highlightcolor="#c0ae8e", insertbackground=C_INK)
+        dent.pack(side="left", ipady=5)
+        tk.Label(row, text="  ", font=F_SMALL, bg=C_BG).pack(side="left")
+        tent = tk.Entry(row, font=F_BODY, width=10, bg=C_WHITE, relief="flat",
+                        highlightthickness=1, highlightbackground=C_LINE,
+                        highlightcolor="#c0ae8e", insertbackground=C_INK)
+        tent.pack(side="left", ipady=5)
+
+        cur = parse_dt(t.get("due", ""))
+        if cur:
+            dent.insert(0, cur.strftime("%Y-%m-%d"))
+            if due_has_time(t.get("due")):
+                tent.insert(0, cur.strftime("%H:%M:%S"))
+        dent.focus_set()
+        dent.select_range(0, "end")
 
         err = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg="#c4262e")
         err.pack(anchor="w", padx=18)
 
-        def apply(val):
-            if val and not s2d(val):
-                err.configure(text="格式不对，应为 2026-10-15")
+        def apply(day=None, clock=None):
+            day = (dent.get() if day is None else day).strip()
+            clock = (tent.get() if clock is None else clock).strip()
+            clock = clock.replace("：", ":").replace("。", ":")
+            if not day and not clock:
+                self.set_due(t, "")
+                dlg.destroy()
                 return
+            if not day:
+                # 只填了时间 → 默认今天。不逼着用户再去补一遍日期。
+                day = d2s(today())
+                dent.delete(0, "end")
+                dent.insert(0, day)
+            if not s2d(day):
+                err.configure(text="日期格式不对，应为 2026-10-15")
+                dent.focus_set()
+                return
+            val = day
+            if clock:
+                if not parse_dt("%s %s" % (day, clock)):
+                    err.configure(text="时间格式不对，应为 18:30 或 18:30:05")
+                    tent.focus_set()
+                    return
+                val = "%s %s" % (day, clock)
             self.set_due(t, val)
             dlg.destroy()
 
@@ -4211,15 +4462,21 @@ class App:
         bar.pack(fill="x", padx=18, pady=(8, 4))
         self._btn(bar, "今天", lambda: quick(0)).pack(side="left", padx=(0, 6))
         self._btn(bar, "明天", lambda: quick(1)).pack(side="left", padx=(0, 6))
-        self._btn(bar, "本周末", lambda: quick((5 - today().weekday()) % 7 or 7)).pack(side="left", padx=(0, 6))
-        self._btn(bar, "清除", lambda: apply("")).pack(side="left")
+        self._btn(bar, "本周末", lambda: quick((5 - today().weekday()) % 7 or 7))\
+            .pack(side="left", padx=(0, 6))
+        self._btn(bar, "现在", lambda: apply(d2s(today()),
+                                          datetime.datetime.now().strftime("%H:%M:%S")))\
+            .pack(side="left", padx=(0, 6))
+        self._btn(bar, "清除", lambda: apply("", "")).pack(side="left")
 
         bar2 = tk.Frame(dlg, bg=C_BG)
         bar2.pack(fill="x", padx=18, pady=(4, 16))
-        self._btn(bar2, "确定", lambda: apply(ent.get().strip()), primary=True).pack(side="right")
+        self._btn(bar2, "确定", lambda: apply(), primary=True).pack(side="right")
         self._btn(bar2, "取消", dlg.destroy).pack(side="right", padx=(0, 8))
-        ent.bind("<Return>", lambda e: apply(ent.get().strip()))
+        for ent in (dent, tent):
+            ent.bind("<Return>", lambda e: apply())
 
+        dlg.bind("<Escape>", lambda e: dlg.destroy())
         dlg.update_idletasks()
         px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
         py = self.root.winfo_y() + 160
@@ -5256,8 +5513,7 @@ class App:
 
         # ---- 还没做完 ----
         open_n = len([t for t in self.tasks if not t["done"]])
-        late = len([t for t in self.tasks if not t["done"] and t["due"]
-                    and s2d(t["due"]) and s2d(t["due"]) < T])
+        late = len([t for t in self.tasks if is_overdue(t)])
         self._stats_title(pad, "还没做完")
         tk.Label(pad, text="未完成 %d 条%s"
                            % (open_n, ("，其中 %d 条已逾期" % late) if late else ""),
@@ -5286,9 +5542,16 @@ class App:
     # ============================================================ 到点提醒
 
     def due_reminders(self):
-        """今天该提醒的任务：今天到期或已经逾期、还没做完、今天还没提醒过。"""
+        """今天该提醒的任务。
+
+        · 只有日期（整天截止）→ 当天开始就提醒，跟以前一样
+        · 带具体时刻 → **到那个点才弹**（今天 18:30 的活，早上不该响）
+
+        已经提醒过的用 remind_key_for() 记着：整天的按天记，带时刻的按那个
+        时刻记 —— 否则今天 09:00 弹过之后，18:00 那条就再也不弹了。
+        """
         T = today()
-        key = d2s(T)
+        now = datetime.datetime.now()
         out = []
         for t in self.tasks:
             if t["done"] or not t["due"]:
@@ -5296,10 +5559,14 @@ class App:
             d = s2d(t["due"])
             if not d or d > T:                  # 还没到期的不打扰
                 continue
-            if t.get("remind_key") == key:      # 今天已经弹过就不再烦人
+            if due_has_time(t["due"]):
+                pt = due_point(t["due"])
+                if not pt or now < pt:          # 还没到那个点
+                    continue
+            if t.get("remind_key") == remind_key_for(t):
                 continue
             out.append(t)
-        out.sort(key=lambda t: (s2d(t["due"]), t["order"]))
+        out.sort(key=lambda t: (due_point(t["due"]) or datetime.datetime.min, t["order"]))
         return out
 
     def _maybe_remind(self, force=False):
@@ -5312,9 +5579,8 @@ class App:
         items = self.due_reminders()
         if not items:
             return 0
-        key = d2s(today())
         for t in items:
-            t["remind_key"] = key               # 先记上，免得反复弹
+            t["remind_key"] = remind_key_for(t)  # 先记上，免得反复弹
         self.show_reminder(items)
         self.save()
         return len(items)
@@ -5338,7 +5604,12 @@ class App:
         for t in items[:8]:
             d = s2d(t["due"])
             days = (d - T).days
-            tag = ("逾期 %d 天" % -days) if days < 0 else "今天到期"
+            if days < 0:
+                tag = "逾期 %d 天" % -days
+            elif is_overdue(t) or due_has_time(t["due"]):
+                tag = "到点"                    # 带时刻的：写"到点"比"今天到期"准
+            else:
+                tag = "今天到期"
             row = tk.Frame(pad, bg=C_BG, cursor="hand2")
             row.pack(fill="x", pady=2)
             tk.Label(row, text=tag, font=F_TINY,
@@ -5372,9 +5643,8 @@ class App:
 
     def _snooze_remind(self, w):
         """清掉"今天已提醒"的标记，下一个检查周期还会再弹一次。"""
-        key = d2s(today())
         for t in self.tasks:
-            if t.get("remind_key") == key and not t["done"]:
+            if not t["done"] and t.get("remind_key") == remind_key_for(t):
                 t["remind_key"] = ""
         self.save()
         try:

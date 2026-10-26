@@ -817,8 +817,12 @@ check("勾完成后自动记下了完成时间",
       ct["done_at"] > 0 and sticky.done_day(ct) != "", "实际 %r" % ct.get("done_at"))
 check("完成时间就是刚才（误差 5 秒内）", abs(ct["done_at"] - sticky.now_ts()) < 5)
 _line = sticky.meta_line(ct)
-check("已完成的任务上写清了用时几天（复盘看的就是它）",
-      _line == "用时 3 天", "实际 %r" % _line)
+check("已完成的任务写的是**完成的精确时刻**（到秒）",
+      _line.startswith("完成 ") and _line.count(":") == 2,
+      "实际 %r" % _line)
+check("「用了多久」挪到了底部那颗药丸上，而且精度跟着量级走",
+      sticky.usage_text(ct).startswith("用时 3 天"),
+      "实际 %r" % sticky.usage_text(ct))
 
 app.toggle_done(ct)                                  # 取消完成
 check("取消完成后 done_at 跟着清掉", ct["done_at"] == 0, "实际 %r" % ct["done_at"])
@@ -827,8 +831,10 @@ check("取消完成后又回到「建于 …」",
 
 ct["created_at"] = sticky.now_ts()                   # 同一天建、同一天完成
 app.toggle_done(ct)
-check("当天创建当天完成写「当天完成」，不写「0 天」",
-      sticky.meta_line(ct) == "当天完成", "实际 %r" % sticky.meta_line(ct))
+check("当天创建当天完成：两个时刻摆在一起就看得出是当天，不用另写一句话",
+      sticky.meta_line(ct).startswith("完成 ")
+      and sticky.usage_text(ct).startswith("用时 "),
+      "实际 %r / %r" % (sticky.meta_line(ct), sticky.usage_text(ct)))
 app.toggle_done(ct)
 
 # 老数据：没有 created_at 就回落到 order，但排序号不能当时间用
@@ -853,12 +859,12 @@ _mtxt = sticky.meta_line(ct)
 check("时间跟标题在同一行（画布上直接找得到这段小字）",
       _mtxt != "" and _mtxt in all_texts(app), "实际 %r" % _mtxt)
 _h_on = sticky.block_h(ct)
-check("时间**不额外占高度**（关掉显示后卡片不会变矮，只是标题能宽一点）",
-      sticky.block_h(dict(ct, done=False)) == _h_on or True)
 app.toggle_show_time()
 check("关掉显示后这一行不再产生内容", sticky.meta_line(ct) == "")
-check("关掉显示后卡片高度不变（时间本来就不占行）",
-      sticky.block_h(ct) == _h_on, "开 %s 关 %s" % (_h_on, sticky.block_h(ct)))
+_h_off = sticky.block_h(ct)
+check("时间仍然是**跟标题同一行**（关掉后只会因为标题变宽而变矮，不会少一整行）",
+      _h_off <= _h_on and _h_on - _h_off <= sticky.LINE_TITLE,
+      "开 %s 关 %s" % (_h_on, _h_off))
 app.redraw()
 root.update()
 check("关掉之后画布上也没有那段字了", _mtxt not in all_texts(app))
@@ -2916,6 +2922,155 @@ app.redraw()
 root.update()
 check("象限用例的测试任务已清理",
       all(app.task_by_id(x["id"]) is None for x in (_qa, _qb, _qd, _t6)))
+
+print("\n-- 时间精确到时分秒（创建/完成/截止）--")
+
+# 用户的原话：「日期应该要精确到具体的小时分钟和秒，当前只有年月日。」
+# 两件事：① 卡片上"建于/完成"要带时刻；② 截止日期也能填时间。
+
+# ---- 解析与归一 ----
+check("parse_dt 三种写法都认（只有日期 / 到分 / 到秒）",
+      all(sticky.parse_dt(x) is not None for x in
+          ("2026-10-15", "2026-10-15 18:30", "2026-10-15 18:30:05")))
+check("认不出的返回 None（不能抛异常）",
+      sticky.parse_dt("不是日期") is None and sticky.parse_dt("") is None
+      and sticky.parse_dt(None) is None)
+check("带了时刻就归一成「时:分:秒」",
+      sticky.norm_due("2026-10-15 18:30") == "2026-10-15 18:30:00",
+      "实际 %r" % sticky.norm_due("2026-10-15 18:30"))
+check("只有日期的不硬塞一个 00:00:00",
+      sticky.norm_due("2026-10-15") == "2026-10-15")
+check("非法日期归一成空串", sticky.norm_due("乱写") == "")
+check("s2d 只取日期部分（老代码靠它比大小，不能被带时刻的串弄坏）",
+      sticky.s2d("2026-10-15 18:30:05") == datetime.date(2026, 10, 15))
+check("due_has_time 认冒号", sticky.due_has_time("2026-10-15 18:30")
+      and not sticky.due_has_time("2026-10-15"))
+
+# ---- 卡片上那行小字到秒 ----
+_ft = sticky.fmt_ts(sticky.now_ts())
+check("fmt_ts 给到秒（形如 10-26 15:04:09）",
+      len(_ft) == 14 and _ft[2] == "-" and _ft[5] == " " and _ft.count(":") == 2,
+      "实际 %r" % _ft)
+check("时间戳是 0（判不出来）就返回空串，不去算 1970 年", sticky.fmt_ts(0) == "")
+_un = mk("时间精确到秒的未完成")
+check("未完成的卡片写「建于 时:分:秒」",
+      sticky.meta_line(_un).startswith("建于 ") and sticky.meta_line(_un).count(":") == 2,
+      "实际 %r" % sticky.meta_line(_un))
+_fin = mk("时间精确到秒的已完成", done=True,
+          created_at=sticky.now_ts() - 7265, done_at=sticky.now_ts())
+check("已完成的卡片写「完成 时:分:秒」",
+      sticky.meta_line(_fin).startswith("完成 ") and sticky.meta_line(_fin).count(":") == 2,
+      "实际 %r" % sticky.meta_line(_fin))
+
+# ---- 用时多久（原来在标题行，现在挪到卡片底部那颗药丸）----
+_ub = 1793000000.0
+
+
+def _usage(sec):
+    return sticky.usage_text({"id": "x", "title": "x", "note": "", "p": 0, "due": "",
+                              "done": True, "order": _ub + sec, "subs": [],
+                              "logs": {}, "timer": 0, "repeat": "",
+                              "done_at": _ub + sec, "created_at": _ub})
+
+
+check("不到 1 分钟说到秒", _usage(38) == "用时 38 秒", "实际 %r" % _usage(38))
+check("不到 1 小时说到分和秒", _usage(725) == "用时 12 分 05 秒",
+      "实际 %r" % _usage(725))
+check("不到 1 天说到小时和分", _usage(11520) == "用时 3 小时 12 分",
+      "实际 %r" % _usage(11520))
+check("更长就说到天和小时", _usage(183600) == "用时 2 天 3 小时",
+      "实际 %r" % _usage(183600))
+check("没完成的任务没有「用时」", sticky.usage_text(_un) == "")
+
+# ---- 截止日期可以带时刻 ----
+app.set_filter("all")
+_ndt = mk("带时刻的截止")
+
+_future = (datetime.datetime.now() + datetime.timedelta(hours=2))\
+    .strftime("%Y-%m-%d %H:%M:%S")
+_past_today = "%s 00:00:01" % datetime.date.today().isoformat()
+if datetime.datetime.now().strftime("%H:%M:%S") < "00:00:03":
+    _past_today = (datetime.datetime.now() - datetime.timedelta(minutes=1))\
+        .strftime("%Y-%m-%d %H:%M:%S")
+
+
+def _due_task(s):
+    return {"id": "x", "title": "x", "note": "", "p": 0, "due": s, "done": False,
+            "order": 0, "subs": [], "logs": {}, "timer": 0, "repeat": "",
+            "done_at": 0, "created_at": 0, "remind_key": ""}
+
+
+app.set_due(_ndt, _future)
+check("存盘里带着时分秒", _ndt["due"] == sticky.norm_due(_future), "实际 %r" % _ndt["due"])
+check("只有日期的还是老格式（老数据一个字不变）", sticky.norm_due("2026-10-15") == "2026-10-15")
+
+check("带时刻、已经过点 → 算逾期", sticky.is_overdue(_due_task(_past_today)))
+check("带时刻、还没到点 → 不算逾期", not sticky.is_overdue(_due_task(_future)))
+check("只有日期、今天 → 不算逾期（那一整天都还没过完）",
+      not sticky.is_overdue(_due_task(datetime.date.today().isoformat())))
+_y = datetime.date.today() - datetime.timedelta(days=1)
+check("只有日期、昨天 → 算逾期",
+      sticky.is_overdue(_due_task(_y.isoformat())))
+check("已完成的任务不参与逾期判断",
+      not sticky.is_overdue(dict(_due_task(_past_today), done=True)))
+
+_ftxt, _fcls = app._due_text(_due_task(_future))
+check("药丸上把时刻也写出来", _ftxt.count(":") >= 1, "实际 %r" % _ftxt)
+check("还没到点 → 黄/蓝色，不是红的", _fcls in ("today", "soon"), "实际 %r" % _fcls)
+_ptxt, _pcls = app._due_text(_due_task(_past_today))
+check("今天已过点 → 红色，而且说明「已过 X」",
+      _pcls == "overdue" and _ptxt.startswith("已过"), "实际 %r/%r" % (_ptxt, _pcls))
+
+# ---- 提醒：带时刻的到点才弹 ----
+_r_fut = mk("提醒：还没到点", due=_future, remind_key="")
+_r_past = mk("提醒：已经过点", due=_past_today, remind_key="")
+_names = [t["title"] for t in app.due_reminders()]
+check("带时刻但还没到点的，现在不打扰", "提醒：还没到点" not in _names)
+check("带时刻已经过点的，会提醒", "提醒：已经过点" in _names)
+check("提醒 key 记的是那个时刻串（不是今天的日期）",
+      sticky.remind_key_for(_r_past) == sticky.norm_due(_r_past["due"]),
+      "实际 %r" % sticky.remind_key_for(_r_past))
+_r_past["remind_key"] = sticky.remind_key_for(_r_past)
+check("同一个时刻不会反复弹",
+      "提醒：已经过点" not in [t["title"] for t in app.due_reminders()])
+
+# ---- 重复任务：下一次保持同一个时刻 ----
+_nd = sticky.next_date("%s 18:30:00" % _y.isoformat(), "daily")
+check("重复任务的下一次保留时刻", _nd.endswith("18:30:00"), "实际 %r" % _nd)
+check("只有日期的重复任务还是只给日期",
+      len(sticky.next_date(_y.isoformat(), "daily")) == 10,
+      "实际 %r" % sticky.next_date(_y.isoformat(), "daily"))
+
+# ---- 卡面：已完成的那颗药丸换成「用时」 ----
+_dc = mk("已完成卡的用时药丸", done=True,
+         created_at=sticky.now_ts() - 7200, done_at=sticky.now_ts())
+app.redraw()
+root.update()
+check("已完成卡片不再登记日期热区（那个位置让给用时了）",
+      region(app, "due", _dc["id"]) is None)
+check("已完成卡片上真的写着用时",
+      any(x.startswith("用时 ") for x in all_texts(app)),
+      "实际 %s" % [x for x in all_texts(app) if x.startswith("用时")][:3])
+check("未完成卡片上仍然有「＋ 日期」这个入口",
+      region(app, "due", _ndt["id"]) is not None)
+
+# ---- 存盘往返：带时刻的日期读回来一个字不差 ----
+app.save()
+_rd = json.load(open(sticky.DATA_FILE, encoding="utf-8"))
+_one = [t for t in _rd["tasks"] if t["id"] == _ndt["id"]][0]
+check("带时刻的截止日期原样存进 json", _one["due"] == _ndt["due"],
+      "实际 %r" % _one["due"])
+check("读回来仍然是同一个时刻", sticky.parse_dt(sticky.norm_due(_one["due"])) is not None)
+
+app.tasks = [t for t in app.tasks
+             if t["id"] not in {_un["id"], _fin["id"], _ndt["id"], _r_fut["id"],
+                                _r_past["id"], _dc["id"]}]
+app.save()
+app.redraw()
+root.update()
+check("时间精度用例的测试任务已清理",
+      all(app.task_by_id(x["id"]) is None
+          for x in (_un, _fin, _ndt, _r_fut, _r_past, _dc)))
 
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
