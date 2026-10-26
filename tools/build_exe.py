@@ -78,7 +78,12 @@ EXCLUDES = [
     "asyncio", "concurrent", "multiprocessing",
 
     # ③ 数据库 / 结构化格式：数据就是一份明文 json，不碰这些
-    "sqlite3", "xml", "html", "csv",
+    #    ★ 这里排的是"当前用不到"的模块。往 sticky.pyw 里新加 import 之后，
+    #      一定要回头看一眼这一行有没有撞上 —— 自测跑的是源码（模块都在），
+    #      打包版才按这份列表裁剪，撞上的表现是**双击 exe 窗口根本不出现**，
+    #      而且没有控制台、连报错都看不到（第 21 项加 `import csv` 时就这么炸过）。
+    #      main() 开头的 check_excludes() 会自动拦这种情况。
+    "sqlite3", "xml", "html",
 
     # ④ 科学计算 / 图像：本机没装，装了也用不上
     #    （Pillow 只在 tools/make_icon.py 生成图标那一步用）
@@ -196,9 +201,31 @@ def write_readme(version):
     return path
 
 
+def check_excludes():
+    """EXCLUDES 里不许排掉源码真正 import 的模块。
+
+    为什么要有这一道：自测跑的是源码（标准库都在），打包版才按 EXCLUDES 裁剪。
+    一旦排错，表现是双击 exe **窗口根本不出现** —— 没有控制台，连
+    ModuleNotFoundError 都看不到，只能靠猜。所以在这里提前拦住。
+    """
+    with open(SRC, encoding="utf-8") as f:
+        src = f.read()
+    mods = set()
+    for line in src.splitlines():
+        m = re.match(r"\s*(?:import|from)\s+([A-Za-z_][\w.]*)", line)
+        if m:
+            mods.add(m.group(1).split(".")[0])
+    bad = sorted(mods & set(EXCLUDES))
+    if bad:
+        raise SystemExit(
+            "build_exe.py 的 EXCLUDES 排掉了源码要用的模块：%s\n"
+            "把它们从 EXCLUDES 里去掉再打包。" % ", ".join(bad))
+
+
 def main():
     if not os.path.exists(SRC):
         raise SystemExit("找不到 %s" % SRC)
+    check_excludes()
 
     version = read_version()
     log("=" * 58)
