@@ -2567,7 +2567,23 @@ check("帮助里写了备注框的回车用法",
       "正文里没提 Shift+回车")
 check("帮助里说了就地编辑的 Esc 是取消",
       "Esc" in body and "取消" in body)
-check("讲了拖拽能做哪几件事", "拖拽能做五件事" in body)
+check("讲了拖拽能做哪几件事（含拖进垃圾桶删除）",
+      "拖拽能做六件事" in body and "垃圾桶" in body,
+      "含六件事=%s 含垃圾桶=%s" % ("拖拽能做六件事" in body, "垃圾桶" in body))
+check("★ 帮助里讲了删除的三条路（右键 / 拖垃圾桶 / Delete）",
+      "删除一条任务：三种方式" in body and "Delete" in body
+      and "回收站" in body and "拖到垃圾桶" in body and "右下角" in body)
+check("帮助里讲了回收站怎么捞回来", "回收站：删错了怎么捞回来" in body)
+check("帮助里讲了计时和统计面板看什么", "计时：时间到底花在哪了" in body)
+check("帮助里讲了重复任务", "重复任务：每天" in body)
+check("帮助里讲了备份与恢复", "备份与恢复" in body)
+check("帮助里讲了「拖成子任务会丢什么」",
+      "把一条任务拖成子任务，会丢什么" in body)
+check("快捷键表里有 Delete",
+      any(isinstance(v, tuple) and v[0] == "Delete"
+          for k, v in sticky.HELP_SECTIONS if k == "k"),
+      "实际有 %r" % [v[0] for k, v in sticky.HELP_SECTIONS
+                     if k == "k" and isinstance(v, tuple)][-4:])
 check("讲了快捷键", "F1" in body and "Ctrl + Z" in body)
 check("讲了数据存在哪", "tasks.json" in body)
 check("文案里的样式只有约定那几种",
@@ -3824,6 +3840,300 @@ finally:
     app.load()
     app.redraw()
     root.update()
+
+print("\n-- 删除：拖到垃圾桶 / 按 Delete 键（不用非得右键） --")
+
+# 用户的原话：「当前删除任务的形式只有右键，应该有拖拽删除，比如一个垃圾桶的
+# 图标或者一个区域，拖拽卡片到图标或区域就直接删除到回收站，然后也应该支持
+# delete 键删除。」
+#
+# 三条路都通到同一个 delete_task()（它自己负责进回收站 + 挂撤销），
+# 所以「删错了能不能救」处处一致，不用各写一套。
+
+
+def Ept(a, cx, cy):
+    """按**画布坐标**造事件（控件坐标 = 画布坐标 − 当前滚动量）。
+
+    这几个用例要拿 _trash_rect 的坐标去驱动事件，而那是画布坐标；
+    直接把画布坐标当 e.x / e.y 用，画布一旦滚动过就会差一个偏移量。
+    """
+    return E(int(cx - a.cv.canvasx(0)), int(cy - a.cv.canvasy(0)))
+
+
+def _poly_fills(a, tag):
+    return [a.cv.itemcget(i, "fill") for i in a.cv.find_withtag(tag)
+            if a.cv.type(i) == "polygon"]
+
+
+def _card_blank(a, tid):
+    """在卡片上找一块**什么都没有**的地方（避开勾选框、标题、备注、药丸、子任务行）。
+
+    「单击整卡 = 选中」这条只有落在 card 兜底区才成立：卡片上任何一个小控件
+    都比它先命中（regions 倒序查找）。写死成"左上加 30 像素"会正好压到勾选框上
+    （踩过一次：那次单击其实把任务勾成了完成，用例报的是"没选中"）。
+    """
+    r = region(a, "card", tid)
+    if not r:
+        return None
+    others = [(x1, y1, x2, y2) for (k, _i, x1, y1, x2, y2) in a.regions
+              if k != "card"]
+    for x, y in ((r[2] - 14, r[3] - 8), (r[2] - 14, (r[1] + r[3]) / 2.0),
+                 (r[0] + 14, r[3] - 8)):
+        if not any(x1 <= x <= x2 and y1 <= y <= y2 for (x1, y1, x2, y2) in others):
+            return x, y
+    return None
+
+
+app.cv.yview_moveto(0)
+app.redraw()
+root.update()
+
+# ---- A：垃圾桶只在拖起来之后才画 ----
+app._hide_trash()
+check("平时不画垃圾桶（不白占右下角那块地方）",
+      not app.cv.find_withtag("trashbin"))
+
+_dt1 = mk("拖去扔掉的任务")
+app.save()
+app.redraw()
+root.update()
+_r = region(app, "card", _dt1["id"])
+app.on_press(Ept(app, _r[0] + 20, _r[1] + 20))
+app.on_motion(Ept(app, _r[0] + 26, _r[1] + 32))        # 先真的动起来
+root.update()
+_TR = app._trash_rect
+check("★ 一拖起来，右下角就亮出垃圾桶",
+      bool(app.cv.find_withtag("trashbin")) and _TR is not None,
+      "实际 %r" % (_TR,))
+check("垃圾桶贴在可视区的右下角（滚动时跟着眼睛走）",
+      _TR is not None
+      and abs(_TR[2] - (app.cv.winfo_width() - sticky.TRASH_PAD)) <= 1
+      and abs(_TR[3] - (app.cv.canvasy(0) + app.cv.winfo_height()
+                        - sticky.TRASH_PAD)) <= 1,
+      "实际 %r，画布 %dx%d" % (_TR, app.cv.winfo_width(), app.cv.winfo_height()))
+app.on_release(Ept(app, _r[0] + 26, _r[1] + 32))
+check("松手之后垃圾桶自己收回去", not app.cv.find_withtag("trashbin"))
+app.tasks.remove(_dt1)
+app.save()
+app.redraw()
+
+# ---- B：拖进垃圾桶 = 进回收站 ----
+_tb = mk("这张要扔掉")
+app.save()
+app.redraw()
+root.update()
+_r = region(app, "card", _tb["id"])
+app.on_press(Ept(app, _r[0] + 20, _r[1] + 20))
+app.on_motion(Ept(app, _r[0] + 26, _r[1] + 32))
+_TR = app._trash_rect
+_tcx, _tcy = (_TR[0] + _TR[2]) / 2.0, (_TR[1] + _TR[3]) / 2.0
+app.on_motion(Ept(app, _tcx, _tcy))
+check("拖到垃圾桶上，状态栏说清「松手会移进回收站」",
+      "松手" in app.status.cget("text") and "回收站" in app.status.cget("text"),
+      "实际 %r" % app.status.cget("text"))
+check("★ 垃圾桶被点亮（红底，知道落点生效了）",
+      "#ffe2e4" in _poly_fills(app, "trashbin"),
+      "实际 %r" % _poly_fills(app, "trashbin"))
+# 卡片被拖到垃圾桶上方时是压在它身上的（drag 里一直 tag_raise"cardXXX"），
+# 垃圾桶不跟着抬到最上层就等于没有 —— 用户看到的是卡片，看不到"松手会删"。
+_order = app.cv.find_all()
+_ti = max(_order.index(i) for i in app.cv.find_withtag("trashbin"))
+_ci = max(_order.index(i) for i in app.cv.find_withtag("card" + _tb["id"]))
+check("★ 垃圾桶压在卡片之上（不然拖过去就被卡片盖住了）", _ti > _ci,
+      "垃圾桶 idx=%d / 卡片 idx=%d" % (_ti, _ci))
+_n_before = len(app.tasks)
+app.on_release(Ept(app, _tcx, _tcy))
+check("★ 松手 → 卡片从板面上消失",
+      len(app.tasks) == _n_before - 1 and app.task_by_id(_tb["id"]) is None)
+check("★ 但它进了回收站，不是凭空没了",
+      bool(app.trash) and app.trash[-1]["task"]["id"] == _tb["id"],
+      "回收站 %d 条" % len(app.trash))
+check("删完垃圾桶立刻收起", not app.cv.find_withtag("trashbin"))
+check("拖拽删除也给了「撤销」", app._undo_cb is not None)
+app._do_undo()
+check("Ctrl+Z 能把它捞回来", app.task_by_id(_tb["id"]) is not None,
+      "任务数 %d" % len(app.tasks))
+app.tasks.remove(_tb)
+app.save()
+app.redraw()
+
+# ---- C：拖到垃圾桶上又拖出来 → 不能删 ----
+_tb2 = mk("拖过又反悔的")
+app.save()
+app.redraw()
+root.update()
+_r = region(app, "card", _tb2["id"])
+app.on_press(Ept(app, _r[0] + 20, _r[1] + 20))
+app.on_motion(Ept(app, _r[0] + 26, _r[1] + 32))
+_TR = app._trash_rect
+app.on_motion(Ept(app, (_TR[0] + _TR[2]) / 2.0, (_TR[1] + _TR[3]) / 2.0))
+check("拖进垃圾桶时 drag 上记了 trash 标记", app.drag.get("trash") is True)
+app.on_motion(Ept(app, _r[0] + 20, _r[1] + 20))        # 又拖回原处
+check("★ 拖出来之后标记清掉了（只是路过不算数）",
+      app.drag.get("trash") is False)
+check("垃圾桶也随之熄灯", "#ffe2e4" not in _poly_fills(app, "trashbin"),
+      "实际 %r" % _poly_fills(app, "trashbin"))
+app.on_release(Ept(app, _r[0] + 20, _r[1] + 20))
+check("★ 松手在板面里 → 任务还在", app.task_by_id(_tb2["id"]) is not None)
+app.tasks.remove(_tb2)
+app.save()
+app.redraw()
+
+# ---- D：子任务也能拖去删（只删那一条） ----
+_st = mk("带子任务的任务", subs=[
+    {"id": "S1", "text": "要删掉的子任务", "done": False},
+    {"id": "S2", "text": "留着的子任务", "done": False}])
+app.save()
+app.redraw()
+root.update()
+_rows = app._sub_rows.get(_st["id"]) or []
+_row = [x for x in _rows if x[0] == "S1"]
+check("子任务行画出来了（下面几个用例的地基）", bool(_row), "实际 %r" % (_rows,))
+if _row:
+    _sy = (_row[0][1] + _row[0][2]) / 2.0
+    _cr = region(app, "card", _st["id"])
+    app.on_press(Ept(app, _cr[0] + 40, _sy))
+    app.on_motion(Ept(app, _cr[0] + 46, _sy + 12))
+    _TR = app._trash_rect
+    app.on_motion(Ept(app, (_TR[0] + _TR[2]) / 2.0, (_TR[1] + _TR[3]) / 2.0))
+    check("子任务拖到垃圾桶上，提示的是「删掉子任务」",
+          "子任务" in app.status.cget("text"),
+          "实际 %r" % app.status.cget("text"))
+    app.on_release(Ept(app, (_TR[0] + _TR[2]) / 2.0, (_TR[1] + _TR[3]) / 2.0))
+    check("★ 只删掉那一条子任务，父任务还好好在板面上",
+          app.task_by_id(_st["id"]) is not None
+          and [s["id"] for s in sticky.subs_of(_st)] == ["S2"],
+          "实际 %r" % ([s["id"] for s in sticky.subs_of(_st)],))
+    check("子任务被拖去删也有撤销（整份快照那一路）",
+          app._undo_cb is not None)
+    app._do_undo()
+    # 整份快照撤销是把你理解的"当时的任务列表"整个换掉，所以 _st 这个引用
+    # 已经成了孤儿 —— 要拿 id 重新取一次，别对着旧对象断言
+    _st2 = app.task_by_id(_st["id"])
+    check("撤销之后两条子任务都回来了",
+          _st2 is not None and len(sticky.subs_of(_st2)) == 2,
+          "实际 %r" % (len(sticky.subs_of(_st2)) if _st2 else None,))
+    if _st2 is not None:
+        app.tasks.remove(_st2)
+    app.save()
+    app.redraw()
+
+# ---- E：Delete 键 ----
+_dk = mk("按 Delete 删掉的")
+app.save()
+app.redraw()
+root.update()
+_app_focus = app.root.focus_get
+check("卡片上找到一块空白（下面几个单击都点这儿）", _card_blank(app, _dk["id"]) is not None)
+_bx, _by = _card_blank(app, _dk["id"]) or (0, 0)
+app.on_press(Ept(app, _bx, _by))
+app.on_release(Ept(app, _bx, _by))
+check("单击卡片 = 选中它（Delete 的下手对象就是这张）",
+      app.sel_tid == _dk["id"], "实际 %r" % app.sel_tid)
+check("选中之后状态栏告诉你怎么删",
+      "Delete" in app.status.cget("text"),
+      "实际 %r" % app.status.cget("text"))
+_rects = [i for i in app.cv.find_withtag("card" + _dk["id"])
+          if app.cv.type(i) == "rectangle"]
+check("★ 选中的卡片描边加深一道（看得出是哪张）",
+      any(app.cv.itemcget(i, "outline") == sticky.C_INK for i in _rects),
+      "实际 %r" % [app.cv.itemcget(i, "outline") for i in _rects])
+
+# 焦点在输入框里时，Delete 是删字符，绝不能删任务
+app.root.focus_get = lambda *a, **k: app.entry
+try:
+    _n0 = len(app.tasks)
+    check("★ 正在输入框里打字时，Delete 不删任务（让给输入框删字）",
+          app.on_delete_key(None) is None and len(app.tasks) == _n0,
+          "任务数 %d → %d" % (_n0, len(app.tasks)))
+finally:
+    app.root.focus_get = _app_focus
+
+app.root.focus_get = lambda *a, **k: None      # 焦点在板面上
+try:
+    app.on_delete_key(None)
+finally:
+    app.root.focus_get = _app_focus
+check("★ Delete 把选中的卡片移进回收站",
+      app.task_by_id(_dk["id"]) is None
+      and app.trash[-1]["task"]["id"] == _dk["id"],
+      "任务数 %d / 回收站 %d" % (len(app.tasks), len(app.trash)))
+check("删完自动取消选中（不然 Delete 会指着个不存在的 id）",
+      app.sel_tid == "", "实际 %r" % app.sel_tid)
+check("Delete 删的也能 Ctrl+Z", app._undo_cb is not None)
+app._do_undo()
+check("撤销之后回来了", app.task_by_id(_dk["id"]) is not None)
+app.tasks.remove(_dk)
+app.save()
+app.redraw()
+
+# ---- F：没选中时，删鼠标指着的那张 ----
+_hm = mk("鼠标指着就能删")
+app.save()
+app.redraw()
+root.update()
+app.select_task("")
+_r = region(app, "card", _hm["id"])
+app.on_hover(Ept(app, _r[0] + 30, _r[1] + 30))
+check("鼠标指着卡片时记下了它（Delete 的备用目标）",
+      app.hover_tid == _hm["id"], "实际 %r" % app.hover_tid)
+app.root.focus_get = lambda *a, **k: None
+try:
+    app.on_delete_key(None)
+finally:
+    app.root.focus_get = _app_focus
+check("★ 没选中、但鼠标指着 → Delete 也删它",
+      app.task_by_id(_hm["id"]) is None)
+app._do_undo()
+
+# ---- G：点空白处取消选中 ----
+app.select_task(_hm["id"])
+check("（先把它选中）", app.sel_tid == _hm["id"])
+app.on_press(Ept(app, app.cv.winfo_width() - 3, 3))
+check("点板面空白处 = 取消选中", app.sel_tid == "",
+      "实际 %r" % app.sel_tid)
+app.on_hover(Ept(app, app.cv.winfo_width() - 3, 3))
+check("鼠标也离开卡片了（hover 目标跟着清空）", not app.hover_tid,
+      "实际 %r" % app.hover_tid)
+check("什么都没指着的时候按 Delete，只提示不动手",
+      app.on_delete_key(None) == "break"
+      and app.task_by_id(_hm["id"]) is not None
+      and "鼠标" in app.status.cget("text"),
+      "状态栏 %r" % app.status.cget("text"))
+app.tasks.remove(_hm)
+app.save()
+app.redraw()
+root.update()
+
+# ---- H：选中的那张被筛掉之后，Delete 不许误删看不见的卡 ----
+_hs = mk("选中后被筛掉的")
+app.save()
+app.redraw()
+root.update()
+_bx2, _by2 = _card_blank(app, _hs["id"]) or (0, 0)
+app.on_press(Ept(app, _bx2, _by2))
+app.on_release(Ept(app, _bx2, _by2))
+check("（先把它选中）", app.sel_tid == _hs["id"], "实际 %r" % app.sel_tid)
+app.q = "zzz-不会命中的词"
+app.redraw()
+root.update()
+check("★ 搜索/筛选之后看不见了，就自动取消选中",
+      app.sel_tid == "", "实际 %r" % app.sel_tid)
+app.root.focus_get = lambda *a, **k: None
+try:
+    _n_h = len(app.tasks)
+    app.on_delete_key(None)
+finally:
+    app.root.focus_get = _app_focus
+check("★ 这时候按 Delete 不会误删看不见的卡（最危险的形态）",
+      app.task_by_id(_hs["id"]) is not None and len(app.tasks) == _n_h,
+      "任务数 %d → %d" % (_n_h, len(app.tasks)))
+app.q = ""
+app.filter = "all"
+app.tasks.remove(_hs)
+app.save()
+app.redraw()
+root.update()
 
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
