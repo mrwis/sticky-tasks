@@ -205,6 +205,11 @@
   · 改"导出 / 按月统计" → export_rows()（CSV 的行，纯函数）+ export_csv()
                       （写文件，**编码必须 utf-8-sig**，否则 Excel 中文乱码）+
                       month_stats()（按月口径，面板和自测共用）
+  · 改"怎么删任务（右键 / 拖垃圾桶 / Delete 键）" → 三条路都指 delete_task()；
+                      垃圾桶是 _show_trash/_paint_trash/_over_trash/_hide_trash
+                      四个方法，拖拽里的判据在 on_motion 的 "垃圾桶优先" 那一段。
+                      见「机制⑰」。**子任务拖进垃圾桶**是另一条路：
+                      _delete_sub_by_drag()（整份快照撤销）
   · 改"提醒弹什么 / 什么时候弹" → due_reminders()（挑哪些）+ reminder_head()
                       （顶上那句话）。**程序没开就不会响**，所以配套有
                       autostart_get/set/command（只写 HKCU 的 Run 项）
@@ -226,7 +231,7 @@
 
 
 ----------------------------------------------------------------
-  十六个值得单独弄懂的小机制
+  十七个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -475,6 +480,30 @@
 
     入口：点象限标题（regions 里的 qhead）、标题右键（改名 / 在后面加一格 /
     删这一格 / 恢复默认）、「更多 ▾ → 象限设置…」。三个入口都指 `ask_quads()`。
+
+  ⑰ 删除有三条路，但只有一个出口（delete_task / 垃圾桶 / Delete 键）
+    用户原来的抱怨是「删除任务的形式只有右键」。三条路都归到 `delete_task()`：
+    它自己负责移进回收站 + 挂撤销，所以「删错了能不能救」处处一致。
+
+      · 右键菜单「删除（进回收站）」
+      · 拖到垃圾桶：`on_motion` 里 `_over_trash(cx, cy)` 命中就置 `d["trash"]`、
+        清掉 nest/target/idx，`on_release` **最先**处理它（后面那些落点逻辑
+        一旦跑起来数据就被改了，再删等于删错东西）
+      · Delete 键：`on_delete_key()`，目标 = `sel_tid`（单击选中）或
+        `hover_tid`（鼠标指着哪张）；**焦点在 Entry/Text 里直接 return**，
+        那时 Delete 是删字符，抢过来删任务是最不可接受的手滑
+
+    ★ 三个坑：
+      · 垃圾桶**画在画布上**，别做成压在画布上的 tk 控件 —— 控件会吞掉
+        B1-Motion / ButtonRelease，一拖到它上方卡片就不跟手、松手也收不到事件
+      · 垃圾桶要**每次 motion 都 tag_raise**：卡片一直被 raise 到最上层，
+        不抬它就被卡片盖住，用户看到的只有卡片
+      · 位置按 `canvasy(0)` + 可视高度算（画布是可滚动的，"右下角"指眼睛
+        看到的那个右下角），别用固定坐标
+
+    子任务拖进垃圾桶走的是另一条：子任务没有自己的回收站（只是父任务里的
+    一个 dict），所以 `_delete_sub_by_drag()` 用**整份快照**撤销，跟拖拽排序
+    是同一套补救办法。
 """
 
 import os
@@ -893,6 +922,14 @@ REPEAT_BADGE = {k: badge for k, _, badge in REPEATS}
 
 # 回收站最多留多少条；超出的丢最旧的
 TRASH_MAX = 100
+
+# ---- 拖拽删除：那个垃圾桶 ----
+# 只在**拖起来之后**才画在板面右下角，平时不画 —— 板面本来就挤，一个常驻的
+# 空箱子只是白占地方（文件管理器、看板工具也都是拖起来才现身）。
+# 它画在画布上而不是一个 tk 控件上：控件压在画布上会**吃掉拖拽中的
+# B1-Motion / ButtonRelease**，一拖到它上方卡片就不再跟手，松手也收不到事件。
+TRASH_BOX = 96          # 边长
+TRASH_PAD = 22          # 离可视区右边 / 下边的距离
 IMPORT_BACKUP_PREFIX = "导入前备份-"
 
 # 到点提醒：多久检查一次（毫秒）。检查本身极轻，只是比一下日期。
@@ -924,6 +961,10 @@ NOTE_EMPTY_FG = "#bfb6a8"       # 比 C_INK3 再淡一点，免得抢过正文
 DRAG_HINT     = "松手即改优先级；放到卡片之间可调同组顺序；拖到卡片上半张 = 变成它的子任务"
 SUB_DRAG_HINT = ("上下拖 = 调这条子任务的顺序；拖到别的卡片上 = 搬过去；"
                  "拖到卡片以外的空白 = 提升成独立任务")
+# 拖到垃圾桶上方时状态栏那句话。**说清"进回收站"**：用户怕的是"一松手就没了"，
+# 而这里其实只是搬进回收站，Ctrl+Z 或者打开回收站都能捞回来。
+TRASH_HINT      = "松手：把「%s」移进回收站（Ctrl+Z 能撤销）"
+TRASH_HINT_SUB  = "松手：删掉子任务「%s」（Ctrl+Z 能撤销）"
 
 
 # ============================================================ 使用帮助正文
@@ -943,6 +984,8 @@ HELP_SECTIONS = [
     ("n",  "2. 双击卡片标题就能改字，回车确认、Esc 取消 —— 打错字不用删了重建"),
     ("n",  "3. 点卡片左上角那个方框 = 完成，再点一次 = 取消完成"),
     ("n",  "4. 右键卡片 → 「编辑任务…」，标题和备注一起改，回车就保存"),
+    ("n",  "5. 不要了：拖到右下角的垃圾桶，或者点一下卡片再按 Delete —— 都进回收站，"
+           "按 Ctrl+Z 就能退回来"),
 
     ("h2", "顶栏按钮"),
     ("k", ("P0 P1 P2 P3…", "给新任务选「贴进哪个格子」。出厂是那四格"
@@ -957,9 +1000,12 @@ HELP_SECTIONS = [
     ("k", ("统计",     "耗时统计面板（各象限投入、完成趋势、热力图）")),
     ("k", ("复盘",     "每日复盘面板（今天做了什么、按天回看）")),
     ("k", ("置顶",     "窗口总在最前、盖住别的窗口。变成深色的「已置顶」就是开着，再点一下取消")),
-    ("k", ("更多 ▾",   "回收站 / 导入恢复备份 / 立即备份 / 备份文件夹 / 备份保留天数 / "
-                        "到点提醒开关 / 卡片上显示时间 / 象限设置（增删·改名）/ "
-                        "打开数据文件夹 / 清空已完成")),
+    ("k", ("更多 ▾",   "集合了不常用的那些：回收站 / 导入·恢复备份 / 立即备份 / "
+                        "设置自动备份文件夹 / 打开备份文件夹 / 每日自动备份开关 / "
+                        "备份保留天数 / 到点提醒开关 / 卡片上显示时间 / "
+                        "象限设置（增删·改名）/ 打开数据文件夹 / 导出完成记录（CSV）/ "
+                        "按月回顾 / 开机自动启动 / 清空已完成。"
+                        "下面各节碰到哪儿讲哪儿")),
     ("k", ("? 帮助",   "就是本窗口（快捷键 F1，随时可开）")),
 
     ("h2", "象限可以增删改名（它本质是一种分类方式）"),
@@ -1002,8 +1048,8 @@ HELP_SECTIONS = [
            "一眼看不出还剩几条要干。所以子任务跟主任务用同一套规矩："),
     ("n",  "· 划掉的自动排到最后面（当天划掉的仍然留着，方便手滑点错时点回来）"),
     ("n",  "· 第二天起自动不再显示 —— 它们没有删，只是不占位置了"),
-    ("n",  "· 标题行右边那个「已完成 N」就是被收起来的那几条，点一下摊开看，再点一下收起。"
-           "「摊开」只算当天：第二天会自动收回去，不会一直摊着"),
+    ("n",  "· 标题行右边的「已完成 N」胶囊就是被收起来的那几条，点一下摊开、再点一下收起"),
+    ("n",  "· 「摊开」只算当天：第二天会自动收回去，不会一直摊着"),
     ("n",  "· 摊开之后如果超过 3 条，照样用「‹ 1/2 ›」翻页"),
     ("n",  "· 卡面上写的「子任务 2/5」永远是总共的进度，收起不影响这个数"),
     ("n",  "· 每条子任务行「右端还有一行小字」：没做完的显示创建时间、做完了的显示"
@@ -1014,13 +1060,46 @@ HELP_SECTIONS = [
     ("n",  "· 想改顺序：直接拖子任务行（同一张卡里上下拖）。显示顺序和实际顺序是两回事，"
            "但拖的时候程序会自己折算，照常拖就行"),
 
-    ("h2", "拖拽能做五件事（最容易被忽略，也最省事）"),
+    ("h2", "拖拽能做六件事（最容易被忽略，也最省事）"),
     ("n",  "1. 拖到别的象限 → 改优先级"),
     ("n",  "2. 拖到同象限卡片之间 → 调顺序，插到哪儿就排哪儿"),
     ("n",  "3. 拖到某张卡片的上半张 → 变成它的子任务（拖到下半张仍是普通排序）"),
     ("n",  "4. 子任务上下拖 → 调子任务顺序"),
     ("n",  "5. 子任务拖到卡片以外的空白 → 提升成独立任务，落进鼠标所在的象限"),
+    ("n",  "6. 拖到右下角那个垃圾桶 → 删除（进回收站，能撤销）"),
     ("p",  "拖的过程中状态栏会实时告诉你「松手会发生什么」，不确定就先拖起来看一眼。"),
+
+    ("h2", "删除一条任务：三种方式，都进回收站"),
+    ("p",  "删除是个低频但必须顺手的事 —— 所以三条路都留着，用哪条都行。"
+           "它们走的是同一个出口，所以「删错了能不能救」处处一样：都在回收站里，"
+           "都能 Ctrl+Z 退回来。"),
+    ("k", ("右键卡片 →「删除（进回收站）」", "最明确的一条，卡片任何位置右键都找得到")),
+    ("k", ("拖到垃圾桶",
+           "在板面右下角，拖起来之后才出现（平时不占地方）。卡片拖到它上面会变红、"
+           "状态栏写「松手：把某某移进回收站」，松手就删。不想删了就再拖回来，"
+           "中途反悔不算数")),
+    ("k", ("按 Delete 键",
+           "先点一下卡片（它的边框会加深一道 = 已选中），再按 Delete。"
+           "没选中时，鼠标指着哪张就删哪张 —— 连点都不用点")),
+    ("n",  "· 正在输入框（加任务、改标题、搜索框）里打字时，Delete 是删字符，"
+           "不会动任务 —— 这一点是硬性保证，不然手一滑就删掉一条真的"),
+    ("n",  "· 选中的那张一旦被筛选 / 搜索藏起来（切到「已完成」、改了搜索词），"
+           "选中会自动取消 —— 看不见的东西按 Delete 不会删，这是硬规矩"),
+    ("n",  "· 子任务那一行也能拖进垃圾桶：「只删这一条」，父任务还在。"
+           "它没有独立的回收站，靠整份快照撤销（Ctrl+Z）救回来"),
+    ("n",  "· 回收站最多留最近 100 条，再删就丢最旧的 —— 所以真要长期留档，"
+           "用「导出完成记录」而不是靠回收站"),
+
+    ("h2", "回收站：删错了怎么捞回来"),
+    ("p",  "删除不等于消失：任务整条（含备注、子任务、计时记录、截止时间）都搬进"
+           "回收站，随时能整个搬回来。"),
+    ("n",  "· 入口两个：「更多 ▾ → 回收站…」，或者在板面空白处右键 →「回收站…」"),
+    ("n",  "· 列表里一行一条，写着标题和删除时间；双击某一行 = 恢复它"),
+    ("n",  "· 「恢复选中」把挑中的捞回板面（回到它原来那个象限和位置）"),
+    ("n",  "· 「彻底删除」= 从回收站里清掉，这一步不可撤销"),
+    ("n",  "· 「清空回收站」= 一次全清，同样不可撤销，会先问你"),
+    ("n",  "· 刚删完那一下最快：状态栏右边会冒出「撤销」按钮（约 6 秒后自己消失），"
+           "按 Ctrl+Z 同样的效果"),
 
     ("h2", "卡片上的小标签"),
     ("k", ("P0 立刻做",   "优先级和它的行动建议")),
@@ -1075,6 +1154,26 @@ HELP_SECTIONS = [
     ("n",  "· 搜索时不受影响：搜到了照样显示，哪怕它已经收起"),
     ("n",  "· 想彻底清掉：右键空白处 →「清空已完成」，会先进回收站，还能撤销"),
 
+    ("h2", "筛出想看的那一批：左边那排和状态栏那几个数字"),
+    ("p",  "顶栏「全部 ▾」那六项，和状态栏右下角那几个数字（「未完成 5」"
+           "「已完成 0」），切的是同一份筛选 —— 点数字等于点菜单，常用的手"
+           "不用离开板面。六个各是什么："),
+    ("k", ("全部",     "默认视图。已完成的任务只留到当天结束，第二天起从这儿隐去")),
+    ("k", ("未完成",   "所有还没勾的，不管有没有日期")),
+    ("k", ("今天要做", "没勾、而且截止日期在今天就或早就过了（含已逾期的）。"
+                       "相当于「今天必须看一眼的」")),
+    ("k", ("已逾期",   "没勾、而且已经过了截止的那一刻（填了时间的按时刻算，"
+                       "只填日期的按那天结束算）")),
+    ("k", ("计时中",   "正在跑计时器的那些，一次看全「现在同时开着几件事」")),
+    ("k", ("已完成",   "全部完成记录，包括早就从板面收起的；这里是唯一能看到全的地方")),
+    ("n",  "· 状态栏那个数字的点法：点一下切过去，再点同一个就回「全部」；"
+           "为 0 的那项不显示（省地方）"),
+    ("n",  "· 筛选完一张卡都不剩时，板面中间会写一句为什么 + 一个「回到全部」的按钮，"
+           "不至于对着一片空白发愣"),
+    ("n",  "· 搜索和筛选是叠加的：先筛「未完成」，再在搜索框里搜词，两个条件一起生效"),
+    ("n",  "· 右上角「四象限 / 列表」换的是排法不是筛选：四象限按格子分块，"
+           "列表把所有卡片平铺开、按时间顺序往下排 —— 想一眼扫完一长串任务时用列表"),
+
     ("h2", "创建时间 / 完成时间（精确到秒）"),
     ("p",  "新建任务会自动记下创建时间，勾完成会自动记下完成时间，精确到秒 —— "
            "卡片标题右端那行小字就是它们。复盘时既看得出「哪天」，也看得出"
@@ -1126,6 +1225,55 @@ HELP_SECTIONS = [
     ("n",  "· 提醒只在「今天到期」和「已逾期」里挑 —— 还没到日子的不打扰"),
     ("n",  "· 哪天不想被提醒了：「更多 ▾ → 到点提醒」关掉，任务本身不受影响"),
 
+    ("h2", "计时：时间到底花在哪了"),
+    ("p",  "四象限回答的是「哪件事重要」，计时回答的是「时间实际去哪了」——"
+           "这两个经常对不上，这也正是值得看一眼的地方。"),
+    ("n",  "· 点卡片右下角那颗药丸开始计时，再点一下暂停。药丸里就是累计投入"),
+    ("n",  "· 可以一天里点很多次，累计着算；关掉程序也不会丢（记在数据里）"),
+    ("n",  "· 勾上完成时会「自动停表」，不会一直空转，把后面的统计搞脏"),
+    ("n",  "· 记错了：右键卡片 →「清零耗时记录」，这条的投入归零（不影响别的）"),
+    ("n",  "· 「统计」面板看汇总：总投入、时间花在哪一类（按象限）、"
+           "最花时间的任务（前 5 条）、按天分布；顶上「今天 / 本周 / 近 7 天 / 全部」"
+           "四个口径随时切"),
+    ("n",  "· 「复盘」面板只看今天：完成几条、投入多久、最近几周的完成热力图 ——"
+           "适合下班前扫一眼"),
+
+    ("h2", "重复任务：每天 / 每周 / 每月 / 每年"),
+    ("p",  "倒垃圾、周报、月度对账这类事不该每天重新建一条。设成重复之后，"
+           "勾完这一次，下一次会自己排上来。"),
+    ("n",  "· 设法：右键卡片 →「重复：…」，或者点卡片右上角那个小徽章"),
+    ("n",  "· 四个选项：每天 / 每周 / 每月 / 每年。徽章上写「天 / 周 / 月 / 年」"),
+    ("n",  "· 勾上完成后，程序按原来的截止日期往后推一个周期，生成新的一条，"
+           "并在状态栏告诉你「下一次已排到 几月几号」"),
+    ("n",  "· 新那一条保持同一个时刻：每天 18:30 的活，明天还是 18:30，不会变成早上"),
+    ("n",  "· 没设截止日期的重复任务也会生成下一条，但没有日期可推，"
+           "下次自己补一个日期即可"),
+    ("n",  "· 已完成的这一条照常留在「已完成」里（它会按规矩第二天从板面收起）"),
+
+    ("h2", "把一条任务拖成子任务，会丢什么"),
+    ("p",  "把卡片拖到另一张卡片的上半张，它就变成那张卡的子任务 —— 这是整理"
+           "「一堆碎活其实属于同一件事」最省事的办法。但它是有代价的："),
+    ("n",  "· 子任务只有一层，所以它自己带的子任务会被摊平成同级（不会丢，只是降了一级）"),
+    ("n",  "· 备注、计时记录、截止日期这些「任务级」的东西会丢 —— 子任务只存一句话"),
+    ("n",  "· 正因为它会丢东西，程序会先问你一句，看清楚再点「是」"),
+    ("n",  "· 反悔：右键它「提升成独立任务」，或者拖到卡片以外的空白。"
+           "提升回来是普通卡片，但丢掉的那些补不回来"),
+
+    ("h2", "备份与恢复"),
+    ("p",  "数据只有一份（一个 json 文件），所以备份这件事不能靠记性 ——"
+           "默认每天自动备一份。"),
+    ("n",  "· 「更多 ▾ → 设置自动备份文件夹…」先挑一个目录（建议放在 D 盘或网盘里，"
+           "别和程序同一个盘）"),
+    ("n",  "· 「每日自动备份：开 / 关」，默认是开。开着的时候，每天第一次打开程序"
+           "会自动存一份当天快照"),
+    ("n",  "· 「立即备份到现在的位置」= 马上存一份，改大动作之前手动点一下更踏实"),
+    ("n",  "· 「备份保留天数」：7 / 30 / 90 天，或「永久保留」。"
+           "选永久保留就是只增不删，注意磁盘空间"),
+    ("n",  "· 「打开备份文件夹」直接看文件；每份的文件名带日期，一眼能挑"),
+    ("n",  "· 恢复：挑「导入 / 恢复备份…」。会问你是「替换」（清掉现在的，"
+           "只留文件里的）还是「合并」（保留现有的，把文件里的追加进来）；"
+           "不管选哪个，导入之前都会先把当前数据另存一份 —— 导错了还能回来"),
+
     ("h2", "键盘快捷键"),
     ("k", ("回车",     "输入框里 = 添加任务；「编辑任务」框里 = 保存（Shift+回车 = 备注换行）")),
     ("k", ("Esc",      "清空输入框 / 取消就地编辑 / 关闭对话框")),
@@ -1135,6 +1283,8 @@ HELP_SECTIONS = [
     ("k", ("Ctrl + E", "打开每日复盘")),
     ("k", ("Ctrl + Z", "撤销上一步（删除、拖拽、改标题、改备注、改截止时间都算；"
                        "状态栏右侧会出现「撤销」按钮）")),
+    ("k", ("Delete",   "把选中的那张卡移进回收站；没选中就删鼠标指着的那张。"
+                       "正在输入框里打字时不接管（那是删字符）")),
     ("k", ("F5",       "重画界面")),
     ("k", ("F1",       "打开本帮助")),
 
@@ -2372,6 +2522,11 @@ class App:
         self.drag = None
         self.editor = None
         self.hover_tid = None
+        # 「当前这张卡」—— Delete 键删的就是它。单击卡片（不是点勾选框、
+        # 药丸那些小控件）就会选中；点板面空白处取消。只活在内存里，不落库：
+        # 重开程序回不到"上次选中哪张"是件好事，免得手一滑删掉别的。
+        self.sel_tid = ""
+        self._trash_rect = None    # 拖拽中的垃圾桶矩形（画布坐标），没拖就是 None
         self._redraw_job = None
         self._stats_win = None     # 耗时统计面板（Toplevel）
         self._stats_period = "today"
@@ -2414,6 +2569,7 @@ class App:
         root.bind("<Control-e>", lambda e: self.open_review())     # e = 复盘
         root.bind("<Control-z>", lambda e: self._do_undo())        # 撤销上一步删除
         root.bind("<F1>", lambda e: self.open_help())              # 使用帮助
+        root.bind("<Delete>", self.on_delete_key)                  # 删除选中的卡片
         root.bind("<Escape>", lambda e: self.cancel_editor())
         root.bind_all("<MouseWheel>", self._on_wheel)
 
@@ -3598,6 +3754,14 @@ class App:
         self._quad_rects = {}
         self._nest_zone = {}
         self._sub_rows = {}
+        # delete("all") 把拖拽中的垃圾桶一起抹掉了，这里同步把矩形作废。
+        # 选中那张卡如果已经不在了、或者被筛掉了，也顺手清掉 —— 否则
+        # Delete 键会指着一张**看不见的**卡（切到「已完成」之后按一下，
+        # 删掉的是哪张谁也说不清，这是这个功能最危险的形态）。
+        self._trash_rect = None
+        _sel = self.task_by_id(self.sel_tid) if self.sel_tid else None
+        if self.sel_tid and (_sel is None or not self.visible(_sel)):
+            self.sel_tid = ""
         cv = self.cv
         cv.delete("all")
 
@@ -3886,11 +4050,16 @@ class App:
         # 阴影 + 主体
         # 搜索时命中卡片的框加深一道：文字里逐字高亮要拆开重画标题（宽度测量、
         # 折行、裁剪全得跟着改，风险大收益小），描个深框一样能一眼扫到"哪几张有"。
+        # 「选中」（Delete 键的目标）再深一档、且是实线，和搜索命中区分得开：
+        # C_INK 选中 / #a89573 搜索命中 / #e7e1d6 平时。
+        # 选中不能用浅一档的棕色（#8a7b5c）—— 在粉/橙底色上几乎看不出来，
+        # 而"按 Delete 之前看不出会删哪张"正是这个功能最不能有的毛病。
         hit = bool(self.q) and search_hit(t, self.q)
+        sel = bool(self.sel_tid) and t["id"] == self.sel_tid
+        edge = C_INK if sel else ("#a89573" if hit else "#e7e1d6")
         cv.create_rectangle(x + 2, y + 3, x2 + 2, y2 + 3, fill=C_SHADOW, outline="", tags=(tag,))
-        cv.create_rectangle(x, y, x2, y2, fill=bg,
-                            outline=("#a89573" if hit else "#e7e1d6"),
-                            width=(2 if hit else 1), tags=(tag,))
+        cv.create_rectangle(x, y, x2, y2, fill=bg, outline=edge,
+                            width=(2 if (sel or hit) else 1), tags=(tag,))
         # 顶部色带
         cv.create_rectangle(x + 1, y + 1, x2 - 1, y + 5,
                             fill=(C_LINE if t["done"] else pr["band"]), outline="", tags=(tag,))
@@ -4353,6 +4522,9 @@ class App:
                          "nest": None, "last_x": cx, "last_y": cy, "fixed": True}
             return
         if not tid:
+            # 点板面空白 = 取消选中（不然 Delete 会一直指着一张你早就忘了的卡）
+            if kind not in ("emptyreset",):
+                self.select_task("")
             return
         t = self.task_by_id(tid)
         if not t:
@@ -4384,21 +4556,53 @@ class App:
                 d["last_x"], d["last_y"] = cx, cy
                 return
             d["moved"] = True
+            # 一旦真的拖起来了，就把右下角那个垃圾桶亮出来（平时不画）。
+            self._show_trash()
             if d.get("sub"):
                 self.status.configure(text=SUB_DRAG_HINT)
             else:
                 self.cv.tag_raise("card" + d["tid"])
                 self.status.configure(text=DRAG_HINT)
 
+        # 卡片跟着鼠标走（子任务那一行不飘，原地不动）。
+        # ★ 这一步必须放在垃圾桶判断**之前**：不然拖进垃圾桶时卡片会僵在
+        #   上一次的位置，看着像"卡住了"。
+        if not d.get("sub"):
+            dx, dy = cx - d["last_x"], cy - d["last_y"]
+            d["last_x"], d["last_y"] = cx, cy
+            self.cv.move("card" + d["tid"], dx, dy)
+            self.cv.tag_raise("card" + d["tid"])
+        # 垃圾桶永远压在最上层：卡片一 raise 就会把它盖住，那就等于没有
+        self.cv.tag_raise("trashbin")
+
+        # 垃圾桶优先于其余一切落点判断：拖到它上头就只可能"删除"，
+        # 这时候还继续算"会落到哪个象限"只会让状态栏和提示框互相打架。
+        if self._over_trash(cx, cy):
+            if not d.get("trash"):
+                d["trash"] = True
+                d["nest"], d["target"], d["idx"], d["promote"] = None, None, None, None
+                self.cv.delete("hl")
+                self._paint_trash(True)
+                t = self.task_by_id(d["tid"])
+                if d.get("sub"):
+                    sub = sub_by_id(t, d["sid"]) if t else None
+                    self.status.configure(
+                        text=(TRASH_HINT_SUB % ellipsis(sub["text"], 10)) if sub
+                        else "松手删除这条子任务")
+                else:
+                    self.status.configure(
+                        text=(TRASH_HINT % ellipsis(t["title"], 10)) if t
+                        else "松手删除")
+            d["last_x"], d["last_y"] = cx, cy
+            return
+        if d.get("trash"):
+            d["trash"] = False
+            self._paint_trash(False)
+            self.status.configure(text=SUB_DRAG_HINT if d.get("sub") else DRAG_HINT)
+
         if d.get("sub"):
             self._motion_sub(d, cx, cy)
             return
-
-        dx, dy = cx - d["last_x"], cy - d["last_y"]
-        d["last_x"], d["last_y"] = cx, cy
-
-        self.cv.move("card" + d["tid"], dx, dy)
-        self.cv.tag_raise("card" + d["tid"])
 
         # 落到别人卡片的**上半张** → 变成它的子任务（优先于排序落点）
         nest = self._nest_at(cx, cy, d["tid"])
@@ -4423,11 +4627,30 @@ class App:
         if not d:
             return
         self.cv.delete("hl")
+        self._hide_trash()
         if not d["moved"]:
+            # 单击卡片（或它的标题）= 选中它，Delete 键的下手对象就是这张。
+            # 勾选框 / 药丸 / 翻页器那些小控件不算 —— 点它们是在干别的事。
+            if d["kind"] in ("card", "title"):
+                self.select_task(d["tid"])
             self.handle_click(d["kind"], d["tid"], e)
             return
         if not self._undo_cb:            # 撤销提示还挂着的时候别把它顶掉
             self.status.configure(text=HINT_TEXT)
+
+        # 拖进垃圾桶：删除在这条路的最前面 —— 后面那些落点逻辑（嵌套、排序）
+        # 一旦跑起来就会先把数据改了，再删就等于删错东西。
+        if d.get("trash"):
+            t = self.task_by_id(d["tid"])
+            if not t:
+                self.redraw()
+                return
+            if d.get("sub"):
+                self._delete_sub_by_drag(t, d["sid"])
+            else:
+                self.select_task("")     # 选中态跟着走，别留个已删的 id
+                self.delete_task(t)
+            return
 
         if d.get("sub"):
             self._drop_sub(d)
@@ -4450,6 +4673,144 @@ class App:
         self._apply_drop(t, d["target"], idx)
         self.save()
         self.redraw()
+
+    # -------- 拖拽删除：垃圾桶 + Delete 键 --------
+    #
+    # 用户的原话：「当前删除任务的形式只有右键，应该有拖拽删除，比如一个垃圾桶的
+    # 图标或者一个区域，拖拽卡片到图标或区域就直接删除到回收站，然后也应该支持
+    # delete 键删除。」
+    #
+    # 三条路都通到同一个出口 delete_task()（它自己负责进回收站 + 挂撤销），
+    # 所以"删错了能不能救"处处一致，不需要各写一套。
+
+    def _show_trash(self):
+        """拖起来之后，在**可视区**右下角亮出垃圾桶。
+
+        为什么不常驻：板面本来就挤，一个空箱子天天占着右下角 96×96，
+        而删除是个低频动作。文件管理器、看板工具也都是拖起来才现身。
+
+        为什么画在画布上而不是放一个 tk 控件：控件压在上面会**吞掉**
+        B1-Motion / ButtonRelease —— 一拖到它上方卡片就不跟手，松手也收不到事件
+        （本项目 drag 全靠 canvas 自己的 bind）。
+        """
+        cv = self.cv
+        # 用可视区算，不是整块画布：画布是可滚动的，"右下角"指的是眼睛看到的
+        # 那个右下角，滚到哪儿它就跟到哪儿
+        top = cv.canvasy(0)
+        W, H = cv.winfo_width(), cv.winfo_height()
+        if W <= 1 or H <= 1:
+            return
+        x1 = W - TRASH_PAD - TRASH_BOX
+        y1 = top + H - TRASH_PAD - TRASH_BOX
+        self._trash_rect = (x1, y1, x1 + TRASH_BOX, y1 + TRASH_BOX)
+        self._paint_trash(False)
+
+    def _paint_trash(self, hot):
+        """画 / 重画垃圾桶。hot = 卡片正在它上方（换红、换文案）。"""
+        r = self._trash_rect
+        if not r:
+            return
+        cv = self.cv
+        cv.delete("trashbin")
+        x1, y1, x2, y2 = r
+        cx = (x1 + x2) / 2.0
+        edge = "#e5484d" if hot else "#c9c0ae"
+        ink = "#e5484d" if hot else C_INK2
+        round_rect(cv, x1, y1, x2, y2, 14,
+                   fill=("#ffe2e4" if hot else C_WHITE),
+                   outline=edge, width=(2 if hot else 1), tags="trashbin")
+
+        # 桶自己画、不用 🗑 这个 emoji：字体缺字时会变成一个方框，
+        # 而这里是"松手就删"的关键按钮，不能赌系统装没装那套彩色字体。
+        # 比例：盖子比桶身宽一圈（不然看着像个杯子），桶身梯形收窄，
+        # 里面三道竖纹 —— 这三样凑齐才像"垃圾桶"而不是"小盒子"。
+        ty = y1 + 30                       # 盖子所在的 y
+        cv.create_line(cx, ty - 11, cx, ty - 7, fill=ink, width=2,
+                       capstyle="round", tags="trashbin")
+        cv.create_line(cx - 7, ty - 8, cx + 7, ty - 8, fill=ink, width=2,
+                       capstyle="round", tags="trashbin")
+        cv.create_line(cx - 17, ty - 4, cx + 17, ty - 4, fill=ink, width=3,
+                       capstyle="round", tags="trashbin")
+        cv.create_polygon(cx - 15, ty + 1, cx + 15, ty + 1,
+                          cx + 10, ty + 30, cx - 10, ty + 30,
+                          outline=ink, fill="", width=2, tags="trashbin")
+        for dx in (-6, 0, 6):              # 桶身上那几道竖纹
+            cv.create_line(cx + dx, ty + 6, cx + dx * 0.72, ty + 25,
+                           fill=ink, width=1, tags="trashbin")
+
+        cv.create_text(cx, y2 - 13, text=("松手就删" if hot else "拖到这里"),
+                       font=F_TINY, fill=ink, tags="trashbin")
+        cv.tag_raise("trashbin")
+
+    def _hide_trash(self):
+        self.cv.delete("trashbin")
+        self._trash_rect = None
+
+    def _over_trash(self, cx, cy):
+        """落点（画布坐标）在不在垃圾桶里。"""
+        r = self._trash_rect
+        return bool(r) and r[0] <= cx <= r[2] and r[1] <= cy <= r[3]
+
+    def _delete_sub_by_drag(self, t, sid):
+        """把一条子任务拖进垃圾桶。
+
+        子任务没有自己的回收站（它只是父任务里的一个 dict，摘掉就没了），
+        所以这里是**整份快照撤销** —— 跟"拖子任务排序"是同一套补救办法。
+        """
+        sub = sub_by_id(t, sid)
+        if not sub:
+            self.redraw()
+            return
+        snap = self._snapshot()
+        text = sub["text"]
+        subs_of(t).remove(sub)
+        self.save()
+        self.redraw()
+        self._flash_undo("已删掉子任务「%s」" % ellipsis(text, 10),
+                         lambda: self._restore_snapshot(snap))
+
+    def select_task(self, tid):
+        """把某张卡标成「当前这张」（Delete 键删的就是它）。传空 = 取消选中。
+
+        视觉上是加深一道实线框（跟"搜索命中"那圈区分开）。没有这层视觉，
+        用户按 Delete 之前根本不知道会删掉哪一张 —— 那比不支持按键更糟。
+        """
+        tid = tid or ""
+        if tid and not self.task_by_id(tid):
+            tid = ""
+        if tid == self.sel_tid:
+            return
+        self.sel_tid = tid
+        self.redraw()
+        if tid:
+            t = self.task_by_id(tid)
+            self.status.configure(
+                text="已选中「%s」 · 按 Delete 移进回收站，点空白处取消"
+                     % ellipsis(t["title"], 12))
+
+    def on_delete_key(self, e=None):
+        """Delete 键：删「当前这张卡」；没选中就删鼠标指着的那张。
+
+        正在输入框 / 文本域里打字时**不接管** —— 那时 Delete 是删除字符，
+        抢过来删任务是最不可接受的那种"手滑"。
+        """
+        try:
+            f = self.root.focus_get()
+        except Exception:
+            f = None
+        if isinstance(f, (tk.Entry, tk.Text, tk.Spinbox, tk.Listbox)):
+            return
+        tid = self.sel_tid or self.hover_tid or ""
+        t = self.task_by_id(tid) if tid else None
+        if t is not None and not self.visible(t):
+            t = None                     # 看不见的卡不许删（被筛掉 / 已收起的）
+        if not t:
+            self.status.configure(
+                text="先把鼠标指着（或点一下）要删的卡片，再按 Delete")
+            return "break"
+        self.select_task("")
+        self.delete_task(t)
+        return "break"
 
     def _card_region(self, tid):
         """某张卡片当前画在哪。取自 regions 快照 —— 拖拽过程中其他卡片没动，
@@ -4854,6 +5215,9 @@ class App:
     def on_hover(self, e):
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
+        # 记下鼠标现在指着哪张卡：没选中任何卡片时，Delete 删的是它
+        # （「鼠标指着 + 按 Delete」比"先点一下再按"少一步，更多人会这么用）
+        self.hover_tid = tid or None
         self.cv.configure(cursor="hand2"
                           if (tid or kind in ("emptyreset", "qprev", "qnext"))
                           else "")
