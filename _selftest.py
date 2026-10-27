@@ -4025,11 +4025,35 @@ app.redraw()
 root.update()
 _app_focus = app.root.focus_get
 check("卡片上找到一块空白（下面几个单击都点这儿）", _card_blank(app, _dk["id"]) is not None)
+
+# ★ 2026-10-27 用户报"选中后按 Delete 没反应"。根因是**焦点**：
+#   tk 里点 Canvas 默认不移动键盘焦点，焦点一直留在顶栏那个新增输入框上，
+#   而 Entry 自带 <Delete> 绑定会 return "break"，事件根本冒泡不到 toplevel
+#   上的 root.bind("<Delete>")。所以这里必须走**真实按键**：
+#   先让焦点真的在输入框里，点卡片，再让 canvas 生成 <Delete>。
+#   （旧用例是 monkeypatch focus_get + 直接调 on_delete_key 的 —— 那是从中间
+#   调方法，四条教训里的一条，正好把这个 bug 完整地遮住了。）
+app.entry.focus_force()
+root.update()
+check("（前置条件：焦点确实在输入框里）", app.root.focus_get() is app.entry,
+      "实际 %r" % (app.root.focus_get(),))
+_n0 = len(app.tasks)
+app.entry.event_generate("<Delete>", when="now")
+root.update()
+check("★ 焦点在输入框里时，Delete 只删字符、不删任务",
+      len(app.tasks) == _n0 and app.task_by_id(_dk["id"]) is not None,
+      "任务数 %d → %d" % (_n0, len(app.tasks)))
+
 _bx, _by = _card_blank(app, _dk["id"]) or (0, 0)
 app.on_press(Ept(app, _bx, _by))
 app.on_release(Ept(app, _bx, _by))
+root.update()
 check("单击卡片 = 选中它（Delete 的下手对象就是这张）",
       app.sel_tid == _dk["id"], "实际 %r" % app.sel_tid)
+check("★ 点完卡片，键盘焦点从输入框转到画布（不然 Delete 到不了板面）",
+      app.root.focus_get() is app.cv, "实际 %r" % (app.root.focus_get(),))
+check("画布的 takefocus 开着（能接住键盘焦点）",
+      str(app.cv.cget("takefocus")) not in ("", "0", "False"))
 check("选中之后状态栏告诉你怎么删",
       "Delete" in app.status.cget("text"),
       "实际 %r" % app.status.cget("text"))
@@ -4039,22 +4063,10 @@ check("★ 选中的卡片描边加深一道（看得出是哪张）",
       any(app.cv.itemcget(i, "outline") == sticky.C_INK for i in _rects),
       "实际 %r" % [app.cv.itemcget(i, "outline") for i in _rects])
 
-# 焦点在输入框里时，Delete 是删字符，绝不能删任务
-app.root.focus_get = lambda *a, **k: app.entry
-try:
-    _n0 = len(app.tasks)
-    check("★ 正在输入框里打字时，Delete 不删任务（让给输入框删字）",
-          app.on_delete_key(None) is None and len(app.tasks) == _n0,
-          "任务数 %d → %d" % (_n0, len(app.tasks)))
-finally:
-    app.root.focus_get = _app_focus
-
-app.root.focus_get = lambda *a, **k: None      # 焦点在板面上
-try:
-    app.on_delete_key(None)
-finally:
-    app.root.focus_get = _app_focus
-check("★ Delete 把选中的卡片移进回收站",
+# 真实按键：事件发给画布，走 bindtags（canvas → Canvas 类 → toplevel → all）
+app.cv.event_generate("<Delete>", when="now")
+root.update()
+check("★ 按 Delete 把选中的卡片移进回收站",
       app.task_by_id(_dk["id"]) is None
       and app.trash[-1]["task"]["id"] == _dk["id"],
       "任务数 %d / 回收站 %d" % (len(app.tasks), len(app.trash)))
@@ -4077,11 +4089,10 @@ _r = region(app, "card", _hm["id"])
 app.on_hover(Ept(app, _r[0] + 30, _r[1] + 30))
 check("鼠标指着卡片时记下了它（Delete 的备用目标）",
       app.hover_tid == _hm["id"], "实际 %r" % app.hover_tid)
-app.root.focus_get = lambda *a, **k: None
-try:
-    app.on_delete_key(None)
-finally:
-    app.root.focus_get = _app_focus
+app.cv.focus_set()
+root.update()
+app.cv.event_generate("<Delete>", when="now")
+root.update()
 check("★ 没选中、但鼠标指着 → Delete 也删它",
       app.task_by_id(_hm["id"]) is None)
 app._do_undo()
@@ -4095,9 +4106,12 @@ check("点板面空白处 = 取消选中", app.sel_tid == "",
 app.on_hover(Ept(app, app.cv.winfo_width() - 3, 3))
 check("鼠标也离开卡片了（hover 目标跟着清空）", not app.hover_tid,
       "实际 %r" % app.hover_tid)
+app.cv.focus_set()
+root.update()
+app.cv.event_generate("<Delete>", when="now")
+root.update()
 check("什么都没指着的时候按 Delete，只提示不动手",
-      app.on_delete_key(None) == "break"
-      and app.task_by_id(_hm["id"]) is not None
+      app.task_by_id(_hm["id"]) is not None
       and "鼠标" in app.status.cget("text"),
       "状态栏 %r" % app.status.cget("text"))
 app.tasks.remove(_hm)
@@ -4119,12 +4133,11 @@ app.redraw()
 root.update()
 check("★ 搜索/筛选之后看不见了，就自动取消选中",
       app.sel_tid == "", "实际 %r" % app.sel_tid)
-app.root.focus_get = lambda *a, **k: None
-try:
-    _n_h = len(app.tasks)
-    app.on_delete_key(None)
-finally:
-    app.root.focus_get = _app_focus
+_n_h = len(app.tasks)
+app.cv.focus_set()
+root.update()
+app.cv.event_generate("<Delete>", when="now")
+root.update()
 check("★ 这时候按 Delete 不会误删看不见的卡（最危险的形态）",
       app.task_by_id(_hs["id"]) is not None and len(app.tasks) == _n_h,
       "任务数 %d → %d" % (_n_h, len(app.tasks)))
