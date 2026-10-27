@@ -500,6 +500,19 @@
         不抬它就被卡片盖住，用户看到的只有卡片
       · 位置按 `canvasy(0)` + 可视高度算（画布是可滚动的，"右下角"指眼睛
         看到的那个右下角），别用固定坐标
+      · **点画布必须 `cv.focus_set()`**（画布还要 `takefocus=1`）。tk 里点
+        Canvas 默认**不移动键盘焦点**，焦点会一直留在顶栏那个新增输入框上；
+        而 Entry 自带 `<Delete>` 类绑定会 `return "break"`，事件根本冒泡不到
+        toplevel 上的 `root.bind("<Delete>")` —— 表现就是"选中了、按 Delete
+        没反应"（2026-10-27 用户报的 bug，而且当时的用例是 monkeypatch
+        `focus_get` + 直接调 `on_delete_key` 的，正好把它完整遮住了）。
+        现在 on_press 和 select_task 两处都设焦点：只留一处也行，但右键菜单
+        进来的那条路只经过 select_task。
+
+    ★ 测这一类东西（键盘 / 点击 / 拖拽）**必须走真实路径**：事件用
+      `widget.event_generate("<Delete>", when="now")`、点击用
+      `on_press`/`on_release`，别直接调中间那个方法 —— 直接从中间调方法等于
+      把"事件到底传不传得到这儿"这个真正会坏的地方跳过了。
 
     子任务拖进垃圾桶走的是另一条：子任务没有自己的回收站（只是父任务里的
     一个 dict），所以 `_delete_sub_by_drag()` 用**整份快照**撤销，跟拖拽排序
@@ -3190,7 +3203,13 @@ class App:
         wrap = tk.Frame(self.root, bg=C_BG)
         wrap.pack(fill="both", expand=True)
 
-        self.cv = tk.Canvas(wrap, bg=C_BG, highlightthickness=0, bd=0)
+        # takefocus=1：让画布能接住键盘焦点。**这不是装饰** —— Delete 键就靠它：
+        # tk 里点画布默认**不移动键盘焦点**，焦点会一直留在顶栏那个新增输入框上，
+        # 而 Entry 自带 <Delete> 绑定会 return "break"，事件根本冒泡不到
+        # toplevel 上的 root.bind("<Delete>")。表现就是"选中了、按 Delete 没反应"
+        # （2026-10-27 用户报的就是这个）。点卡片时 on_press 会 focus_set 到画布。
+        self.cv = tk.Canvas(wrap, bg=C_BG, highlightthickness=0, bd=0,
+                            takefocus=1)
         self.cv.pack(side="left", fill="both", expand=True)
 
         self.sb = tk.Scrollbar(wrap, orient="vertical", command=self.cv.yview,
@@ -4506,6 +4525,12 @@ class App:
         # 若正在就地编辑，先把内容落盘，再继续处理这次点击
         if self.editor:
             self._commit_editor()
+        # ★ 点板面就把键盘焦点收到画布上。
+        #   tk 里点 Canvas 默认不动焦点，焦点会一直留在顶栏那个新增输入框里；
+        #   而 Entry 自己的 <Delete> 绑定会 return "break"，事件到不了 toplevel，
+        #   于是"选中了、按 Delete 没反应"（2026-10-27 报的 bug）。
+        #   放在 _commit_editor 之后：提交编辑时可能还要跟输入框打交道。
+        self.cv.focus_set()
         cx, cy = self._canvas_xy(e)
         kind, tid = self.hit(cx, cy)
         # 板面空态里那个「回到全部」、象限标题栏上的翻页器、象限标题本身
@@ -4781,6 +4806,9 @@ class App:
         if tid == self.sel_tid:
             return
         self.sel_tid = tid
+        # 焦点收到画布上：不然 Delete 会被输入框吃掉（见 on_press 那段注释）。
+        # 从右键菜单 / 程序调用进来的路径也走这一句，别只在 on_press 里做。
+        self.cv.focus_set()
         self.redraw()
         if tid:
             t = self.task_by_id(tid)
