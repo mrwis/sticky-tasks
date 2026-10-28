@@ -211,6 +211,9 @@
                       四个方法，拖拽里的判据在 on_motion 的 "垃圾桶优先" 那一段。
                       见「机制⑰」。**子任务拖进垃圾桶**是另一条路：
                       _delete_sub_by_drag()（整份快照撤销）
+  · 改"子任务的重复规则" → sub_repeat_text / _badge / _hit / _norm 四个纯函数
+                      + set_sub_repeat()（设置入口）+ ask_weekdays()（选日子）。
+                      ★ 判定种类走 repeat_kind()，别拿整串比
   · 改"提醒弹什么 / 什么时候弹" → due_reminders()（挑哪些）+ reminder_head()
                       （顶上那句话）。**程序没开就不会响**，所以配套有
                       autostart_get/set/command（只写 HKCU 的 Run 项）
@@ -232,7 +235,7 @@
 
 
 ----------------------------------------------------------------
-  十七个值得单独弄懂的小机制
+  十八个值得单独弄懂的小机制
 ----------------------------------------------------------------
 
   ① regions 命中测试（self.regions）
@@ -304,8 +307,10 @@
 
   ⑧ 重复任务是怎么"续上"的
      任务带 repeat 字段。勾完成时 _spawn_next() 复制一份新的出来：
-     标题/备注/象限/子任务结构照抄，子任务全部重置为未完成，
-     截止日期用 next_date() 往后推一轮（月末会自动对齐，1/31 → 2/28）。
+     标题/备注/象限照抄，**子任务按各自的规则筛一遍**（见机制⑱：
+     跟着任务的全带、只出现一次的丢掉、指定星期几的看新一轮是哪天），
+     剩下的重置为未完成；截止日期用 next_date() 往后推一轮
+     （月末会自动对齐，1/31 → 2/28）。
      原任务留在原地当"已完成"的历史记录，不会被删掉。
 
   ⑨ 就地编辑器为什么要"延后一轮"才建（on_double → open_editor）
@@ -524,6 +529,29 @@
     子任务拖进垃圾桶走的是另一条：子任务没有自己的回收站（只是父任务里的
     一个 dict），所以 `_delete_sub_by_drag()` 用**整份快照**撤销，跟拖拽排序
     是同一套补救办法。
+
+  ⑱ 子任务有自己的重复规则（sub_repeat_*）
+    用户先问「子任务是不是默认跟任务一样重复」，然后要「一三五练胳膊、
+    二四六练腿、周天休息」。关键在于**子任务不能脱离父任务存在**，所以它的
+    "重复"只能有一种意思：**父任务每进入新一轮时，带不带它** —— 不是自己
+    生成一张卡。
+
+      · 存 `s["repeat"]`：`""` 跟着任务（每轮都在，**默认值 = 老行为**）/
+        `"once"` 只出现这一次 / `"wd:1,3,5"` 只在周一三五出现
+      · `_spawn_next()` 里用 `sub_repeat_hit(s, 新一轮那天)` 筛一遍；被筛掉的
+        **留在旧任务里**（历史），不会凭空消失 —— 用户想改回来还能找到
+      · 判断依据是**新一轮该做的那一天**（`s2d(nd_due) or today()`），
+        不是"今天"：周五的活拖到周一才勾完成，仍按周五筛
+      · 主任务的 `t["repeat"]` 复用同一套 `wd:...`：`next_date()` 一步步挪到
+        下一个匹配的星期几（最多 7 步）。主任务与子任务共用 `ask_weekdays()`
+        那个选日子的框，别做两套
+      · ★ 判断"种类"一律走 `repeat_kind()`：规则带参数之后，拿整串去和
+        `"daily"`/`"weekly"` 比较全都比不上了（徽章、菜单勾选、next_date 分支
+        都会静默走错，而且不报错）
+      · `sub_repeat_norm()` 把认不出的值**清空**：宁可每轮都出现（用户看得见、
+        能改），也不要让一条子任务因为一个手改坏的值从此再也不出现
+      · 卡面标记（`sub_repeat_badge`）排在右端时间**左边**，折行时两块宽度都
+        要扣掉；默认返回空串，一个像素都不占
 """
 
 import os
@@ -930,15 +958,58 @@ PERIODS = [
 
 # 重复周期：(内部值, 菜单/徽章上的字)。加一种周期就往这里加一行，
 # 再去 next_date() 里补一个分支即可。
+#
+# `wd` 是"每周指定几天"：跟前面几个不同，它**带参数**，存成 `wd:1,3,5`
+# （1=周一 … 7=周日，跟 date.weekday()+1 一致）。所以下面几个字典都得按
+# "种类"查，不能拿整串去比 —— 判断种类一律走 repeat_kind()。
 REPEATS = [
-    ("",        "不重复", ""),
-    ("daily",   "每天",   "天"),
-    ("weekly",  "每周",   "周"),
-    ("monthly", "每月",   "月"),
-    ("yearly",  "每年",   "年"),
+    ("",        "不重复",         ""),
+    ("daily",   "每天",           "天"),
+    ("weekly",  "每周（同一天）", "周"),
+    ("monthly", "每月",           "月"),
+    ("yearly",  "每年",           "年"),
+    ("wd",      "每周指定几天…",  "周"),
 ]
 REPEAT_LABEL = {k: label for k, label, _ in REPEATS}
 REPEAT_BADGE = {k: badge for k, _, badge in REPEATS}
+REPEAT_KINDS = set(REPEAT_LABEL)
+
+WD_NAMES = "一二三四五六日"     # 下标 0 = 周一（跟 date.weekday() 一致）
+
+
+def repeat_kind(r):
+    """存盘值 → 种类。`wd:1,3,5` 的种类是 `wd`，其余原样返回。
+
+    为什么要这一层：规则带参数之后，"整串 == 某个值"的判断全都不成立了
+    （徽章、菜单勾选、next_date 的分支都会踩），统一从这儿归一。
+    """
+    r = str(r or "")
+    return "wd" if r.startswith("wd:") else r
+
+
+def repeat_wd(r):
+    """`wd:1,3,5` → [1,3,5]。认不出来的一律丢掉（宁可不动，也不要乱放）。"""
+    out = []
+    for part in str(r or "")[3:].split(","):
+        part = part.strip()
+        if part.isdigit() and 1 <= int(part) <= 7 and int(part) not in out:
+            out.append(int(part))
+    return sorted(out)
+
+
+def wd_str(days):
+    """[1,3,5] → `wd:1,3,5`（去重、排序 —— 存盘值只有这一种形状）。"""
+    return "wd:" + ",".join(str(x) for x in sorted(set(int(d) for d in days)))
+
+
+def wd_label(days):
+    """[1,3,5] → 「周一三五」；7 天全选 → 「每天」；一天没选 → 「（未选）」。"""
+    d = sorted(set(int(x) for x in days if 1 <= int(x) <= 7))
+    if not d:
+        return "（未选）"
+    if len(d) == 7:
+        return "每天"
+    return "周" + "".join(WD_NAMES[x - 1] for x in d)
 
 # 回收站最多留多少条；超出的丢最旧的
 TRASH_MAX = 100
@@ -1262,13 +1333,33 @@ HELP_SECTIONS = [
     ("p",  "倒垃圾、周报、月度对账这类事不该每天重新建一条。设成重复之后，"
            "勾完这一次，下一次会自己排上来。"),
     ("n",  "· 设法：右键卡片 →「重复：…」，或者点卡片右上角那个小徽章"),
-    ("n",  "· 四个选项：每天 / 每周 / 每月 / 每年。徽章上写「天 / 周 / 月 / 年」"),
+    ("n",  "· 五个选项：每天 / 每周（同一天）/ 每月 / 每年 / 每周指定几天。"
+           "徽章上写「天 / 周 / 月 / 年」"),
+    ("n",  "· 「每周指定几天」可以自己勾：比如只在一、三、五做，"
+           "那勾上一三五，程序会自己跳到下一个匹配的日子（中间几天不生成）"),
     ("n",  "· 勾上完成后，程序按原来的截止日期往后推一个周期，生成新的一条，"
            "并在状态栏告诉你「下一次已排到 几月几号」"),
     ("n",  "· 新那一条保持同一个时刻：每天 18:30 的活，明天还是 18:30，不会变成早上"),
     ("n",  "· 没设截止日期的重复任务也会生成下一条，但没有日期可推，"
            "下次自己补一个日期即可"),
     ("n",  "· 已完成的这一条照常留在「已完成」里（它会按规矩第二天从板面收起）"),
+
+    ("h2", "子任务的重复：一三五练胳膊、二四六练腿"),
+    ("p",  "子任务不会自己生成新卡片 —— 它挂在父任务下面，所以它的「重复」"
+           "只决定一件事：父任务每走进下一轮时，这条子任务要不要跟着出现。"),
+    ("n",  "· 默认就是「跟着任务」：父任务每轮都有它。跟以前一样，什么都不用设"),
+    ("n",  "· 想把一周拆开练：父任务设成「每天」，再把「练胳膊」设成周一三五、"
+           "「练腿」设成周二四六。这样每天生成的那张卡上，只会出现当天该练的那条"),
+    ("n",  "· 「只出现这一次」：这一轮做完就不再带它。适合一次性的事"
+           "（比如「先去买张健身卡」），第二天不会再来烦你"),
+    ("n",  "· 周日想休息：父任务的重复改成「每周指定几天」，勾上周一到周六；"
+           "或者就在周日那张卡上直接勾完成"),
+    ("n",  "· 设法：右键那条子任务 →「重复：…」；卡面上会用浅棕色小字标出来"
+           "（「仅一次」/「一三五」），没设的什么都不显示"),
+    ("n",  "· 没被带过去的那条不会丢：它还在上一轮那张卡里，"
+           "在「已完成」里能找到。想改回来，去那张卡上重新设"),
+    ("n",  "· 判断依据是「新一轮该做的那一天」，不是「今天」："
+           "周五的活拖到周一才勾完成，程序仍按周五来筛"),
 
     ("h2", "把一条任务拖成子任务，会丢什么"),
     ("p",  "把卡片拖到另一张卡片的上半张，它就变成那张卡的子任务 —— 这是整理"
@@ -1724,6 +1815,86 @@ def sub_meta_text(s):
     return fmt_ts(created_ts(s))
 
 
+# ---- 子任务自己的重复规则 ----
+#
+# 用户的原话：「任务卡片是可以设置是否重复的，但是子任务卡片并没有这个选项，
+# 是默认和任务卡片一样的重复吗？还是有单独的逻辑？……比如我一三五练胳膊，
+# 二四六练腿，周天休息这样，应该支持这种自主选择重复模式。子任务应该支持。」
+#
+# 先说清语义：子任务**不能脱离父任务存在**，所以它的"重复"只能有一种意思 ——
+# **父任务每进入新一轮时，这条子任务要不要跟着出现**。不是自己生成一张卡。
+#
+# 三种取值（存 s["repeat"]）：
+#   ""            跟着任务：每轮都出现。**这就是老行为，老数据零影响**
+#   "once"        只出现一次：留在它当初那一轮，之后不再带
+#   "wd:1,3,5"    只在周一/三/五出现（1=周一 … 7=周日）
+# "daily" 也认（等于跟着任务），菜单里不给 —— 两个说法一个意思只会让人猜。
+SUB_REPEAT_ONCE = "once"
+
+
+def sub_repeat_text(s):
+    """子任务的规则 → 菜单上那句「重复：…」。"""
+    r = str(s.get("repeat") or "")
+    k = repeat_kind(r)
+    if k == SUB_REPEAT_ONCE:
+        return "只出现一次"
+    if k == "wd":
+        return wd_label(repeat_wd(r))
+    return "跟着任务"
+
+
+def sub_repeat_badge(s):
+    """卡面上那个极短标记。**默认（跟着任务）返回空串**，不占位置。
+
+    · once → 「仅一次」
+    · wd   → 「一三五」这种（不带「周」字，一行才两百来像素）
+    · 一周 7 天都选 → 空串：跟默认没区别，没必要占位置
+    · 选得太多（>3 天）→ 「5天」：写字反而更占地方、也更难一眼看懂
+    """
+    r = str(s.get("repeat") or "")
+    k = repeat_kind(r)
+    if k == SUB_REPEAT_ONCE:
+        return "仅一次"
+    if k == "wd":
+        d = repeat_wd(r)
+        if not d or len(d) == 7:
+            return ""
+        if len(d) > 3:
+            return "%d天" % len(d)
+        return "".join(WD_NAMES[x - 1] for x in d)
+    return ""
+
+
+def sub_repeat_hit(s, day):
+    """这一轮（`day` 那天）要不要把这条子任务带上。
+
+    只在 _spawn_next() 里调用 —— 判断依据是**新一轮该做的那一天**，
+    不是"今天"：任务拖到周一才勾完成、而它的截止是周五，就该按周五筛。
+    """
+    r = str(s.get("repeat") or "")
+    k = repeat_kind(r)
+    if k == SUB_REPEAT_ONCE:
+        return False
+    if k == "wd":
+        return (day.weekday() + 1) in repeat_wd(r)
+    return True
+
+
+def sub_repeat_norm(v):
+    """把子任务的 repeat 归一成合法值（读盘时用）。
+
+    认不出的**一律清空**（= 跟着任务、每轮都在）：宁可让它每次都出现
+    （用户看得见、能改），也不要因为一个手改坏的值让它从此再也不出现。
+    """
+    k = repeat_kind(v)
+    if k == SUB_REPEAT_ONCE:
+        return SUB_REPEAT_ONCE
+    if k == "wd":
+        d = repeat_wd(v)
+        return wd_str(d) if d else ""
+    return ""
+
+
 def search_hit(t, q):
     """这条任务是不是命中搜索词。**空格分开多个词 = 都要出现（AND）**，
     前面带 `-` 表示排除（`复盘 -服务器` = 有复盘但别带服务器）。
@@ -1964,10 +2135,12 @@ def _norm_subs(raw):
                                 "text": txt, "done": done,
                                 # 没完成就不该留着完成时间（取消完成要清干净）
                                 "done_at": _norm_num(s.get("done_at")) if done else 0.0,
-                                "created_at": _norm_num(s.get("created_at"))})
+                                "created_at": _norm_num(s.get("created_at")),
+                                # 子任务自己的重复规则（见 sub_repeat_* 那一组）
+                                "repeat": sub_repeat_norm(s.get("repeat"))})
             elif isinstance(s, str) and s.strip():
                 out.append({"id": new_sid(), "text": s.strip(), "done": False,
-                            "done_at": 0.0, "created_at": 0.0})
+                            "done_at": 0.0, "created_at": 0.0, "repeat": ""})
     return out
 
 
@@ -2050,20 +2223,34 @@ def next_date(due_s, repeat, base=None):
 
     基准取原截止日期，没有就从今天算起，然后加一个周期。
     若结果已经过去（任务拖了很久才被完成），就一直往后推，直到落在
-    今天之后 —— 这样不会一次补出一长串过期的重复任务。"""
-    if repeat not in ("daily", "weekly", "monthly", "yearly"):
+    今天之后 —— 这样不会一次补出一长串过期的重复任务。
+
+    `wd`（每周指定几天）是唯一"带参数"的周期：先加一天，再一步步挪到
+    下一个被选中的星期几（最多挪 7 步，不会死循环）。
+    """
+    kind = repeat_kind(repeat)
+    if not kind or kind not in REPEAT_KINDS:
         return ""
     T = base or today()
     d = s2d(due_s) or T
+    days = repeat_wd(repeat) if kind == "wd" else []
+    if kind == "wd" and not days:
+        return ""                    # 一天都没选，等于没设
     for _ in range(4000):
-        if repeat == "daily":
+        if kind == "daily":
             d = d + datetime.timedelta(days=1)
-        elif repeat == "weekly":
+        elif kind == "weekly":
             d = d + datetime.timedelta(days=7)
-        elif repeat == "monthly":
+        elif kind == "monthly":
             d = add_months(d, 1)
-        else:
+        elif kind == "yearly":
             d = add_months(d, 12)
+        else:                        # wd：跳到下一个匹配的星期几
+            d = d + datetime.timedelta(days=1)
+            for _step in range(7):
+                if d.weekday() + 1 in days:
+                    break
+                d = d + datetime.timedelta(days=1)
         if d > T:
             break
     # 原来带具体时刻的（每天 18:30 这种），下一次也保持同一时刻 ——
@@ -4130,7 +4317,8 @@ class App:
                        fill=(C_LINE if t["done"] else pr["band"]),
                        outline="", tags=(tag,))
             cv.create_text(tx + rw / 2, y + 16 + rw / 2,
-                           text=REPEAT_BADGE.get(rp, "循"), font=F_TINY,
+                           text=REPEAT_BADGE.get(repeat_kind(rp), "循"),
+                           font=F_TINY,
                            fill="#ffffff", tags=(tag,))
             self.regions.append(("rep", t["id"], tx - 2, y + 14,
                                  tx + rw + 2, y + 18 + rw))
@@ -4317,13 +4505,23 @@ class App:
             # 右端那行时间先算宽度，折行时把这段让出来 —— 否则文字会压到时间上
             mt = sub_meta_text(s)
             mw = (_font_of(F_SUB_T).measure(mt) + 8) if mt else 0
-            ln = self._wrap(s["text"], F_SUB, max(40, (x + w - 10) - sx - mw), 1)
+            # 规则标记（仅一次 / 一三五）排在时间**左边**，所以折行时两块都要扣；
+            # 默认（跟着任务）是空串，一个像素都不占
+            rb = sub_repeat_badge(s)
+            rw = (_font_of(F_SUB_T).measure(rb) + 6) if rb else 0
+            ln = self._wrap(s["text"], F_SUB,
+                            max(40, (x + w - 10) - sx - mw - rw), 1)
             txt = ln[0] if ln else ""
             cv.create_text(sx, y, anchor="nw", text=txt, font=F_SUB,
                            fill=(C_SUB_DONE if sd else C_INK2), tags=(tag,))
             if sd and txt:
                 cv.create_line(sx, y + 8, sx + tkfont.Font(font=F_SUB).measure(txt), y + 8,
                                fill=C_SUB_DONE, tags=(tag,))
+            if rb:
+                # 颜色比时间浅一档的棕灰：一眼能分出"哪个是时间、哪个是规则"
+                cv.create_text(x + w - 10 - mw, y + 1, anchor="ne", text=rb,
+                               font=F_SUB_T,
+                               fill=(C_SUB_DONE if sd else "#a08f6d"), tags=(tag,))
             if mt:
                 cv.create_text(x + w - 10, y + 1, anchor="ne", text=mt,
                                font=F_SUB_T,
@@ -5318,6 +5516,25 @@ class App:
         # （用户报的就是"在子任务处右键看不到添加子任务"）。
         # 现在卡片上任何位置右键，都能进「添加子任务」。
         m.add_command(label="添加子任务…", command=lambda: self.ask_add_sub(t))
+        # 「重复」紧跟在设置类操作后面。它是**子任务自己的**规则：
+        # 父任务每进入新一轮时，这条要不要跟着出现（见 sub_repeat_hit）。
+        s = sub_by_id(t, sid)
+        rk = repeat_kind(s.get("repeat"))
+        _cur = repeat_wd(s.get("repeat")) if rk == "wd" else []
+        rm = tk.Menu(m, tearoff=0, font=F_SMALL)
+        for k, lbl in (("", "跟着任务（每轮都出现）"),
+                       (SUB_REPEAT_ONCE, "只出现这一次")):
+            rm.add_command(label=("● " if rk == k else "    ") + lbl,
+                           command=lambda kk=k: self.set_sub_repeat(t, sid, kk))
+        rm.add_separator()
+        rm.add_command(
+            label=("● " if rk == "wd" else "    ") + "每周指定几天…"
+                  + ("　" + wd_label(_cur) if _cur else ""),
+            command=lambda dd=_cur: self.ask_weekdays(
+                "这条子任务每周哪几天出现", dd,
+                lambda days: self.set_sub_repeat(
+                    t, sid, wd_str(days) if days else "")))
+        m.add_cascade(label="重复：%s" % sub_repeat_text(s), menu=rm)
         m.add_separator()
         # 已经在头 / 尾的那一条，对应的方向就没得移了
         m.add_command(label="上移", state=("normal" if i > 0 else "disabled"),
@@ -5422,33 +5639,71 @@ class App:
         self.save()
         self.redraw()
         if nxt:
-            self.status.configure(
-                text="已完成「%s」，下一次已排到 %s"
-                     % (ellipsis(t["title"], 10),
-                        due_label(nxt["due"]) or "（未设日期）"))
+            # 子任务可能被各自的重复规则筛掉几条，得说一声 —— 否则用户会
+            # 以为"我的子任务丢了"。
+            txt = ("已完成「%s」，下一次已排到 %s"
+                   % (ellipsis(t["title"], 10),
+                      due_label(nxt["due"]) or "（未设日期）"))
+            n_skip = len(subs_of(t)) - len(subs_of(nxt))
+            if n_skip:
+                txt += "，%d 条子任务按规则没带过去" % n_skip
+            self.status.configure(text=txt)
 
     def set_repeat(self, t, r):
-        t["repeat"] = r if r in REPEAT_LABEL else ""
+        # 按"种类"校验：`wd:1,3,5` 这种带参数的值，整串不在 REPEAT_LABEL 里
+        k = repeat_kind(r)
+        t["repeat"] = (r if k and k in REPEAT_KINDS else "")
         self.save()
         self.redraw()
-        self.status.configure(text="重复：%s"
-                                   % REPEAT_LABEL.get(t["repeat"], "不重复"))
+        if k == "wd":
+            self.status.configure(text="重复：%s" % wd_label(repeat_wd(t["repeat"])))
+        else:
+            self.status.configure(
+                text="重复：%s" % REPEAT_LABEL.get(k, "不重复"))
+
+    def set_sub_repeat(self, t, sid, value):
+        """给一条子任务设重复规则（`""` / `once` / `wd:...`）。
+
+        规则决定的是"父任务进入下一轮时，这条还要不要跟着出现" ——
+        子任务不能脱离父任务存在，所以它不是自己生成一张卡。
+        """
+        s = sub_by_id(t, sid)
+        if not s:
+            return ""
+        v = sub_repeat_norm(value)
+        s["repeat"] = v
+        self.save()
+        self.redraw()
+        if v:
+            self.status.configure(text="「%s」%s"
+                                       % (ellipsis(s["text"], 10),
+                                          sub_repeat_text(s)))
+        else:
+            self.status.configure(
+                text="「%s」改成跟着任务走（每轮都出现）" % ellipsis(s["text"], 10))
+        return v
 
     def _spawn_next(self, t):
         """重复任务被勾完成时，复制一份「下一次」出来。
 
-        子任务结构照抄但全部重置为未完成；截止日期往后推一个周期。
-        原任务留在原地，当"这一轮已经做完"的历史记录。"""
+        截止日期往后推一个周期；子任务**按各自的规则筛一遍**（见 sub_repeat_*）：
+        跟着任务的照抄、只出现一次的丢掉、指定星期几的看新那一轮是哪天。
+        原任务留在原地，当"这一轮已经做完"的历史记录 —— 被筛掉的子任务
+        也跟着它留在历史里，不会凭空消失。"""
         rp = t.get("repeat") or ""
         if not rp:
             return None
+        nd_due = next_date(t["due"], rp)
+        nd_day = s2d(nd_due) or today()      # 这一轮"该做的那天"，用来筛子任务
+        keep = [s for s in subs_of(t) if sub_repeat_hit(s, nd_day)]
         nxt = {
             "id": new_id(), "title": t["title"], "note": t["note"], "p": t["p"],
-            "due": next_date(t["due"], rp), "done": False,
+            "due": nd_due, "done": False,
             "order": self._order_end(t["p"]),
             "subs": [{"id": new_sid(), "text": s["text"], "done": False,
-                      "done_at": 0.0, "created_at": now_ts()}
-                     for s in subs_of(t)],
+                      "done_at": 0.0, "created_at": now_ts(),
+                      "repeat": s.get("repeat") or ""}
+                     for s in keep],
             "logs": {}, "timer": 0, "repeat": rp, "done_at": 0,
             # 新一轮从**现在**算起，而不是继承上一轮的创建时间 ——
             # 否则"这轮花了几天"会把重复任务的整个历史都算进去。
@@ -5693,7 +5948,8 @@ class App:
             txt = str(ln).strip()
             if txt:
                 subs.append({"id": new_sid(), "text": txt, "done": False,
-                             "done_at": 0.0, "created_at": now_ts()})
+                             "done_at": 0.0, "created_at": now_ts(),
+                             "repeat": ""})
                 added += 1
         if added:
             self.save()
@@ -5743,12 +5999,14 @@ class App:
         # （done_at 也一样 —— 它要是几天前完成的，搬过来就该照样收起）。
         dst.append({"id": new_sid(), "text": t["title"], "done": bool(t["done"]),
                     "done_at": done_ts(t),
-                    "created_at": created_ts(t) or now_ts()})
+                    "created_at": created_ts(t) or now_ts(), "repeat": ""})
         for s in subs:
+            # 原来的子任务规则**跟着搬**：搬一次不该把"只在周一出现"抹掉
             dst.append({"id": new_sid(), "text": s["text"],
                         "done": bool(s.get("done")),
                         "done_at": _norm_num(s.get("done_at")) if s.get("done") else 0.0,
-                        "created_at": _norm_num(s.get("created_at"))})
+                        "created_at": _norm_num(s.get("created_at")),
+                        "repeat": s.get("repeat") or ""})
         try:
             self.tasks.remove(t)
         except ValueError:
@@ -5889,15 +6147,126 @@ class App:
             m.grab_release()
 
     def popup_repeat(self, t, e):
-        """点卡片上那个重复小徽章时弹出来。"""
+        """点卡片上那个重复小徽章时弹出来。
+
+        勾选状态按**种类**比（`wd:1,3,5` 整串是永远比不上的）；
+        「每周指定几天」要问日子，所以它走对话框，不是直接 set_repeat。
+        """
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
+        cur_kind = repeat_kind(t.get("repeat"))
+        cur_days = repeat_wd(t.get("repeat")) if cur_kind == "wd" else []
         for k, label, _badge in REPEATS:
-            m.add_command(label=("● " if (t.get("repeat") or "") == k else "    ") + label,
-                          command=lambda kk=k: self.set_repeat(t, kk))
+            mark = "● " if cur_kind == k else "    "
+            if k == "wd":
+                tail = ("　" + wd_label(cur_days)) if cur_days else ""
+                m.add_command(
+                    label=mark + label + tail,
+                    command=lambda dd=cur_days: self.ask_weekdays(
+                        "这个任务每周哪几天做", dd,
+                        lambda days: self.set_repeat(
+                            t, wd_str(days) if days else "")))
+            else:
+                m.add_command(label=mark + label,
+                              command=lambda kk=k: self.set_repeat(t, kk))
         try:
             m.tk_popup(e.x_root, e.y_root)
         finally:
             m.grab_release()
+
+    def ask_weekdays(self, title, cur, on_ok):
+        """选「每周哪几天」（1=周一 … 7=周日），选完回调 on_ok(升序列表)。
+
+        主任务的「每周指定几天」和子任务的「这条只在周几出现」问的是同一件事，
+        所以只有这一个框、一套样式 —— 两套迟早会不一样。
+
+        回调收到**空列表** = 一天都没选，怎么解释交给调用方：
+        主任务是"没设这个规则"，子任务是"回到跟着任务"。
+        """
+        picked = set(int(x) for x in (cur or []) if 1 <= int(x) <= 7)
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title(title)
+        dlg.configure(bg=C_BG)
+        dlg.resizable(False, False)
+        self._follow_top(dlg)
+
+        tk.Label(dlg, text=title, font=F_BRAND, bg=C_BG, fg=C_INK,
+                 anchor="w").pack(fill="x", padx=18, pady=(14, 2))
+        tk.Label(dlg, text="只有选中的日子才带这条；一天都不选 = 不设",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3,
+                 anchor="w").pack(fill="x", padx=18)
+
+        row = tk.Frame(dlg, bg=C_BG)
+        row.pack(padx=18, pady=(10, 2))
+        chips = {}
+        cur_lb = tk.Label(dlg, text="", font=F_SMALL, bg=C_BG, fg=C_INK2,
+                          anchor="w")
+        cur_lb.pack(fill="x", padx=18)
+
+        def paint():
+            for k, b in chips.items():
+                on = k in picked
+                b.configure(bg=(C_INK if on else C_WHITE),
+                            fg=("#ffffff" if on else C_INK2))
+            cur_lb.configure(text="当前：%s" % wd_label(sorted(picked)))
+
+        def toggle(k):
+            if k in picked:
+                picked.discard(k)
+            else:
+                picked.add(k)
+            paint()
+
+        for i in range(7):
+            b = tk.Label(row, text=WD_NAMES[i], font=F_BODY, width=3, pady=6,
+                         bg=C_WHITE, fg=C_INK2, cursor="hand2",
+                         highlightthickness=1, highlightbackground=C_LINE)
+            b.grid(row=0, column=i, padx=2)
+            b.bind("<Button-1>", lambda _e, kk=i + 1: toggle(kk))
+            chips[i + 1] = b
+
+        pre = tk.Frame(dlg, bg=C_BG)
+        pre.pack(padx=18, pady=(8, 0))
+
+        def preset(days):
+            picked.clear()
+            picked.update(days)
+            paint()
+
+        for txt, days in (("每天", list(range(1, 8))),
+                          ("工作日", [1, 2, 3, 4, 5]),
+                          ("周末", [6, 7]),
+                          ("清空", [])):
+            lb = tk.Label(pre, text=txt, font=F_SMALL, bg=C_WHITE, fg=C_INK2,
+                          padx=9, pady=3, cursor="hand2",
+                          highlightthickness=1, highlightbackground=C_LINE)
+            lb.pack(side="left", padx=(0, 6))
+            lb.bind("<Button-1>", lambda _e, dd=days: preset(dd))
+
+        bar = tk.Frame(dlg, bg=C_BG)
+        bar.pack(fill="x", padx=18, pady=(14, 14))
+
+        def apply(_e=None):
+            out = sorted(picked)
+            dlg.destroy()
+            on_ok(out)
+
+        okb = tk.Label(bar, text="确定", font=F_SMALL, bg=C_INK, fg="#ffffff",
+                       padx=16, pady=5, cursor="hand2")
+        okb.pack(side="right")
+        okb.bind("<Button-1>", apply)
+        cancel = tk.Label(bar, text="取消", font=F_SMALL, bg=C_WHITE, fg=C_INK2,
+                          padx=14, pady=5, cursor="hand2",
+                          highlightthickness=1, highlightbackground=C_LINE)
+        cancel.pack(side="right", padx=(0, 8))
+        cancel.bind("<Button-1>", lambda _e: dlg.destroy())
+
+        dlg.bind("<Return>", apply)
+        dlg.bind("<Escape>", lambda _e: dlg.destroy())
+        paint()
+        dlg.grab_set()
+        dlg.focus_set()          # 焦点给窗口本身，别落到某个格子上
+        self.root.wait_window(dlg)
 
     def due_from_input(self, day, clock):
         """把「日期 + 时间」两格的内容解析成存盘值。返回 (value, error)。

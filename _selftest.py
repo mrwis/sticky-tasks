@@ -4221,6 +4221,177 @@ app.save()
 app.redraw()
 root.update()
 
+print("\n-- 子任务自己的重复规则（父任务每轮时，它要不要跟着出现）--")
+
+# 用户：「子任务卡片并没有这个选项，是默认和任务卡片一样的重复吗？……比如我一三五
+# 练胳膊，二四六练腿，周天休息这样，应该支持这种自主选择重复模式。」
+# 语义：子任务不能脱离父任务，所以它的"重复"= 父任务进入新一轮时带不带它。
+
+check("种类归一：带参数的 wd 归到 wd，其余原样",
+      sticky.repeat_kind("wd:1,3,5") == "wd"
+      and sticky.repeat_kind("daily") == "daily"
+      and sticky.repeat_kind("") == "",
+      "%r / %r" % (sticky.repeat_kind("wd:1,3,5"), sticky.repeat_kind("daily")))
+check("解析日子：乱序去重、越界的丢掉",
+      sticky.repeat_wd("wd:5,1,3,3,9,0") == [1, 3, 5],
+      "实际 %r" % (sticky.repeat_wd("wd:5,1,3,3,9,0"),))
+check("拼存盘值只有一种形状", sticky.wd_str([5, 1, 3]) == "wd:1,3,5",
+      "实际 %r" % sticky.wd_str([5, 1, 3]))
+check("人话：周一三五 / 每天 / 未选",
+      sticky.wd_label([1, 3, 5]) == "周一三五"
+      and sticky.wd_label(range(1, 8)) == "每天"
+      and sticky.wd_label([]) == "（未选）",
+      "%r / %r / %r" % (sticky.wd_label([1, 3, 5]), sticky.wd_label(range(1, 8)),
+                        sticky.wd_label([])))
+
+# ---- 主任务的「每周指定几天」：next_date 要跳到下一个选中的日子 ----
+_D_MON = datetime.date(2026, 10, 26)          # 周一
+check("wd：周一做完了 → 下一次是周三",
+      sticky.next_date(sticky.d2s(_D_MON), "wd:1,3", base=_D_MON) == "2026-10-28",
+      "实际 %r" % sticky.next_date(sticky.d2s(_D_MON), "wd:1,3", base=_D_MON))
+check("★ wd：周三 → 下一次直接跳到下周一（中间四五六日都不选）",
+      sticky.next_date("2026-10-28", "wd:1,3", base=datetime.date(2026, 10, 28))
+      == "2026-11-02",
+      "实际 %r" % sticky.next_date("2026-10-28", "wd:1,3",
+                                   base=datetime.date(2026, 10, 28)))
+check("wd 带时刻的仍然保持同一时刻",
+      sticky.next_date("2026-10-26 18:30:00", "wd:1,3",
+                       base=_D_MON) == "2026-10-28 18:30:00",
+      "实际 %r" % sticky.next_date("2026-10-26 18:30:00", "wd:1,3", base=_D_MON))
+check("wd 但一天都没选 → 不算重复（别排下一次）",
+      sticky.next_date("2026-10-26", "wd:", base=_D_MON) == "",
+      "实际 %r" % sticky.next_date("2026-10-26", "wd:", base=_D_MON))
+check("主任务徽章按种类查得到（wd 也能显示「周」）",
+      sticky.REPEAT_BADGE.get(sticky.repeat_kind("wd:1,3,5")) == "周")
+
+# ---- 子任务规则：读盘归一 / 判定 / 卡面标记 ----
+check("归一：乱写的值一律清空（宁可每轮都在，也不能让它再也不出现）",
+      sticky.sub_repeat_norm("wd:") == "" and sticky.sub_repeat_norm("每周三") == ""
+      and sticky.sub_repeat_norm("once") == "once"
+      and sticky.sub_repeat_norm("wd:3,1") == "wd:1,3",
+      "%r / %r / %r" % (sticky.sub_repeat_norm("wd:"),
+                        sticky.sub_repeat_norm("每周三"),
+                        sticky.sub_repeat_norm("wd:3,1")))
+check("默认（跟着任务）每一轮都带", sticky.sub_repeat_hit({"repeat": ""}, _D_MON))
+check("★ 只出现一次 → 下一轮不带", not sticky.sub_repeat_hit({"repeat": "once"}, _D_MON))
+check("★ 只选周一：周一带、周二不带",
+      sticky.sub_repeat_hit({"repeat": "wd:1"}, _D_MON)
+      and not sticky.sub_repeat_hit({"repeat": "wd:1"},
+                                    _D_MON + datetime.timedelta(days=1)))
+check("卡面标记：默认空着（一个像素都不占）", sticky.sub_repeat_badge({"repeat": ""}) == "")
+check("卡面标记：仅一次 / 一三五 / 太多天写「5天」/ 全选等于默认",
+      sticky.sub_repeat_badge({"repeat": "once"}) == "仅一次"
+      and sticky.sub_repeat_badge({"repeat": "wd:1,3,5"}) == "一三五"
+      and sticky.sub_repeat_badge({"repeat": "wd:1,2,3,4,5"}) == "5天"
+      and sticky.sub_repeat_badge({"repeat": "wd:1,2,3,4,5,6,7"}) == "",
+      "%r / %r / %r / %r" % (
+          sticky.sub_repeat_badge({"repeat": "once"}),
+          sticky.sub_repeat_badge({"repeat": "wd:1,3,5"}),
+          sticky.sub_repeat_badge({"repeat": "wd:1,2,3,4,5"}),
+          sticky.sub_repeat_badge({"repeat": "wd:1,2,3,4,5,6,7"})))
+
+# ---- 真的走一遍「勾完成 → 排下一轮」 ----
+# 下一轮的日期是"明天"，星期几取决于今天，所以规则按明天那个星期几来设，
+# 这样不管哪天跑这个用例结论都成立。
+_nd = sticky.today() + datetime.timedelta(days=1)
+_wdn = _nd.weekday() + 1                 # 明天是星期几（1=周一）
+_other = _wdn % 7 + 1                    # 另一个日子（一定不是明天）
+_rt = mk("每天练", repeat="daily", due=sticky.d2s(sticky.today()),
+         subs=[{"id": "r_a", "text": "练胳膊", "done": False, "done_at": 0.0,
+                "created_at": sticky.now_ts(), "repeat": ""},
+               {"id": "r_b", "text": "一次性的事", "done": False, "done_at": 0.0,
+                "created_at": sticky.now_ts(), "repeat": "once"},
+               {"id": "r_c", "text": "今天该练的", "done": False, "done_at": 0.0,
+                "created_at": sticky.now_ts(), "repeat": sticky.wd_str([_wdn])},
+               {"id": "r_d", "text": "别的日子才练", "done": False, "done_at": 0.0,
+                "created_at": sticky.now_ts(), "repeat": sticky.wd_str([_other])}])
+_rt2 = app._spawn_next(_rt)
+_kept = [x["text"] for x in sticky.subs_of(_rt2)]
+check("★ 新一轮只带「跟着任务」和「今天该练的」",
+      _kept == ["练胳膊", "今天该练的"], "实际 %r" % (_kept,))
+check("被筛掉的没有丢 —— 还留在上一轮那张卡里（历史）",
+      [x["text"] for x in sticky.subs_of(_rt)] ==
+      ["练胳膊", "一次性的事", "今天该练的", "别的日子才练"],
+      "实际 %r" % ([x["text"] for x in sticky.subs_of(_rt)],))
+check("规则跟着带到新一轮（不是复制时就抹掉了）",
+      [x.get("repeat") for x in sticky.subs_of(_rt2)]
+      == ["", sticky.wd_str([_wdn])],
+      "实际 %r" % ([x.get("repeat") for x in sticky.subs_of(_rt2)],))
+
+# ---- 走界面入口：勾完成（不是直接调 _spawn_next）----
+_rt3 = mk("每天练2", repeat="daily", due=sticky.d2s(sticky.today()),
+          subs=[{"id": "s_a", "text": "A", "done": False, "done_at": 0.0,
+                 "created_at": sticky.now_ts(), "repeat": ""},
+                {"id": "s_b", "text": "B", "done": False, "done_at": 0.0,
+                 "created_at": sticky.now_ts(), "repeat": "once"}])
+app.toggle_done(_rt3)
+_appended = [x for x in app.tasks if x["title"] == "每天练2" and x["id"] != _rt3["id"]]
+check("★ 勾完成就走完了整套：新任务只带 1 条子任务",
+      len(_appended) == 1 and len(sticky.subs_of(_appended[0])) == 1,
+      "新任务 %d 个 / 子任务 %r"
+      % (len(_appended), _appended and [x["text"] for x in sticky.subs_of(_appended[0])]))
+check("状态栏说清了「有几条按规则没带过去」",
+      "没带过去" in app.status.cget("text"),
+      "实际 %r" % app.status.cget("text"))
+
+# ---- 设置入口：菜单 / 落库 ----
+_sm = app.build_sub_menu(_rt3, "s_a")
+_labs = [_sm.entrycget(i, "label") for i in range(_sm.index("end") + 1)
+         if _sm.type(i) == "cascade"]
+check("★ 子任务右键菜单里有「重复：…」",
+      any(x.startswith("重复：") for x in _labs), "实际 %r" % (_labs,))
+check("菜单上显示的是当前规则（默认 = 跟着任务）",
+      "重复：跟着任务" in _labs, "实际 %r" % (_labs,))
+app.set_sub_repeat(_rt3, "s_a", "once")
+check("改成「只出现一次」真的落库了",
+      sticky.sub_by_id(_rt3, "s_a")["repeat"] == "once",
+      "实际 %r" % sticky.sub_by_id(_rt3, "s_a").get("repeat"))
+_sm2 = app.build_sub_menu(_rt3, "s_a")
+check("再打开菜单就显示新规则",
+      "重复：只出现一次" in [_sm2.entrycget(i, "label")
+                             for i in range(_sm2.index("end") + 1)
+                             if _sm2.type(i) == "cascade"])
+app.set_sub_repeat(_rt3, "s_a", sticky.wd_str([1, 3, 5]))
+
+
+def _menu_labels(m):
+    return [m.entrycget(i, "label") for i in range(m.index("end") + 1)
+            if m.type(i) == "cascade"]
+
+
+check("设成周一三五：菜单显示、卡面标记也有了",
+      "重复：周一三五" in _menu_labels(app.build_sub_menu(_rt3, "s_a"))
+      and sticky.sub_repeat_badge(sticky.sub_by_id(_rt3, "s_a")) == "一三五")
+app.set_sub_repeat(_rt3, "s_a", "wd:")          # 一天都没选 = 回到跟着任务
+check("清空日子 = 回到「跟着任务」（不是让它永不出现）",
+      sticky.sub_by_id(_rt3, "s_a")["repeat"] == "")
+
+# 卡面上真的画出来了（默认不画，设了才画）。
+# 用一张全新的干净卡来测：前面那几张本身带规则，画布上早就有「仅一次」了。
+for _x in (_rt, _rt2, _rt3) + tuple(_appended):
+    if _x in app.tasks:
+        app.tasks.remove(_x)
+_rt4 = mk("干净的卡", subs=[{"id": "c_a", "text": "普通子任务", "done": False,
+                            "done_at": 0.0, "created_at": sticky.now_ts(),
+                            "repeat": ""}])
+app.redraw()
+root.update()
+check("默认规则不占卡面（一个像素都不占）",
+      "仅一次" not in all_texts(app),
+      "画布上带「次」的：%r" % [x for x in all_texts(app) if "次" in str(x)])
+app.set_sub_repeat(_rt4, "c_a", "once")
+app.redraw()
+root.update()
+check("★ 设了「只出现一次」的，卡面上有「仅一次」小标记",
+      "仅一次" in all_texts(app), "画布 %r" % [x for x in all_texts(app) if "次" in x])
+
+for _x in (_rt4,):
+    if _x in app.tasks:
+        app.tasks.remove(_x)
+app.save()
+app.redraw()
+root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
