@@ -4148,6 +4148,79 @@ app.save()
 app.redraw()
 root.update()
 
+print("\n-- 卡片高度按「实际列宽」算，底部不留多出来的一行 --")
+
+# 用户报的现场：同样都是 3 条子任务，右边那张「交易软件学习使用」的底部
+# 多空出一整行（截图里画了红框）。
+#
+# 根因**不是**子任务行数算错，是**标题折行**：
+#   · block_h() 以前按写死的 CARD_W=264 折标题；
+#   · 画的时候 _draw_card 按实际列宽（板面会把卡片拉伸到 290~300）折；
+#   · 于是 8 个字的标题「算的时候两行、画的时候一行」，卡片底白多 18px。
+# 修法是把宽度当成参数一路传下去（block_h / note_lines / _title_w /
+# row_heights 都收 w），算和画用同一个数。
+
+
+def _sub(txt, i):
+    return {"id": "hs%d_%d" % (id(txt) % 1000, i), "text": txt, "done": False,
+            "done_at": 0.0, "created_at": sticky.now_ts()}
+
+
+_T8 = mk("交易软件学习使用", subs=[_sub(x, i) for i, x in enumerate(
+    ["学习通达信公式相关知识", "优化同花顺指标代码", "优化通达信量化代码"])])
+_T5 = mk("十倍做多身体", subs=[_sub(x, i) for i, x in enumerate(
+    ["转眼20*3", "哑铃20*3", "握力20*3"])])
+
+check("纯函数层：卡宽 264 → 320，8 字标题正好少一行（高度差 = 一个行高）",
+      sticky.block_h(_T8, 264) - sticky.block_h(_T8, 320) == sticky.LINE_TITLE,
+      "264 → %d，320 → %d，行高 %d"
+      % (sticky.block_h(_T8, 264), sticky.block_h(_T8, 320), sticky.LINE_TITLE))
+check("纯函数层：宽度够了以后，长短标题两卡一样高（都是 3 条子任务）",
+      sticky.block_h(_T8, 320) == sticky.block_h(_T5, 320),
+      "%d / %d" % (sticky.block_h(_T8, 320), sticky.block_h(_T5, 320)))
+
+# 真实绘制路径：直接给一个宽的列（板面拉伸后的常见宽度），走 _draw_quad
+_pr1 = sticky.PRIO_BY_P[1]
+app._draw_quad(_pr1, [_T8, _T5], 0, 0, 700, 460, (2, 320, 460))
+_b8 = region(app, "card", _T8["id"])
+_b5 = region(app, "card", _T5["id"])
+check("画出来的两张卡一样高（就是用户说的「同样三个子任务却多一行」）",
+      _b8 is not None and _b5 is not None
+      and (_b8[3] - _b8[1]) == (_b5[3] - _b5[1]),
+      "左 %r / 右 %r" % (_b8 and _b8[3] - _b8[1], _b5 and _b5[3] - _b5[1]))
+check("★ 画出来的高度 == block_h(这张卡**实际**画的那一宽)",
+      (_b8[3] - _b8[1]) == sticky.block_h(_T8, _b8[2] - _b8[0]),
+      "画 %d / 算 %d（宽 %.1f）"
+      % (_b8[3] - _b8[1], sticky.block_h(_T8, _b8[2] - _b8[0]), _b8[2] - _b8[0]))
+
+# 最直观的一条：最后一条子任务的**下沿**到虚线之间，只剩一点缝（不是一整行）
+_gap8 = (_b8[3] - sticky.FOOT_H) - app._sub_rows[_T8["id"]][-1][2]
+_gap5 = (_b5[3] - sticky.FOOT_H) - app._sub_rows[_T5["id"]][-1][2]
+check("★ 子任务画到哪儿卡片就到哪儿：两张卡这条缝一样、且不足一行",
+      _gap8 == _gap5 and 0 <= _gap8 < sticky.SUB_LINE,
+      "右卡缝 %r / 左卡缝 %r / 行高 %d" % (_gap8, _gap5, sticky.SUB_LINE))
+
+# 行高也得按实际宽度算：卡片一多就会出现第二行，行高算大的话
+# 第二行会整体往下掉，两行之间多出一条空带。
+_T9 = mk("优化通达信量化交易策略", subs=[_sub("a%d" % i, i) for i in range(3)])
+_T10 = mk("复盘", subs=[_sub("b%d" % i, i) for i in range(3)])
+app._draw_quad(_pr1, [_T8, _T5, _T9, _T10], 0, 0, 700, 760, (2, 320, 760))
+_qy = app._quad_rects[_pr1["p"]][1]
+_b9 = region(app, "card", _T9["id"])
+_row0 = max(sticky.block_h(_T8, 320), sticky.block_h(_T5, 320))
+check("★ 第二行紧接第一行的**实际**高度排（行高也按实际宽度算，不留空带）",
+      _b9[1] == _qy + sticky.QHEAD + sticky.INNER + _row0 + sticky.GAP,
+      "第二行 y=%r，应为 %r（行高 %d）"
+      % (_b9[1], _qy + sticky.QHEAD + sticky.INNER + _row0 + sticky.GAP, _row0))
+
+app.tasks.remove(_T8)
+app.tasks.remove(_T5)
+app.tasks.remove(_T9)
+app.tasks.remove(_T10)
+app.save()
+app.redraw()
+root.update()
+
 print("\n-- 存不进盘的时候要吭声，不能装死 --")
 
 # 打包版最容易踩的坑：exe 被丢进 C:\Program Files 这类要管理员权限的
