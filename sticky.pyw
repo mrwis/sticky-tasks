@@ -102,7 +102,8 @@
   · 换字号          → 改 F_TITLE / F_BODY 等。注意字号是负数（如 -14），
                       负数表示"按像素算"，这样不受系统缩放影响
   · 改卡片大小      → 改 CARD_W / GAP。**卡片高度不再是一个固定值**：
-                      它由 block_h() 按内容算出来（见机制⑪），
+                      它由 block_h(t, w) 按内容算出来（见机制⑪），
+                      **w 必须传这张卡实际画多宽**（板面会按列宽拉伸）；
                       别再去找 CARD_H 调高调低了（它现在只是最小高度）。
                       子任务区的行高在 SUB_LINE / SUB_MAX / SUB_PAD
   · 改象限          → 出厂默认在 QUAD_DEFAULTS / QUAD_PALETTE；用户的在
@@ -341,7 +342,13 @@
      （同一行的行高取最高一张，见 row_heights）。
      算行数要折行，用的是模块级 _wrap_lines —— App._wrap 和 block_h 共用它，
      **别再写第二份折行逻辑**；两处规则一旦不一致，算出来的高度就错了。
-     文字可用宽度是 _text_w(t)：标题左边有重复徽章时，两边会再窄 24px。
+     文字可用宽度是 _text_w(t, w) / _title_w(t, w)，**w = 这张卡实际画多宽**：
+     板面把卡片按列宽拉伸（常见 290~300），而 CARD_W=264 只是"最窄也放得下
+     徽章行"的下限。以前这两个函数写死 CARD_W，于是 8 个字的标题变成
+     "算的时候两行、画的时候一行"，卡片底部白空整整一行（2026-10-28 用户
+     截图报的 bug）。同理 row_heights(items, ncol, cw) 的 cw 也要传实际的 ——
+     行高算大了，第二行的卡片会整体往下掉，两行之间出现一条空带。
+     标题左边有重复徽章时，可用宽度再窄 24px。
      **备注为空时那行「＋ 备注」也算一整行**（note_lines 返回 1），
      所以卡面上画完那行字必须把 ny 推到 LINE_NOTE 之后，否则子任务区会
      从备注**顶**开始画，「子任务 x/y」正好压在那行浅灰字上（改过一回）。
@@ -1837,20 +1844,25 @@ def _wrap_lines(text, font, maxw, maxlines):
     return lines
 
 
-def _text_w(t):
-    """卡面上标题/备注能用的文字宽度。
+def _text_w(t, w=CARD_W):
+    """卡面上标题/备注能用的文字宽度（w = 这张卡**实际**画多宽）。
 
     必须和 _draw_card 里 tw 的算法一致，否则按这里算出来的行数会和实际
     画出来的对不上（卡片就压住了）。左边这一串是：复选框左缘 + 复选框边长
     + 与文字的间距；标题前面挂重复徽章时还要再让出徽章 + 间距。
+
+    ★ w 是参数、不能写死 CARD_W：CARD_W 只是"最窄也放得下徽章行"的下限，
+    板面按列宽**拉伸**，实际画的时候通常是 290~300。以前这里写死 264，
+    于是 8 个字的标题按 264 算成两行、按 295 画成一行，卡片底部就多出
+    一整行空白（用户截图报的那个 bug）。
     """
     left = 13 + 15 + 10
     if t.get("repeat"):
         left += 18 + 6
-    return CARD_W - 13 - left
+    return w - 13 - left
 
 
-def _title_w(t):
+def _title_w(t, w=CARD_W):
     """卡面上**标题**能用的宽度：比 _text_w 再让出右端那行时间的宽度。
 
     「创建 / 完成时间」跟标题同一行（用户要求的"不要多占一行"），所以折行
@@ -1860,33 +1872,38 @@ def _title_w(t):
     没有时间可显示时（关掉了显示 / 判不出创建时间）就是 _text_w 本身，
     标题拿回全部宽度。
     """
-    w = _text_w(t)
+    w = _text_w(t, w)
     m = meta_line(t)
     if m:
         w -= _font_of(F_SMALL).measure(m) + META_INLINE_GAP
     return w
 
 
-def note_lines(t):
+def note_lines(t, w=CARD_W):
     """备注占几行。**空备注也算一行** —— 那行画的是「＋ 备注」入口。"""
     if not t.get("note"):
         return 1
-    return len(_wrap_lines(t["note"], F_BODY, _text_w(t), 2)) or 1
+    return len(_wrap_lines(t["note"], F_BODY, _text_w(t, w), 2)) or 1
 
 
-def block_h(t):
-    """卡片高度 = 内容实高 + 呼吸位 + 底部徽章行。
+def block_h(t, w=CARD_W):
+    """卡片高度 = 内容实高 + 呼吸位 + 底部徽章行。**w = 这张卡实际画多宽**。
 
     以前是「固定 CARD_H + 子任务增量」：标题、备注只有一两行时，卡片下半截
     全是空白，既不好看又白占地方（见机制⑪）。改成按内容实算。
 
-    **布局和绘制必须都调这个函数**，而且在没有 Tk 环境时也要能算
-    （_selftest 会这么用），所以它只依赖折行测量，不碰任何控件。
+    **布局和绘制必须都调这个函数、而且必须传同一个宽度**，而且在没有 Tk
+    环境时也要能算（_selftest 会这么用），所以它只依赖折行测量，不碰任何控件。
     下面的偏移量和 _draw_card 里的坐标是一对，改一边必须改另一边。
+
+    ★ 为什么宽度要传进来：卡片在板面上是按列宽**拉伸**的（实际 290~300，
+    而 CARD_W=264 只是"最窄也放得下徽章行"的下限）。以前这里按 264 折行，
+    画的时候按实际宽度折行 —— 差 30px 就足以让一个 8 字标题"算的时候两行、
+    画的时候一行"，卡片底部白空出一整行（用户截图报的 bug）。
     """
-    nth = len(_wrap_lines(t.get("title", ""), F_TITLE, _title_w(t), 2))
+    nth = len(_wrap_lines(t.get("title", ""), F_TITLE, _title_w(t, w), 2))
     note_top = TITLE_TOP + LINE_TITLE * nth + NOTE_GAP
-    note_bottom = note_top + LINE_NOTE * note_lines(t)
+    note_bottom = note_top + LINE_NOTE * note_lines(t, w)
 
     n_all = len(subs_of(t))
     if n_all:
@@ -1906,11 +1923,15 @@ def block_h(t):
     return max(CARD_H, content + FOOT_GAP + FOOT_H)
 
 
-def row_heights(items, ncol):
-    """把卡片按 ncol 列切成若干行，返回每行的高度（取该行最高的一张）。"""
+def row_heights(items, ncol, cw=CARD_W):
+    """把卡片按 ncol 列切成若干行，返回每行的高度（取该行最高的一张）。
+
+    cw 必须跟真正画的时候用的列宽一致 —— 高度是按折行行数算的，宽度不同
+    行数就不同（见 block_h 的说明）。
+    """
     hs = []
     for i in range(0, len(items), ncol):
-        hs.append(max(block_h(t) for t in items[i:i + ncol]))
+        hs.append(max(block_h(t, cw) for t in items[i:i + ncol]))
     return hs or [CARD_H]
 
 
@@ -3878,7 +3899,7 @@ class App:
             ncol, cw = ncol_of(colw)
             page = self._quad_page(pr["p"], len(items), ncol)
             shown = self._quad_slice(items, page, ncol)
-            rhs = row_heights(shown, ncol)   # 每行的高度：卡片不等高，取行内最高那张
+            rhs = row_heights(shown, ncol, cw)   # 每行的高度：卡片不等高，取行内最高那张
             need = QHEAD + INNER + sum(rhs) + (len(rhs) - 1) * GAP + INNER
             return ncol, cw, max(need, QMIN_H)
 
@@ -3983,7 +4004,7 @@ class App:
         cw = (inner_avail - (ncol - 1) * GAP) / ncol
         y = PAD
         for pr, items in groups:
-            rhs = row_heights(items, ncol)
+            rhs = row_heights(items, ncol, cw)
             need = QHEAD + INNER + sum(rhs) + (len(rhs) - 1) * GAP + INNER
             need = max(need, QMIN_H)
             self._draw_quad(pr, items, PAD, y, W - PAD * 2, need, (ncol, cw, need))
@@ -4048,7 +4069,7 @@ class App:
                            font=F_SMALL, fill="#c3bbad", tags=(tag,))
             return
 
-        rhs = row_heights(shown, ncol)
+        rhs = row_heights(shown, ncol, cw)
         for i, t in enumerate(shown):
             r, c = divmod(i, ncol)
             cx = x + INNER + c * (cw + GAP)
@@ -4061,7 +4082,9 @@ class App:
         pr = PRIO_BY_P[t["p"]]
         tag = "card%s" % t["id"]
         bg = C_DONE_BG if t["done"] else pr["bg"]
-        x2, y2 = x + w, y + block_h(t)      # 高度随子任务条数变化
+        # 高度随内容变；**宽度必须传实际画的那一个**（w），否则标题折行行数
+        # 会和画出来的对不上，卡片底部白空一行
+        x2, y2 = x + w, y + block_h(t, w)
 
         # 命中测试是倒序查找：整张卡片作为兜底，必须最先登记，否则会盖住内部控件
         self.regions.append(("card", t["id"], x, y, x2, y2))
