@@ -3052,6 +3052,142 @@ root.update()
 check("象限用例的测试任务已清理",
       all(app.task_by_id(x["id"]) is None for x in (_qa, _qb, _qd, _t6)))
 
+print("\n-- 象限可以调顺序 + 最多 12 个 --")
+
+# 用户的原话：「象限应该支持移动位置，现在一旦设定位置就是固定的……
+#            另外数量限制设置到十二个，八个还是太少了。」
+
+# ---- 上限与配色 ----
+check("上限放到 12 个", sticky.MAX_QUADS == 12, "实际 %d" % sticky.MAX_QUADS)
+check("配色板至少 12 支（不足就必然撞色，第 9 格会拿到第 1 格的红）",
+      len(sticky.QUAD_PALETTE) >= sticky.MAX_QUADS,
+      "配色只有 %d 支" % len(sticky.QUAD_PALETTE))
+while len(sticky.PRIOS) < sticky.MAX_QUADS:
+    app.add_quad()
+_c12 = [pr["c"] for pr in sticky.PRIOS]
+check("12 个格子的颜色两两不同", len(set(_c12)) == 12, "实际 %s" % _c12)
+check("到 12 个就加不动了（按钮会变灰）",
+      app.add_quad() is None and len(sticky.PRIOS) == 12,
+      "实际 %d" % len(sticky.PRIOS))
+root.update_idletasks()      # reqwidth 要先跑一次空闲任务才是新值（否则量到上一轮的）
+check("顶栏那排小按钮也收窄了（12 个仍只占 ~280px，不挤走右边的「贴 上」）",
+      len(app.seg_btns) == 12 and app.seg.winfo_reqwidth() <= 300,
+      "实际 %d 个 / %dpx" % (len(app.seg_btns), app.seg.winfo_reqwidth()))
+
+# ---- 布局：9 个以上改三列 ----
+check("列数规则：1 个铺满 / 4、8 个两列 / 9、12 个三列",
+      [sticky.quad_grid_cols(x) for x in (1, 4, 8, 9, 12)] == [1, 2, 2, 3, 3],
+      "实际 %s" % [sticky.quad_grid_cols(x) for x in (1, 4, 8, 9, 12)])
+
+app.redraw()
+root.update()
+_y12 = sorted({round(r[1]) for r in app._quad_rects.values()})
+_x12 = sorted({round(r[0]) for r in app._quad_rects.values()
+               if round(r[1]) == _y12[0]})
+check("12 个格子画成 4 行 × 3 列（两列要 6 行，得一路滚到底）",
+      len(_y12) == 4 and len(_x12) == 3,
+      "实际 %d 行 / %d 列" % (len(_y12), len(_x12)))
+
+# 翻页每页几张 = ncol × QROWS，ncol 必须跟画卡片时用的格宽一致
+_r12 = app._quad_rects[0]
+_n_pager, _ = app._ncol_now()
+_n_draw, _cw12 = sticky.quad_cards_per_row(_r12[2])
+check("★ 翻页用的列数和画出来的格子宽度算出来的列数一致（写死 2 列会数错）",
+      _n_pager == _n_draw,
+      "翻页认为 %d 列 / 实际格宽 %.0f 应得 %d 列" % (_n_pager, _r12[2], _n_draw))
+
+# ---- 设置框里拖手柄改顺序（真实事件路径，不是直接改列表）----
+app.ask_quads()
+_dq = [w for w in root.winfo_children()
+       if isinstance(w, tk.Toplevel) and w.winfo_exists()][-1]
+_dq.update()
+_rowsq = _dq._quad_rows
+check("设置框里每一行都带一个拖动手柄",
+      len(_rowsq) == 12 and all("grip" in r and r["grip"].winfo_manager() == "pack"
+                                for r in _rowsq),
+      "实际 %d 行 / %s" % (len(_rowsq),
+                          [("grip" in r) for r in _rowsq]))
+_name0 = [pr["name"] for pr in sticky.PRIOS]
+_c0 = _rowsq[0]["c"]                       # 第 1 格的配色（跟着格子走）
+_tq = mk("顺序测试：我原来在第一格", p=0)
+
+_g0, _g3 = _rowsq[0]["grip"], _rowsq[3]["grip"]
+_y3 = _g3.winfo_rooty() + 11
+_g0.event_generate("<Button-1>", x=7, y=11, when="now")
+_g0.event_generate("<B1-Motion>", x=7, y=11, rooty=_y3, when="now")
+_g0.event_generate("<ButtonRelease-1>", x=7, y=11, rooty=_y3, when="now")
+_dq.update()
+_ordq = [r["orig"] for r in _rowsq]
+check("★ 把第 1 行的手柄拖到第 4 行 → 顺序变成 2、3、4、1",
+      _ordq[:4] == [1, 2, 3, 0], "实际 %s" % _ordq)
+# 光改列表不算数：屏幕上也得跟着换（重新 pack 之后 y 必须递增，
+# 也就是"看到的第一行"就是列表第一行 —— 少了 relayout() 这条就红）。
+_ysq = [r["f"].winfo_y() for r in _rowsq]
+check("拖动之后屏幕上也真的换位了（行的 y 严格递增 = 显示顺序和列表一致）",
+      _ysq == sorted(_ysq) and len(set(_ysq)) == len(_ysq),
+      "实际 %s" % _ysq)
+
+_dq._quad_save()
+root.update()
+check("保存后象限真的换位了（第 4 位是原来第 1 格）",
+      [pr["name"] for pr in sticky.PRIOS][:4] == [_name0[1], _name0[2], _name0[3], _name0[0]],
+      "实际 %s" % [pr["name"] for pr in sticky.PRIOS][:4])
+check("颜色跟着格子走：挪到第 4 位的还是原来那个色，不会串色",
+      sticky.PRIOS[3]["c"] == _c0,
+      "实际 %r vs 原 %r" % (sticky.PRIOS[3]["c"], _c0))
+check("★ 格子里的任务跟着搬（换的是位置，不是归属）",
+      app.task_by_id(_tq["id"]) is not None and _tq["p"] == 3,
+      "实际 p=%r" % (_tq["p"] if app.task_by_id(_tq["id"]) else None))
+check("P 标签跟着位置走：第 4 位现在叫 P3",
+      sticky.PRIO_BY_P[3]["key"] == "P3"
+      and sticky.PRIO_BY_P[3]["name"] == _name0[0])
+_uiq = json.load(open(sticky.DATA_FILE, encoding="utf-8"))["ui"]["quads"]
+check("挪好的顺序也落库了（重开程序还是这个顺序）",
+      [q["name"] for q in _uiq][:4] == [_name0[1], _name0[2], _name0[3], _name0[0]],
+      "实际 %s" % [q["name"] for q in _uiq][:4])
+
+# ---- 板面上的「上移 / 下移」入口 ----
+sticky.apply_quad_labels(None)             # 回出厂 4 个
+app._rebuild_quick()
+app.tasks.remove(_tq)
+_ta = mk("顺序测试甲", p=0)
+_tb = mk("顺序测试乙", p=1)
+_b4 = [pr["name"] for pr in sticky.PRIOS]
+_newp = app.move_quad(0, +1)
+check("下移一位：返回新下标 1", _newp == 1, "实际 %r" % _newp)
+check("两格对调（第 1 位变成原来第 2 格）",
+      [pr["name"] for pr in sticky.PRIOS][:2] == [_b4[1], _b4[0]],
+      "实际 %s" % [pr["name"] for pr in sticky.PRIOS][:2])
+check("两边的任务跟着对调（甲 0→1，乙 1→0）",
+      _ta["p"] == 1 and _tb["p"] == 0,
+      "实际 甲=%r 乙=%r" % (_ta["p"], _tb["p"]))
+check("已经在最前面还往上 → 不动，并说一声",
+      app.move_quad(0, -1) is None and _ta["p"] == 1
+      and app.status.cget("text").endswith("最前了"),
+      "实际 %r / %r" % (app.move_quad(0, -1), app.status.cget("text")))
+check("最后一格还往下 → 同样不动",
+      app.move_quad(3, +1) is None, "实际 %r" % (app.move_quad(3, +1),))
+
+# 右键菜单里也得有这两条（不然"能挪"只有设置框知道）
+_mq = app.build_quad_menu(1)
+_labs = [_mq.entrycget(i, "label") for i in range(_mq.index("end") + 1)
+         if _mq.type(i) == "command"]
+check("象限右键菜单里有「上移一位」「下移一位」",
+      "上移一位" in _labs and "下移一位" in _labs, "实际 %s" % _labs)
+check("第一格的「上移一位」是灰的、最后一格的「下移一位」是灰的",
+      app.build_quad_menu(0).entrycget(1, "state") == "disabled"
+      and app.build_quad_menu(3).entrycget(2, "state") == "disabled")
+
+# 收尾
+sticky.apply_quad_labels(None)
+app._rebuild_quick()
+app.tasks = [t for t in app.tasks if t["id"] not in {_ta["id"], _tb["id"]}]
+app.save()
+app.redraw()
+root.update()
+check("顺序用例的测试任务已清理",
+      all(app.task_by_id(x["id"]) is None for x in (_ta, _tb)))
+
 print("\n-- 时间精确到时分秒（创建/完成/截止）--")
 
 # 用户的原话：「日期应该要精确到具体的小时分钟和秒，当前只有年月日。」
@@ -3561,7 +3697,11 @@ check("混着之前逾期的，标题里点出来",
 
 print("\n-- 导出 CSV 与按月回顾 --")
 
-_now = sticky.now_ts()
+# ★ 基准时间取「**本月 15 号**」，不是"现在"：下面这几条任务都落在 -3 ~ 0 天，
+#   拿现在当基准时，每月 1、2 号会整批掉到上个月去 —— 2026-11-01 实测
+#   「本月完成 2 条」变成 1 条，两条用例无缘无故红（跟代码没关系）。
+_now_dt = datetime.datetime(sticky.today().year, sticky.today().month, 15, 12, 0, 0)
+_now = _now_dt.timestamp()
 _day = 86400.0
 _exp_tasks = [
     {"id": "x1", "title": "早完成的一条", "note": "备注里有逗号, 也有\"引号\"",
