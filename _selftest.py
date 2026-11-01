@@ -3188,6 +3188,72 @@ root.update()
 check("顺序用例的测试任务已清理",
       all(app.task_by_id(x["id"]) is None for x in (_ta, _tb)))
 
+print("\n-- 在中间插一格：后面格子的任务不许串位、不许丢 --")
+
+# 用户的原话：「这个功能会把后面的象限挤走的同时，会把后面象限的任务移到
+#            这个新增的里面。导致排在最后的象限任务就没有了。」
+# 根因：add_quad 插到 pos 之后调 apply_quads(items) 没给映射，任务留旧下标，
+#      于是"新格子"占着 pos 显示原来那格的卡，最后一格空掉。
+sticky.apply_quad_labels(None)             # 出厂 4 个
+app._rebuild_quick()
+_keep_all = list(app.tasks)                # 演示数据先收起来，测完放回去
+_seed = [mk("插格测试-P0", p=0), mk("插格测试-P1", p=1),
+         mk("插格测试-P2", p=2), mk("插格测试-P3", p=3)]
+app.tasks = list(_seed)                    # 只看这 4 条，否则"新格是不是空的"判不准
+app.redraw()
+root.update()
+_before_names = [pr["name"] for pr in sticky.PRIOS]
+_pos = app.add_quad(after=1, name="插队格", act="后加")
+check("插在 P1 后面 → 落在下标 2", _pos == 2, "实际 %r" % (_pos,))
+check("5 个格子：原有 4 个的顺序没被打乱",
+      [pr["name"] for pr in sticky.PRIOS]
+      == [_before_names[0], _before_names[1], "插队格",
+          _before_names[2], _before_names[3]],
+      "实际 %s" % [pr["name"] for pr in sticky.PRIOS])
+check("★ 新格子是**空的**（不许把后面那格的任务吸进来）",
+      not [t for t in app.tasks if t["p"] == 2],
+      "实际新格里 %r" % [t["title"] for t in app.tasks if t["p"] == 2])
+check("★ 后面的任务各归各位（P1 不动，原 P2→P3、原 P3→P4）",
+      (_seed[1]["p"], _seed[2]["p"], _seed[3]["p"]) == (1, 3, 4),
+      "实际 %s" % [_seed[i]["p"] for i in range(4)])
+check("★ 排在最后那格的任务还在（原来会被挤空）",
+      [t["title"] for t in app.tasks if t["p"] == 4] == ["插格测试-P3"],
+      "实际 %r" % [t["title"] for t in app.tasks if t["p"] == 4])
+check("板面上也真的画了 5 个格子", len(app._quad_rects) == 5,
+      "实际 %s" % sorted(app._quad_rects))
+
+# 落库 + 重读：串位是"当场看着对、重启又乱"的那种毛病，必须连盘一起验
+app.save()
+_ui_ins = json.load(open(sticky.DATA_FILE, encoding="utf-8"))
+sticky.apply_quad_labels(_ui_ins["ui"]["quads"])
+check("落库再读回来，5 个格子顺序不变、任务 p 也不变",
+      [pr["name"] for pr in sticky.PRIOS][2] == "插队格"
+      and [t["p"] for t in _ui_ins["tasks"] if t["title"].startswith("插格测试")]
+      == [0, 1, 3, 4],
+      "实际 %s / %s" % ([pr["name"] for pr in sticky.PRIOS],
+                       [t["p"] for t in _ui_ins["tasks"]
+                        if t["title"].startswith("插格测试")]))
+
+# 末尾追加（after=None）用的是默认映射，也必须对
+for i, t in enumerate(_seed):
+    t["p"] = i                             # 先摆回各就各位
+app.apply_quads([{"name": n, "act": a, "c": i}
+                 for i, (n, a) in enumerate(sticky.QUAD_DEFAULTS)])
+_tail = app.add_quad(name="末尾格")
+check("追加到末尾：老任务一个都不动（默认映射在这是对的）",
+      _tail == 4 and all(t["p"] == i for i, t in enumerate(_seed)),
+      "实际 下标 %r / p=%s" % (_tail, [t["p"] for t in _seed]))
+check("末尾格也是空的", not [t for t in app.tasks if t["p"] == 4],
+      "实际 %r" % [t["title"] for t in app.tasks if t["p"] == 4])
+
+# 收尾
+sticky.apply_quad_labels(None)
+app._rebuild_quick()
+app.tasks = _keep_all                      # 演示数据一条不少地放回去
+app.save()
+app.redraw()
+root.update()
+
 print("\n-- 时间精确到时分秒（创建/完成/截止）--")
 
 # 用户的原话：「日期应该要精确到具体的小时分钟和秒，当前只有年月日。」

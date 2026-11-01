@@ -483,6 +483,11 @@
         所以 `move_quad()` 挪位置之后 P 标签会跟着换（原来第 3 位的变成 P2）——
         这是特意的："标签和位置各说各话"比"改了个数字"更难理解。
         挪一位 = 对调映射（`mapping[p], mapping[q] = q, p`），任务靠它一起走。
+      · **数量变了必须给映射表**：`apply_quads(items, mapping=None)` 的默认值
+        是"按下标不动"，只在改名/排序/往末尾追加时成立。**插在中间不给映射**
+        会把新格子盖在原来那个下标上 → 后面每格的任务往前串一位、最后一格
+        变空（2026-11-01 用户报"排在最后的象限任务没有了"）。正确写法：
+        `{i: (i if i < pos else i + 1)}`（见 `add_quad`）。
       · `p` 的合法范围跟着象限数量走（`_norm_p`）。以前写死 0~3，
         删过格子/老数据会落到"不存在的格子"上，任务就像消失了。
       · 名字必须非空、**备注允许为空**（有人只想要一个名字）。判"回落默认"
@@ -1173,6 +1178,7 @@ HELP_SECTIONS = [
     ("p",  "新加的格子会自己挑一个还没用过的颜色。颜色不开放修改 —— 格子靠颜色区分，"
            "自己挑容易撞在一起，字也容易看不清。"),
     ("n",  "· 删掉一个格子时，里面的任务不会被删，会搬到相邻那一格（删之前会问你）"),
+    ("n",  "· 新增的格子是空的；插在中间时，后面的格子和它们的任务一起往后挪一位，不会串位"),
     ("n",  "· 至少要留一个格子 —— 任务总得落在某个地方"),
     ("n",  "· 最多 12 个。1~8 个排两列，9 个以上自动改三列（12 个正好四行）—— "
            "再多就一屏看不完、得一路滚到底了"),
@@ -6761,7 +6767,12 @@ class App:
         """整套换掉象限（数量 / 名字 / 颜色一起），并把任务搬到新的格子里。
 
         `mapping` 是「旧 p → 新 p」。删格子时任务必须跟着搬 —— 用户想删的是
-        **一个分类**，不是里面的任务。不给 mapping 就按位置对应（改名/新增）。
+        **一个分类**，不是里面的任务。
+
+        ★ `mapping=None` 只在**数量没变（改名/排序）**或**往末尾追加**时才对
+          （那时"按下标不动"恰好就是对的）。**插在中间、删中间**都必须自己给
+          映射表：插中间不给 → 新格子盖住原来那个下标，后面每格的任务都往前
+          串一位、最后一格变空（2026-11-01 的 bug 就是这么来的，见 add_quad）。
 
         这里也是唯一"落库 + 重绘 + 重建顶栏按钮"的出口，别在别处零散改 PRIOS。
         """
@@ -6827,19 +6838,30 @@ class App:
         return q
 
     def add_quad(self, after=None, name=None, act=""):
-        """新增一格，插在 after 后面（None = 追加到末尾）。返回它的下标。"""
+        """新增一格，插在 after 后面（None = 追加到末尾）。返回它的下标。
+
+        ★ **插在中间必须自己给 mapping**：新格子占住了下标 pos，原来 pos
+        及之后的每一格都往后挪一位。不给的话 `apply_quads` 走"按位置对应"
+        的默认映射，任务就留在旧下标上 —— 表现是"新格子里莫名奇妙装满了
+        后面那格的任务、原来最后一格变空、任务像丢了"（2026-11-01 用户报的）。
+          旧：[A B C D]  在 B 后面插 NEW
+          新：[A B NEW C D]  映射 B→1, C→3, D→4（不是 1,2,3）
+        """
         if len(PRIOS) >= MAX_QUADS:
             self.status.configure(text="最多 %d 个象限（再多就记不住哪个是哪个了）" % MAX_QUADS)
             return None
+        old_n = len(PRIOS)
         items = quad_labels()
         pos = len(items) if after is None else max(0, min(int(after) + 1, len(items)))
         new_name = name or "新象限"
         items.insert(pos, {"name": new_name, "act": act, "c": _free_color(items)})
-        self.apply_quads(items)
+        mapping = {i: (i if i < pos else i + 1) for i in range(old_n)}
+        self.apply_quads(items, mapping)
         # 名字先存下来再用：apply_quads 之后 PRIO_BY_P 已经按新列表重建过，
         # 这时候再回查下标属于"绕远路"，边界上一错就是 KeyError
         self.status.configure(text="加了一格「%s」—— 点它的标题就能改名" % new_name)
         return pos
+
 
     def delete_quad(self, p, ask=True):
         """删掉一格。里面的任务挪到**相邻那格**（前一个，没有就后一个）。
