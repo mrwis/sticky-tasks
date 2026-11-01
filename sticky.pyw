@@ -461,23 +461,28 @@
          完成时间，**不带「建于/完成」前缀**（行太窄），受同一个 SHOW_TIME
          开关控制。折行时要先把这段宽度扣掉，否则文字会压到时间上。
 
-  ⑯ 象限是可增删的，名字/说明也能改（PRIOS / apply_quads / QUAD_PALETTE）
+  ⑯ 象限是可增删、可改顺序的，名字/说明也能改（PRIOS / apply_quads / QUAD_PALETTE）
     象限本质上是一种**分类方式**，不同的人分法不一样：有人就用出厂那四个
     （重要/不重要 × 紧急/不紧急），有人按 工作 / 学习 / 娱乐 / 生活，还有人
-    要再加 健身 / 家人 —— 所以**数量（1~MAX_QUADS）+ 名字 + 说明**都开放，
+    要再加 健身 / 家人 —— 所以**数量（1~MAX_QUADS，现在 12）+ 名字 + 说明 +
+    先后顺序**都开放，
     **颜色不开放**（格子靠颜色区分，自己挑很快撞在一起、字也容易看不清）。
 
     存在哪儿：`ui.quads` = [{"name","act","c"} …]，顺序就是 p 0..N-1；
     `c` 是配色板下标，**跟着格子走、不跟位置走** —— 删掉中间一格时其余
     格子的颜色不该跳。启动时 `apply_quad_labels()` 重建 PRIOS / PRIO_BY_P。
 
-    ★ 四条容易踩的点：
+    ★ 五条容易踩的点：
       · **PRIOS 必须原地改**（切片赋值 + PRIO_BY_P.clear），不能 `PRIOS = [...]`：
         模块级到处都在按这两个名字取对象，重新赋值会让已有引用失效。
-      · **数量变了要连带三件事**：① 任务 p 重编号（映射表由调用方给）；
+      · **数量/顺序变了要连带三件事**：① 任务 p 重编号（映射表由调用方给）；
         ② 顶栏那排 P0..Pn 小按钮重建（`_rebuild_quick`）；③ 清空
         `self.quad_page`（页码按 p 存，重排后会翻到不存在的页）。
         这三件都收在 `App.apply_quads()` 一个出口里，别在别处零散改。
+      · **顺序就是优先级**：`pr["key"]` = "P%d" % i，是**按下标算**的。
+        所以 `move_quad()` 挪位置之后 P 标签会跟着换（原来第 3 位的变成 P2）——
+        这是特意的："标签和位置各说各话"比"改了个数字"更难理解。
+        挪一位 = 对调映射（`mapping[p], mapping[q] = q, p`），任务靠它一起走。
       · `p` 的合法范围跟着象限数量走（`_norm_p`）。以前写死 0~3，
         删过格子/老数据会落到"不存在的格子"上，任务就像消失了。
       · 名字必须非空、**备注允许为空**（有人只想要一个名字）。判"回落默认"
@@ -486,12 +491,19 @@
         `fit_quad_head()` / `_clip_text()` 按**像素**裁剪（按字数算必翻车）；
         卡片徽章裁 150px，否则把计时器挤出卡片。
 
-    布局：**两列排下来**，行数 = ceil(N/2)，4 个时正好还是原来那个 2×2；
-    奇数个时最后一行只有一个格子（占半宽，右边留白）。`min_row` 要按行数
-    均分，否则 6 个象限会撑成三屏。
+    布局：**列数走 `quad_grid_cols()`** —— 1 个铺满整宽，2~8 个两列（4 个
+    正好还是出厂那个 2×2），9 个以上三列（12 个 = 4 行，否则两列要 6 行、
+    得一路滚到底）。奇数个时最后一行只有一个格子（占一列宽，右边留白）。
+    `min_row` 要按行数均分，否则 6 个象限会撑成三屏。
+    ★ `quad_grid_cols()` / `quad_colw()` / `quad_cards_per_row()` 被
+    `_draw_matrix()`（画）和 `_ncol_now()`（算每页几张卡）**共用**：
+      两边给出不同的列数，翻页就会数错。
 
-    入口：点象限标题（regions 里的 qhead）、标题右键（改名 / 在后面加一格 /
-    删这一格 / 恢复默认）、「更多 ▾ → 象限设置…」。三个入口都指 `ask_quads()`。
+    入口：点象限标题（regions 里的 qhead）、标题右键（改名 / 上移 / 下移 /
+    在后面加一格 / 删这一格 / 恢复默认）、「更多 ▾ → 象限设置…」。
+    三个入口都指 `ask_quads()`；设置框里每一行左边有**点状拖动手柄**
+    （六颗小点，Canvas 画的，不赌字体），拖动即调顺序，名字框里
+    Alt+↑ / Alt+↓ 也能挪一位。
 
   ⑰ 删除有三条路，但只有一个出口（delete_task / 垃圾桶 / Delete 键）
     用户原来的抱怨是「删除任务的形式只有右键」。三条路都归到 `delete_task()`：
@@ -650,6 +662,11 @@ def autostart_set(on):
 # 象限数量是**可变**的（1 ~ MAX_QUADS）：它的本质是分类方式，4 个只是出厂那套。
 # 颜色由"配色板下标 c"决定，跟着**格子**走、不跟位置走 —— 删掉中间一格时
 # 其余格子的颜色不该跟着跳。前 4 个色就是原来那套（红 / 橙 / 蓝 / 灰）。
+#
+# ★ 配色板长度必须 ≥ MAX_QUADS，否则 12 个格子必然撞色（`c` 是取模的，
+#   第 9 格会拿到第 1 格的红，一眼分不出是哪一类）。加颜色时**只往后加**，
+#   前 8 个的顺序别动 —— 老数据里 `c` 存的是下标，插在中间会让用户已有的
+#   格子全部换色。
 QUAD_PALETTE = [
     ("#ffe2e4", "#e5484d"),   # 红
     ("#ffeed9", "#ef8b0c"),   # 橙
@@ -659,8 +676,15 @@ QUAD_PALETTE = [
     ("#efe6ff", "#7c3aed"),   # 紫
     ("#d9f2f0", "#0d9488"),   # 青
     ("#ffe3f0", "#db2777"),   # 粉
+    ("#eaf7d9", "#4d7c0f"),   # 橄榄绿
+    ("#f6e8d8", "#a16207"),   # 咖啡
+    ("#e6e6ff", "#4f46e5"),   # 靛蓝
+    ("#dff0fb", "#0369a1"),   # 钢蓝
 ]
-MAX_QUADS = 8
+# 12 个：象限是分类方式，"八种"其实是当初拍脑袋定的（那时配色板只有 8 色）。
+# 12 个的代价是板面要 4 行（见 quad_grid_cols 的三列布局），顶栏那排小按钮
+# 也要收窄一点（见 _rebuild_quick），都是在可接受范围内的。
+MAX_QUADS = 12
 # 出厂那四格的名字（"填回默认" / 老数据没有 ui.quads 时用它）
 QUAD_DEFAULTS = [("重要且紧急", "立刻做"), ("重要不紧急", "计划做"),
                  ("紧急不重要", "委托做"), ("不紧急不重要", "有空再做")]
@@ -882,6 +906,37 @@ QMIN_H    = 96
 QROWS     = 3
 DRAG_TOL  = 5
 
+
+def quad_grid_cols(nq):
+    """板面上一行摆几个象限格。
+
+    · 1 个  → 铺满整宽（只有一格时还留半屏空白太怪）
+    · 2~8 个 → 2 列（4 个正好是出厂那个 2×2；6 个是 3 行）
+    · 9 个以上 → 3 列。12 个挤 2 列要 6 行，一屏看不下、得一路滚到底；
+      3 列是 4 行，"一眼扫完全部类别"这件事才成立。
+
+    ★ 这个函数 `_draw_matrix()`（画）和 `_ncol_now()`（算翻页）**必须共用**：
+      两边给出不同的列数 → 一个象限每页几张卡就对不上，翻页会翻到"没有卡
+      的页"或者永远翻不完。
+    """
+    n = max(0, int(nq or 0))
+    if n <= 1:
+        return 1
+    return 3 if n >= 9 else 2
+
+
+def quad_colw(W, ncols):
+    """每个象限格的宽度（同样被画和算两边共用）。"""
+    ncols = max(1, int(ncols))
+    return (float(W) - PAD * (ncols + 1)) / ncols
+
+
+def quad_cards_per_row(colw):
+    """一个象限里横着能放几张卡 → (列数, 每张卡的宽度)。"""
+    inner_avail = colw - INNER * 2
+    n = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
+    return n, (inner_avail - (n - 1) * GAP) / n
+
 # 子任务区的尺寸（卡片高度会随子任务条数增加，所以这几个值直接决定布局）
 SUB_MAX   = 3       # **每一页**显示几条子任务；超过一页就自动出 ‹ 1/2 › 翻页。
                     # 注意卡片高度按 min(总数, SUB_MAX) 算，翻页不会让卡片长高变矮
@@ -1094,29 +1149,39 @@ HELP_SECTIONS = [
     ("k", ("更多 ▾",   "集合了不常用的那些：回收站 / 导入·恢复备份 / 立即备份 / "
                         "设置自动备份文件夹 / 打开备份文件夹 / 每日自动备份开关 / "
                         "备份保留天数 / 到点提醒开关 / 卡片上显示时间 / "
-                        "象限设置（增删·改名）/ 打开数据文件夹 / 导出完成记录（CSV）/ "
+                        "象限设置（增删·改名·调顺序）/ 打开数据文件夹 / 导出完成记录（CSV）/ "
                         "按月回顾 / 开机自动启动 / 清空已完成。"
                         "下面各节碰到哪儿讲哪儿")),
     ("k", ("? 帮助",   "就是本窗口（快捷键 F1，随时可开）")),
 
-    ("h2", "象限可以增删改名（它本质是一种分类方式）"),
+    ("h2", "象限可以增删改名、调顺序（它本质是一种分类方式）"),
     ("p",  "重要 / 不重要 × 紧急 / 不紧急 只是出厂那套分法。有人按 工作 / 学习 / "
            "娱乐 / 生活 分，有人还要再加 健身 / 家人 —— 都行。名字、后面那句说明、"
-           "格子数量（1 ~ 8 个）都能改。"),
+           "格子数量（1 ~ 12 个）、格子先后顺序都能改。"),
     ("n",  "· 改法一：直接点象限标题（比如「重要且紧急 · 立刻做」那几个字）"),
-    ("n",  "· 改法二：右键标题 →「改这个名字…」/「在它后面新增一格」/「删除这一格…」"),
-    ("n",  "· 改法三：顶栏「更多 ▾」→「象限设置…」，一次改完：加、删、改名都在里面"),
+    ("n",  "· 改法二：右键标题 →「改这个名字…」/「上移一位」/「下移一位」/"
+           "「在它后面新增一格」/「删除这一格…」"),
+    ("n",  "· 改法三：顶栏「更多 ▾」→「象限设置…」，一次改完：加、删、改名、搬家都在里面"),
     ("n",  "  那个框里还有「＋ 新增一格」和「名字填回默认」两个按钮"),
+    ("p",  "调顺序：设置框里每一行最左边有六个小点，按住上下拖就行（拖过某格的中线就换位）；"
+           "光标在名字框里时，Alt+↑ / Alt+↓ 也能挪一位。板面上右键格子标题 → 上移/下移 更快。"),
+    ("n",  "· 顺序就是优先级：P0 在最前，板面按这个顺序从左到右、从上到下摆"
+           "（两列时 1、2 在第一行，3、4 在第二行）"),
+    ("n",  "· 挪完之后 P 标签跟着位置走（原来第 3 格的位置现在叫 P2）—— "
+           "这个数字代表的是重要程度，不是这个分类的身份证"),
+    ("n",  "· 颜色跟着格子走：把「自媒体」从第 6 位拖到第 2 位，它还是原来那个色，不会串色"),
     ("p",  "新加的格子会自己挑一个还没用过的颜色。颜色不开放修改 —— 格子靠颜色区分，"
            "自己挑容易撞在一起，字也容易看不清。"),
     ("n",  "· 删掉一个格子时，里面的任务不会被删，会搬到相邻那一格（删之前会问你）"),
     ("n",  "· 至少要留一个格子 —— 任务总得落在某个地方"),
-    ("n",  "· 最多 8 个：再多顶栏那排小按钮就挤不下了，人也记不住哪个是哪个"),
+    ("n",  "· 最多 12 个。1~8 个排两列，9 个以上自动改三列（12 个正好四行）—— "
+           "再多就一屏看不完、得一路滚到底了"),
     ("n",  "· 改错了：右键标题 →「这一格恢复默认名字」，或「全部恢复出厂四个…」"
            "（后者会把多出来的格子删掉，任务照样搬到前四格里）"),
     ("n",  "· 名字太长会被省略号截断 —— 标题行右端还要放任务数和翻页器，"
            "写短一点（十个字以内最合适）"),
-    ("n",  "· 改了名字不改归属：任务还在原来那个格子里，只是格子的称呼变了"),
+    ("n",  "· 改了名字、挪了位置都不改归属：任务还在原来那个格子里，"
+           "只是这个格子的称呼和位置变了"),
 
     ("h2", "卡片上能做的操作"),
     ("k", ("单击方框",       "标记完成 / 取消完成（在左上角，打勾就是已完成）")),
@@ -3798,14 +3863,21 @@ class App:
         """按当前象限重建「这个任务贴进哪一格」那排小按钮。
 
         象限能增删，所以按钮数量会变 —— 只在 __init__ 里建一次的话，
-        新增第 5 格之后就没有它的按钮了。padx 收到 8：8 个按钮也要塞得下。
+        新增第 5 格之后就没有它的按钮了。
+
+        padx 跟着数量收：8 格时 8px 够用，12 格要收到 4px —— 否则这排按钮
+        会把输入框挤成一条缝、甚至把右边的「贴 上」顶出窗口（pack 里靠后的
+        控件是没有空间的）。11、12 格的标签是「P10/P11」，比「P0」宽，所以
+        按数量而不是按固定值留白。
         """
         for b in list(getattr(self, "seg_btns", [])):
             b.destroy()
         self.seg_btns = []
+        n = len(PRIOS)
+        px = 8 if n <= 8 else (6 if n <= 10 else 4)
         for pr in PRIOS:
             b = tk.Button(self.seg, text=pr["key"], font=F_TINY, bd=0, relief="flat",
-                          padx=8, pady=5, cursor="hand2", highlightthickness=0,
+                          padx=px, pady=5, cursor="hand2", highlightthickness=0,
                           command=lambda i=pr["p"]: self.set_quick(i))
             b.pack(side="left")
             self.seg_btns.append(b)
@@ -4066,20 +4138,17 @@ class App:
 
     # -------- 四象限布局 --------
     def _draw_matrix(self, groups, W):
-        # 象限数量是可变的：**两列排下来**，行数 = ceil(个数/2)。
-        # 4 个时正好还是原来那个 2×2；6 个就是 3 行 2 列；奇数个最后一行
-        # 只摆一个格子（照样占半宽，右边留白 —— 比拉成整行更像"少了一格"）。
-        # 只有 1 个象限时才铺满整宽，否则半个窗口空着太怪。
+        # 象限数量是可变的，**按 `quad_grid_cols()` 分列**（那函数里写了为什么
+        # 是 1 / 2 / 3 列），行数 = ceil(个数/列数)。4 个时正好还是原来那个 2×2；
+        # 奇数个最后一行少摆一个格子（照样占一列的宽，右边留白 —— 比拉成整行
+        # 更像"少了一格"）。
         nq = len(groups)
-        ncols = 1 if nq <= 1 else 2
-        avail = W - PAD * (ncols + 1)
-        colw = avail / ncols
+        ncols = quad_grid_cols(nq)
+        colw = quad_colw(W, ncols)
         rows = [groups[i:i + ncols] for i in range(0, max(1, nq), ncols)]
 
         def ncol_of(colw_):
-            inner_avail = colw_ - INNER * 2
-            n = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
-            return n, (inner_avail - (n - 1) * GAP) / n
+            return quad_cards_per_row(colw_)
 
         # 先算每格需要的高度 —— **只按本页的卡片算**（一个象限最多 QROWS 行）
         def quad_metrics(pr, items):
@@ -4150,11 +4219,13 @@ class App:
         self.redraw()
 
     def _ncol_now(self):
-        """当前窗口下，一个象限里能放几列卡片（跟 _draw_matrix 同一个算法）。"""
-        colw = (self.cv.winfo_width() - PAD * 3) / 2
-        inner_avail = colw - INNER * 2
-        n = max(1, int((inner_avail + GAP) // (CARD_W + GAP)))
-        return n, (inner_avail - (n - 1) * GAP) / n
+        """当前窗口下，一个象限里能放几列卡片（跟 _draw_matrix 同一个算法）。
+
+        ★ 列数走同一个 `quad_grid_cols()`：翻页每页几张卡是按它算的，
+          这里若还写死"2 列"，9 格以上（板面是 3 列）翻页就会数错。
+        """
+        colw = quad_colw(self.cv.winfo_width(), quad_grid_cols(len(PRIOS)))
+        return quad_cards_per_row(colw)
 
     def _draw_quad_pager(self, p, xr, y, pgs, pg, tag):
         """象限标题行右端的 ‹ 1/2 ›。返回它占的宽度。
@@ -6662,6 +6733,15 @@ class App:
         pr = PRIO_BY_P[p]
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
         m.add_command(label="改这个名字…", command=lambda: self.ask_quads(p))
+        # 顺序就是优先级（P 标签跟着位置走），所以"挪位置"是常用操作：
+        # 两条都在这儿给一个快速入口，不必每次都开设置框拖手柄。
+        m.add_command(label="上移一位",
+                      state=("normal" if p > 0 else "disabled"),
+                      command=lambda: self.move_quad(p, -1))
+        m.add_command(label="下移一位",
+                      state=("normal" if p < len(PRIOS) - 1 else "disabled"),
+                      command=lambda: self.move_quad(p, +1))
+        m.add_separator()
         m.add_command(label="在它后面新增一格",
                       state=("normal" if len(PRIOS) < MAX_QUADS else "disabled"),
                       command=lambda: self.add_quad(after=p))
@@ -6711,6 +6791,40 @@ class App:
         self._rebuild_quick()
         self.save()
         self.redraw()
+
+    def move_quad(self, p, d, announce=True):
+        """把第 p 格往上（d=-1）/ 往下（d=+1）挪一位。返回挪到的新下标。
+
+        顺序就是优先级：p 0 在最前，板面按这个顺序从左到右、从上到下摆。
+        所以挪位置的同时 **P 标签会跟着换**（原来第 3 格位上的现在是 P2）——
+        这正是用户要的："顺序 = 重要程度"，不然标签和位置各说各话。
+
+        颜色跟着格子走（`c` 存在格子自己身上），挪完不会忽然变个色。
+        和删格子一样，任务靠 `mapping` 一起搬：这里是一次**对调**，
+        所以映射表是 p↔q 的双向置换。
+        """
+        n = len(PRIOS)
+        try:
+            p, d = int(p), int(d)
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= p < n) or d == 0:
+            return None
+        q = p + d
+        if not (0 <= q < n):
+            if announce:
+                self.status.configure(text="它已经在最%s了" % ("前" if d < 0 else "后"))
+            return None
+        items = quad_labels()
+        items.insert(q, items.pop(p))
+        mapping = {i: i for i in range(n)}
+        mapping[p], mapping[q] = q, p
+        name = items[q]["name"]
+        self.apply_quads(items, mapping)
+        if announce:
+            self.status.configure(text="「%s」挪到第 %d 位（现在是 %s）"
+                                       % (name, q + 1, PRIO_BY_P[q]["key"]))
+        return q
 
     def add_quad(self, after=None, name=None, act=""):
         """新增一格，插在 after 后面（None = 追加到末尾）。返回它的下标。"""
@@ -6785,13 +6899,17 @@ class App:
         return True
 
     def ask_quads(self, p=None):
-        """象限设置：改名、改说明、加一格、删一格，一次改完。
+        """象限设置：改名、改说明、**调顺序**、加一格、删一格，一次改完。
 
         `p` = 从哪一格点进来的（光标先落在那儿），其余照样都能改。
 
-        数量上限 MAX_QUADS：再多没人记得住哪个是哪个，顶栏那排小按钮也会挤爆。
-        配色不开放改 —— 靠颜色区分格子，自己挑容易撞在一起；新增的格子由程序
-        从配色板里挑一个还没人用的颜色。
+        改完按 `rows` 的**当前顺序**落库 —— 也就是说这里既是"改名框"，
+        也是"排序框"：拖一下手柄，象限在板面上的位置和 P 标签一起变。
+        保存路径还是 `apply_quads` 一个出口（它负责搬任务、重建顶栏、清页码）。
+
+        数量上限 MAX_QUADS（12）：再多没人记得住哪个是哪个，顶栏那排小按钮
+        也会挤爆。配色不开放改 —— 靠颜色区分格子，自己挑容易撞在一起；
+        新增的格子由程序从配色板里挑一个还没人用的颜色。
         """
         dlg = tk.Toplevel(self.root)
         dlg.title("象限设置")
@@ -6805,6 +6923,13 @@ class App:
                  font=F_SMALL, bg=C_BG, fg=C_INK2).pack(anchor="w", padx=18, pady=(16, 2))
         tk.Label(dlg, text="名字必填，后面那句说明可以不填。颜色由程序分配，不开放修改。",
                  font=F_SMALL, bg=C_BG, fg=C_INK3).pack(anchor="w", padx=18)
+        # 顺序＝优先级（P0 在最前、板面就按这个顺序摆），所以「怎么挪」必须在
+        # 这个框里写明白 —— 手柄只有六个小点，不说一句没人知道能拖。
+        tk.Label(dlg, text="按住每行最左边的点状手柄上下拖，就能调整先后顺序"
+                          "（顺序就是优先级）。\n名字框里 Alt+↑ / Alt+↓ 也能挪一位；"
+                          "板面上右键格子标题 →「上移一位 / 下移一位」更快。",
+                 font=F_SMALL, bg=C_BG, fg=C_INK3, justify="left")\
+            .pack(anchor="w", padx=18)
 
         box = tk.Frame(dlg, bg=C_BG)
         box.pack(fill="x", padx=18, pady=(8, 0))
@@ -6813,9 +6938,93 @@ class App:
         # 绑定，会 NameError: free variable）。用一个字典在事件发生时才取。
         hooks = {}
 
+        def relayout():
+            """按 `rows` 现在的顺序重新 pack 一遍（拖动、Alt+↑↓ 之后都走这里）。
+
+            整体 forget 再按顺序 pack，比 `pack(before=...)` 数学清楚 ——
+            12 行也就是 12 次调用，不会有性能问题。
+            """
+            for r in rows:
+                r["f"].pack_forget()
+            for r in rows:
+                r["f"].pack(fill="x", pady=3)
+
+        def move_row_to(i, j):
+            """把第 i 行挪到第 j 个位置。返回是否真的动了。
+
+            只改**显示顺序**。保存时按 rows 的顺序生成象限列表、再用 `orig`
+            反查它是原来哪一格，所以任务归属不会因为挪位而错 —— 这也是为什么
+            这里不需要碰 tasks。
+            """
+            n = len(rows)
+            if not (0 <= i < n):
+                return False
+            j = max(0, min(int(j), n - 1))
+            if i == j:
+                return False
+            rows.insert(j, rows.pop(i))
+            relayout()
+            dlg.update_idletasks()
+            return True
+
+        def row_at_y(y_root):
+            """鼠标 y 坐标压着第几行：取**行中心**最近的那个。
+
+            用中线判断（而不是"落在哪一行的矩形里"）：拖到两行之间时也有明确
+            答案，手感跟拖卡片换顺序一致。
+            """
+            best, bd = 0, None
+            for i, r in enumerate(rows):
+                f = r["f"]
+                cy = f.winfo_rooty() + f.winfo_height() / 2.0
+                d = abs(y_root - cy)
+                if bd is None or d < bd:
+                    best, bd = i, d
+            return best
+
         def make_row(name, act, c, orig):
             f = tk.Frame(box, bg=C_BG)
             f.pack(fill="x", pady=3)
+            row = {"f": f, "c": c, "orig": orig}
+
+            # 拖动手柄：画六个小点，不用 ⠿ / ⇅ 这类字符 ——
+            # 字体里缺字形就是豆腐块，画点永远稳（同卡片上那个重复徽章）。
+            grip = tk.Canvas(f, width=14, height=22, bg=C_BG, highlightthickness=0,
+                             cursor="fleur")
+            for gy in (6, 11, 16):
+                for gx in (4, 9):
+                    grip.create_oval(gx - 1.4, gy - 1.4, gx + 1.4, gy + 1.4,
+                                     fill=C_INK3, outline="")
+            grip.pack(side="left", padx=(0, 2))
+            st = {"i": None}                 # 这次拖动从第几行开始的
+
+            def g_down(_e, st=st, rr=row):
+                try:
+                    st["i"] = rows.index(rr)
+                except ValueError:
+                    st["i"] = None
+                grip.configure(bg="#efe7d8")
+                return "break"
+
+            def g_move(e, st=st):
+                # ★ 绑定挂在这个 grip 自己身上：tk 的隐式抓取会把 motion 都
+                #   送给按下时那个控件，所以行被重排（重新 pack）之后照样收得到。
+                if st["i"] is None:
+                    return "break"
+                j = row_at_y(e.y_root)
+                if move_row_to(st["i"], j):
+                    st["i"] = j
+                return "break"
+
+            def g_up(_e, st=st):
+                st["i"] = None
+                grip.configure(bg=C_BG)
+                return "break"
+
+            grip.bind("<Button-1>", g_down)
+            grip.bind("<B1-Motion>", g_move)
+            grip.bind("<ButtonRelease-1>", g_up)
+
             tk.Label(f, text="●", font=F_BODY, bg=C_BG, width=2,
                      fg=QUAD_PALETTE[int(c) % len(QUAD_PALETTE)][1]).pack(side="left")
             ne = tk.Entry(f, font=F_BODY, width=12, bg=C_WHITE, fg=C_INK, relief="flat",
@@ -6834,10 +7043,24 @@ class App:
                            activeforeground="#c4262e", cursor="hand2",
                            highlightthickness=0)
             xb.pack(side="left", padx=(4, 0))
-            row = {"f": f, "name": ne, "act": ae, "c": c, "orig": orig}
+            row.update({"name": ne, "act": ae, "grip": grip})
             xb.configure(command=lambda rr=row: drop_row(rr))
             ne.bind("<Return>", lambda e: hooks["save"](e))
             ae.bind("<Return>", lambda e: hooks["save"](e))
+
+            # 键盘也能挪：鼠标操作用不到手柄的时候（或者想精确挪一位）。
+            def k_move(_e, rr=row, d=-1):
+                try:
+                    i = rows.index(rr)
+                except ValueError:
+                    return "break"
+                move_row_to(i, i + d)
+                rr["name"].focus_set()
+                return "break"
+
+            for e in (ne, ae):
+                e.bind("<Alt-Up>", lambda ev, rr=row: k_move(ev, rr, -1))
+                e.bind("<Alt-Down>", lambda ev, rr=row: k_move(ev, rr, +1))
             return row
 
         def drop_row(row):
@@ -6916,8 +7139,20 @@ class App:
         dlg.update_idletasks()
         px = self.root.winfo_x() + (self.root.winfo_width() - dlg.winfo_width()) // 2
         py = self.root.winfo_y() + 110
-        dlg.geometry("+%d+%d" % (max(0, px), max(0, py)))
+        # 12 格时这个框会很高（每行 32px 上下）：往下顶出屏幕就往上收，
+        # 否则「保存」按钮跑到屏幕外面，用户只能硬拖窗口。
+        _full, (wl, wt, wr, wb) = screen_areas(self.root)
+        py = max(wt + 8, min(py, wb - dlg.winfo_reqheight() - 8))
+        dlg.geometry("+%d+%d" % (max(wl, px), py))
         (rows[p] if p is not None and 0 <= p < len(rows) else rows[0])["name"].focus_set()
+
+        # 供自测/截图用：拖手柄、Alt+↑↓ 走的都是 move_row_to，直接戳这里
+        # 等价于真的拖了一下（顺序改了，保存后的结果一模一样）。
+        dlg._quad_rows = rows
+        dlg._quad_move_to = move_row_to
+        dlg._quad_save = save
+        dlg._quad_add = add_row_click
+        dlg._quad_relayout = relayout
 
     def ask_edit(self, t, focus="title"):
         """编辑一条任务：标题 + 备注 一起改。
