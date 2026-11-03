@@ -358,6 +358,12 @@
      所以卡面上画完那行字必须把 ny 推到 LINE_NOTE 之后，否则子任务区会
      从备注**顶**开始画，「子任务 x/y」正好压在那行浅灰字上（改过一回）。
 
+     底部徽章行的**让位顺序**是 `foot_plan()` 定的：计时器 > 截止时间 >
+     优先级徽章。别改回"徽章先定宽 150px、日期放得下才画"—— 象限备注是
+     用户随便写的（能长到「浪费时间，对自己完全无意义……」），那样一改，
+     同一张卡在短名字那格有截止时间、挪到长名字那格就没有了
+     （2026-11-03 用户报的"截止时间跟象限有关"）。日期是数据，徽章是装饰。
+
   ⑫ 「已完成」的任务第二天会自动从板面上收起（visible / archived_done）
      板面上到底画哪些任务，**只有 visible() 这一个出口**（重绘时先用它过一遍，
      象限标题上的数字也是它数出来的）。已完成的任务在这里被拦下来：
@@ -960,6 +966,35 @@ LINE_NOTE  = 16     # 备注每行高度（空备注那行「＋ 备注」也算
 META_INLINE_GAP = 8 # 「创建 / 完成时间」贴在标题右端时，与标题之间留的空
 FOOT_H     = 34     # 底部：虚线分隔 + 徽章行（虚线到卡片底的总高）
 FOOT_GAP   = 10     # 内容底到虚线之间的呼吸位，别调到 0（会和徽章行贴死）
+FOOT_GAP_PILL = 8   # 底部同一行里两个胶囊之间留的空（优先级徽章 ↔ 截止 / 用时）
+
+
+def foot_plan(avail, bw_full, bw_key, due_w):
+    """卡片底部这一行怎么排。只用**像素宽度**算，不碰窗口，方便自测。
+
+    参数：`avail` = 从徽章左边缘到右端计时器之前的可用宽度；
+    `bw_full` = 优先级徽章写全名时的宽度；`bw_key` = 只写「P3」时的宽度；
+    `due_w` = 截止（或用时）胶囊的宽度，0 表示没有。
+
+    返回 `(徽章宽度, 日期画不画, 徽章用不用缩写版)`；徽章宽度 0 = 整块不画。
+
+    ★ 让位顺序是**计时器 > 截止时间 > 优先级徽章**，不能反过来。
+      截止时间跟"在哪个象限"没有关系，可象限名字是用户随便改的（能长到
+      「浪费时间，对自己完全无意义，尽量交给别人做」）。按旧写法先把徽章
+      定宽 150px、再"放得下才画日期"，结果是**同一张卡在 P0 有日期、挪到
+      长名字的格子里日期就没了**（2026-11-03 用户报的 bug）。
+      所以：全名放不下 → 缩成「P3」；还放不下 → 徽章整块让位，日期留着。
+    """
+    gap = FOOT_GAP_PILL
+    if bw_full + (gap + due_w if due_w else 0) <= avail:
+        return bw_full, bool(due_w), False
+    if bw_key + (gap + due_w if due_w else 0) <= avail:
+        return bw_key, bool(due_w), True
+    if due_w and due_w <= avail:          # 连「P3」都挤不下 → 徽章让位
+        return 0, True, True
+    if bw_key <= avail:                   # 日期宽到离谱（窄卡）→ 退回只画徽章
+        return bw_key, False, True
+    return 0, False, True
 
 # 卡片上是否显示「创建 / 完成时间」这一行（ui.show_time 的镜像）。
 #
@@ -1276,6 +1311,8 @@ HELP_SECTIONS = [
     ("h2", "截止日期可以精确到时分秒"),
     ("p",  "点卡片底部那颗「＋ 日期」，左边填日期、右边填时间 —— 时间留空就表示"
            "「那一整天都算没到点」，跟以前一样。"),
+    ("n",  "· 这颗胶囊跟「在哪个象限」没关系：同一张卡挪到哪一格都照样显示。"
+           "格子名字太长时先缩的是左边的 P 标签（缩成「P3」），日期不会被挤掉"),
     ("p",  "两格都能直接打字，空着时框里会有一行浅灰的格式提示"
            "（2026-10-15 / 18:30:05），照着一模一样敲就行；点进哪一格，那一格的提示"
            "才让位。写错不关窗，底下会用红字告诉你该写成什么样。"),
@@ -4475,32 +4512,43 @@ class App:
         cv.create_line(x + 12, fy, x2 - 12, fy, fill="#d8d2c6", dash=(3, 3), tags=(tag,))
 
         # ---- 徽章行：左边是优先级 + 日期，右边是计时器 ----
+        # 排布优先级见 foot_plan()：**计时器 > 截止时间 > 优先级徽章**。
+        # 旧写法是"徽章先按 150px 定宽，日期放得下才画"，于是象限名字一长，
+        # 同一张卡的截止时间就在那一格神秘消失（2026-11-03 用户报的）。
         ry = fy + 8
         coin_x = self._draw_timer(t, x2, ry, pr, tag)
-
-        # 优先级徽章。备注可能被用户写得很长，裁一下 —— 这一行还要放日期
-        # 和计时器，撑破了就会把计时器挤出卡片。
-        label = _clip_text(quad_title(pr["p"]), F_TINY, 150)
-        bw = tkfont.Font(font=F_TINY).measure(label) + 20
         px1 = x + 12
-        round_rect(cv, px1, ry, px1 + bw, ry + 18, 9,
-                   fill=(C_INK3 if t["done"] else pr["band"]), outline="", tags=(tag,))
-        cv.create_text(px1 + bw / 2, ry + 9, text=label, font=F_TINY,
-                       fill="#ffffff", tags=(tag,))
-        self.regions.append(("prio", t["id"], px1, ry - 2, px1 + bw, ry + 20))
+        f_tiny = _font_of(F_TINY)
+        f_small = _font_of(F_SMALL)
 
-        # 截止日期：只有在「不跟计时器打架」时才画，否则宁可不画也不许溢出。
-        # 已完成的任务不再需要「＋ 日期」这个入口，这个位置改放**用了多久** ——
-        # 标题那行已经被两个精确时刻占满，放不下第三个数字了。
-        dx = px1 + bw + 8
+        # 截止日期 / 已完成的「用了多久」：先定量，它是数据不是装饰
         if t["done"]:
             dtext, dcls = usage_text(t), "usage"
         else:
             dtext, dcls = self._due_text(t)
             if not dtext:
                 dtext, dcls = "+ 日期", "empty"
-        dwn = tkfont.Font(font=F_SMALL).measure(dtext) + 18
-        if dtext and dx + dwn <= coin_x - 8:
+        dwn = (f_small.measure(dtext) + 18) if dtext else 0
+
+        full = _clip_text(quad_title(pr["p"]), F_TINY, 150)
+        bw, show_due, use_key = foot_plan((coin_x - 8) - px1,
+                                          f_tiny.measure(full) + 20,
+                                          f_tiny.measure(pr["key"]) + 20, dwn)
+        dx = px1
+        if bw:
+            # 缩写版只留「P3」—— 象限名字的全文在标题行和右键菜单里都能看到
+            label = _clip_text(pr["key"], F_TINY, max(8, bw - 20)) if use_key else full
+            round_rect(cv, px1, ry, px1 + bw, ry + 18, 9,
+                       fill=(C_INK3 if t["done"] else pr["band"]), outline="",
+                       tags=(tag,))
+            cv.create_text(px1 + bw / 2, ry + 9, text=label, font=F_TINY,
+                           fill="#ffffff", tags=(tag,))
+            self.regions.append(("prio", t["id"], px1, ry - 2, px1 + bw, ry + 20))
+            dx = px1 + bw + FOOT_GAP_PILL
+
+        # 已完成的任务不再需要「＋ 日期」这个入口，这个位置改放**用了多久** ——
+        # 标题那行已经被两个精确时刻占满，放不下第三个数字了。
+        if show_due and dtext:
             fill = {"overdue": "#ffd9d9", "today": "#fff0ce",
                     "soon": "#e4eeff", "empty": "#ffffff",
                     "usage": "#efeee7"}.get(dcls, "#ffffff")

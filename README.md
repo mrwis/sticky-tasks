@@ -169,7 +169,7 @@ _build_venv\Scripts\python.exe tools\build_exe.py
 
 ## 开发
 
-- 回归测试：`python _selftest.py`（真实建窗驱动事件，当前 845 项）。
+- 回归测试：`python _selftest.py`（真实建窗驱动事件，当前 855 项）。
 - 源码只有一个 `App` 类，顶部「代码导读」写了从哪读起（含 18 条必须弄懂的机制）。
 - 改完代码想验证打包仍然正常：`_build_venv\Scripts\python.exe tools\build_exe.py`
   重打一次，再 `tools\verify_exe.py` 过一遍 —— 后者会在项目上一级建个
