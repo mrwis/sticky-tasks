@@ -3254,6 +3254,79 @@ app.save()
 app.redraw()
 root.update()
 
+print("\n-- 底部「截止 / 用时」跟象限无关（名字再长也不许消失）--")
+
+# 用户的原话：「同一个任务，只有放在重要紧急象限才会显示截止时间，其他象限
+#            不显示。按道理这个截止时间和所处象限是没有关系的。」
+# 根因：徽章先按 150px 定宽，再"日期放得下才画" → 象限名字一长日期就被静默丢掉。
+check("宽卡：全名 + 日期都画", sticky.foot_plan(300, 120, 44, 96) == (120, True, False),
+      "实际 %r" % (sticky.foot_plan(300, 120, 44, 96),))
+check("名字太长：徽章缩成「P3」，日期照画",
+      sticky.foot_plan(200, 260, 44, 96) == (44, True, True),
+      "实际 %r" % (sticky.foot_plan(200, 260, 44, 96),))
+check("再窄一点：徽章整块让位，日期还在",
+      sticky.foot_plan(100, 260, 44, 96) == (0, True, True),
+      "实际 %r" % (sticky.foot_plan(100, 260, 44, 96),))
+check("窄到日期都放不下：保住徽章，也不许溢出",
+      sticky.foot_plan(60, 260, 44, 96) == (44, False, True),
+      "实际 %r" % (sticky.foot_plan(60, 260, 44, 96),))
+check("没有日期胶囊（due_w=0）时徽章照常写全名",
+      sticky.foot_plan(200, 120, 44, 0) == (120, False, False),
+      "实际 %r" % (sticky.foot_plan(200, 120, 44, 0),))
+
+# 真画一遍：同一张卡在短名字格 / 长名字格里，截止胶囊都得在
+_LONG_ACT = "浪费时间，对自己完全无意义，尽量交给别人做"
+sticky.apply_quad_labels(None)
+_q4 = [{"name": d[0], "act": d[1], "c": i}
+       for i, d in enumerate(sticky.QUAD_DEFAULTS)]
+_q4[3] = {"name": "不紧急不重要", "act": _LONG_ACT, "c": 3}
+app.apply_quads(_q4)
+_keep_due = list(app.tasks)
+_dt = mk("双十一购物", p=0, due="2026-11-11 09:30:05")
+app.tasks = [_dt]
+app.redraw()
+root.update()
+check("短名字那格：截止胶囊在（11/11 09:30）",
+      region(app, "due", _dt["id"]) is not None and
+      any("11/11" in x for x in all_texts(app)), "实际 %r" % all_texts(app)[:8])
+
+_dt["p"] = 3                      # 挪到名字很长的那一格
+app.redraw()
+root.update()
+_due3 = region(app, "due", _dt["id"])
+check("★ 长名字那格：截止胶囊照样在（这就是用户报的 bug）",
+      _due3 is not None and any("11/11" in x for x in all_texts(app)),
+      "实际 due=%r / %r" % (_due3, all_texts(app)[:8]))
+check("★ 让位的是徽章：它缩成了「P3」，没有把长名字画上去",
+      any(x.strip() == "P3" for x in all_texts(app))
+      and _LONG_ACT not in all_texts(app),
+      "实际 %r" % all_texts(app)[:8])
+_prio3 = region(app, "prio", _dt["id"])
+_timer3 = region(app, "timer", _dt["id"])
+check("三个胶囊不重叠、也没顶出卡片（徽章 → 日期 → 计时器 从左到右）",
+      _prio3 is not None and _due3 is not None and _timer3 is not None
+      and _prio3[2] <= _due3[0] + 0.01 and _due3[2] <= _timer3[0] + 0.01,
+      "徽章=%r 日期=%r 计时=%r" % (_prio3, _due3, _timer3))
+
+# 已完成的任务在同一行画「用了多久」，同样不许被象限名字挤掉
+_dt["done"] = True
+_dt["done_at"] = sticky.now_ts()
+app.redraw()
+root.update()
+check("已完成的长名字格：这一行画的是「用了多久」",
+      sticky.usage_text(_dt) in all_texts(app),
+      "实际 %r" % all_texts(app)[:8])
+_dt["done"] = False
+_dt["done_at"] = 0
+
+# 收尾
+sticky.apply_quad_labels(None)
+app._rebuild_quick()
+app.tasks = _keep_due
+app.save()
+app.redraw()
+root.update()
+
 print("\n-- 时间精确到时分秒（创建/完成/截止）--")
 
 # 用户的原话：「日期应该要精确到具体的小时分钟和秒，当前只有年月日。」
