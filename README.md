@@ -3,6 +3,15 @@
 一个 Windows 桌面便利贴任务清单：**四象限（艾森豪威尔矩阵）+ 子任务 + 计时 + 每日复盘**。
 零第三方依赖、数据明文、常驻内存约 30 MB。
 
+## 下载即用（不用装 Python）
+
+1. 打开 [最新版本 Releases](https://github.com/mrwis/sticky-tasks/releases/latest)，下载 `逍遥便利贴.exe`；
+2. 把它放进**你有写权限的目录**（自己新建一个文件夹最省事），**不要**放 `C:\Program Files`
+   ——任务数据就存在 exe 旁边，那里写不进去；
+3. 双击运行。第一次启动会自带几条示例任务，直接改或删掉即可。
+
+数据就是一个 `tasks.json`，跟 exe 放在一起；换电脑时把 exe 和它一起拷走就行。
+
 ## 关于另一套 aardio 实现
 
 同一个设计还写过一套 aardio 版（Win32 原生窗口 + GDI+ 自绘），**两版共用同一份
@@ -171,3 +180,8 @@ _build_venv\Scripts\python.exe tools\build_exe.py
 - 改完代码想验证打包仍然正常：`_build_venv\Scripts\python.exe tools\build_exe.py`
   重打一次，再 `tools\verify_exe.py` 过一遍 —— 后者会在项目上一级建个
   `_exetest\` 当"朋友的电脑"，实测"数据确实写在 exe 旁边"，跑完随手删。
+
+## 许可证
+
+[MIT](LICENSE) © 2026 Xiaoyao Li（GitHub: [mrwis](https://github.com/mrwis)）。
+随便用、随便改、可以商用，保留版权声明即可；不提供任何担保。
