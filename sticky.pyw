@@ -135,6 +135,12 @@
                       整卡右键菜单里，再改 build_card_menu。
                       **两个菜单都要能进"加子任务"这类通用操作** ——
                       子任务行铺满卡片时，"卡面空白处"是不存在的
+  · 改"右键空白处新建的任务贴到哪一格" → `show_canvas_menu` 先用
+                      `quad_at(cx, cy)` 算出点在哪个格子，再交给
+                      `build_canvas_menu(p)`；真正切换的是 `new_task_in(p)`
+                      → `set_quick()`（落库出口仍然只有 `do_add`，它读
+                      `quick_p`）。**别退回"只 focus 输入框"** —— 那样任务
+                      会贴到上一次选的那格（2026-11-05 用户报的）
   · 改子任务每页显示几条 → 改 SUB_MAX。超过一页时卡面会自动长出
                       ‹ 1/2 › 翻页按钮（不用去别处加代码）
   · 改拖拽时的提示语 → 改 DRAG_HINT / SUB_DRAG_HINT
@@ -1238,7 +1244,9 @@ HELP_SECTIONS = [
                               "添加子任务 / 子任务批量操作 / 计时 / 标记完成 / 删除（进回收站）")),
     ("k", ("右键子任务",     "编辑文字 / 标记完成 / 添加子任务 / 上移 / 下移 / "
                              "提升成独立任务 / 删除这条子任务")),
-    ("k", ("右键空白处",     "新建任务 / 耗时统计 / 每日复盘 / 回收站 / 清空已完成")),
+    ("k", ("右键空白处",     "新建任务 / 耗时统计 / 每日复盘 / 回收站 / 清空已完成。"
+                             "在哪个格子里点右键，新任务就贴进哪个格子（标题里会写出来是"
+                             "哪一格）；在板子外面点则沿用顶栏选着的那格")),
 
     ("h2", "子任务的排序：做完的往后站，第二天不再占地方"),
     ("p",  "一个任务底下的子任务多了以后，最烦的是「做完的混在没做的中间」，"
@@ -5723,16 +5731,67 @@ class App:
         m.add_command(label="删除（进回收站）", command=lambda: self.delete_task(t))
         return m
 
-    def show_canvas_menu(self, e):
-        """右键点在空白处。"""
+    def build_canvas_menu(self, p=None):
+        """右键点在空白处 / 板外的菜单。
+
+        `p` = 右键落在哪个象限（None = 板外，说不清是哪一格）。
+
+        拆成独立方法是为了能被测试直接调用（同 build_card_menu）——
+        菜单一旦弹出来就进了模态循环，测试没法验里面到底有哪几项。
+        """
         m = tk.Menu(self.root, tearoff=0, font=F_SMALL)
-        m.add_command(label="新建任务（跳到输入框）", command=self.entry.focus_set)
+        if p is None:
+            m.add_command(label="新建任务（跳到输入框）", command=self.entry.focus_set)
+        else:
+            # 把落点写进标题：用户点之前就该知道任务会进哪一格
+            m.add_command(label="新建任务到「%s」（跳到输入框）"
+                                % ellipsis(PRIO_BY_P[p]["name"], 9),
+                          command=lambda p=p: self.new_task_in(p))
         m.add_command(label="耗时统计…", command=self.open_stats)
         m.add_command(label="每日复盘…", command=self.open_review)
         m.add_command(label="回收站…", command=self.open_trash)
         m.add_separator()
         m.add_command(label="清空已完成", command=self.do_clear_done)
-        self._popup(m, x=e.x_root, y=e.y_root)
+        return m
+
+    def show_canvas_menu(self, e):
+        """右键点在空白处。
+
+        ★ **落在哪个格子里右键，新任务就贴进哪个格子**。
+          顶栏那排 P 按钮记的是"上一次贴到哪"，用户在某一格里点右键时，
+          心里想的是这一格 —— 旧写法只把光标丢进输入框、不动 quick_p，
+          任务就贴到了上一次那格（2026-11-05 用户报的「没有跟随过来」）。
+        """
+        p = self.quad_at(*self._canvas_xy(e))
+        self._popup(self.build_canvas_menu(p), x=e.x_root, y=e.y_root)
+
+    def quad_at(self, cx, cy):
+        """画布坐标落在哪个象限里（不在任何格子里返回 None）。
+
+        矩形来自 `_quad_rects`（`_draw_quad` 里登记的），所以和屏幕上看到的
+        一致；列表视图下每格占整行，同样能判。格子互不重叠，按顺序找就行。
+        """
+        for p, (x, y, w, h) in self._quad_rects.items():
+            if x <= cx <= x + w and y <= cy <= y + h:
+                return p
+        return None
+
+    def new_task_in(self, p):
+        """把「贴到哪一格」切到 p 并把光标跳进输入框。返回落点。
+
+        「新建任务」只有一个落库出口 `do_add()`（它读 `quick_p`），所以这里
+        只需要把选择切过去 —— 别另开一条"直接建一条空任务"的路：
+        空标题在 do_add 里是被拒的，走两条路迟早不一致。
+        """
+        try:
+            p = int(p)
+        except (TypeError, ValueError):
+            return None
+        if not (0 <= p < len(PRIOS)):
+            return None
+        self.set_quick(p)
+        self.status.configure(text="新任务会贴进「%s」—— 打完字按回车" % PRIO_BY_P[p]["name"])
+        return p
 
     # ============================================================ 操作
 

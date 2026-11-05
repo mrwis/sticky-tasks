@@ -3286,16 +3286,19 @@ _dt = mk("双十一购物", p=0, due="2026-11-11 09:30:05")
 app.tasks = [_dt]
 app.redraw()
 root.update()
-check("短名字那格：截止胶囊在（11/11 09:30）",
-      region(app, "due", _dt["id"]) is not None and
-      any("11/11" in x for x in all_texts(app)), "实际 %r" % all_texts(app)[:8])
+# 胶囊上写什么由「离现在多远」决定（今天 / N 天后 / 11/11 09:30），
+# 别把日期写死在断言里 —— 过几天这条用例就自己红了。
+_dt_txt = app._due_text(_dt)[0]
+check("短名字那格：截止胶囊在（%s）" % _dt_txt,
+      region(app, "due", _dt["id"]) is not None and _dt_txt in all_texts(app),
+      "实际 %r" % all_texts(app)[:8])
 
 _dt["p"] = 3                      # 挪到名字很长的那一格
 app.redraw()
 root.update()
 _due3 = region(app, "due", _dt["id"])
 check("★ 长名字那格：截止胶囊照样在（这就是用户报的 bug）",
-      _due3 is not None and any("11/11" in x for x in all_texts(app)),
+      _due3 is not None and app._due_text(_dt)[0] in all_texts(app),
       "实际 due=%r / %r" % (_due3, all_texts(app)[:8]))
 check("★ 让位的是徽章：它缩成了「P3」，没有把长名字画上去",
       any(x.strip() == "P3" for x in all_texts(app))
@@ -3323,6 +3326,95 @@ _dt["done_at"] = 0
 sticky.apply_quad_labels(None)
 app._rebuild_quick()
 app.tasks = _keep_due
+app.save()
+app.redraw()
+root.update()
+
+print("\n-- 在哪个格子里右键新建，任务就贴进哪个格子 --")
+
+# 用户的原话：「正常来说我鼠标放在哪个象限选择新建任务，那么对应的任务就应该
+#            出现在这个象限，现在的情况是还是在之前的那个任务，没有跟随过来。」
+# 旧写法：菜单那条只是 self.entry.focus_set，quick_p 没动 → 贴到上一次选的那格。
+sticky.apply_quad_labels(None)
+app._rebuild_quick()
+_keep_rt = list(app.tasks)
+# 留一条占位任务：板面空了会走"空态"分支，象限根本不画（_draw_empty_state）。
+# 它放在 P0，所以 P1/P2/P3 里任何一点都是空白处，正好用来模拟"格子里右键"。
+app.tasks = [mk("占位任务（别删我）", p=0)]
+app.redraw()
+app.cv.yview_moveto(0)
+root.update()
+_qr = dict(app._quad_rects)
+
+
+def _mid(p):
+    # 矩形是 (x, y, 宽, 高) —— 中心点要写 x + 宽/2，写成 (x+宽)/2 就变成
+    # "左边那条边和右边那条边的中点"，第二列会算到第一列里去（自己先踩过）。
+    x, y, w, h = _qr[p]
+    return (x + w / 2.0, y + h / 2.0)
+
+
+check("四个格子都登记了矩形（quad_at 的前提）", len(_qr) == 4, "实际 %s" % sorted(_qr))
+check("落在第 1 格里 → 认出 P0", app.quad_at(*_mid(0)) == 0,
+      "实际 %r" % (app.quad_at(*_mid(0)),))
+check("落在第 4 格里 → 认出 P3", app.quad_at(*_mid(3)) == 3,
+      "实际 %r" % (app.quad_at(*_mid(3)),))
+check("点在板子外面 → 说不清是哪一格（None）",
+      app.quad_at(5, 100000) is None and app.quad_at(-50, -50) is None,
+      "实际 %r / %r" % (app.quad_at(5, 100000), app.quad_at(-50, -50)))
+
+# 走真实右键路径（只把"弹菜单"这一步换成记录器，菜单里点了什么照样 invoke）
+_seen_menus = []
+_real_popup2 = app._popup
+app._popup = lambda menu, widget=None, x=None, y=None: _seen_menus.append(menu)
+try:
+    app.on_right(E(*_mid(1)))
+finally:
+    app._popup = _real_popup2
+_lbl = _seen_menus[-1].entrycget(0, "label") if _seen_menus else ""
+check("★ 在第 2 格里右键 → 菜单标题就写着这一格",
+      _seen_menus and "新建任务" in _lbl and "重要不紧急" in _lbl, "实际 %r" % _lbl)
+app.quick_p = 0                    # 故意让它停在别的格子上
+_seen_menus[-1].invoke(0)          # 等价于点那条「新建任务到「…」」
+check("★ 点完 quick_p 跟到第 2 格（旧写法这里还是 0）", app.quick_p == 1,
+      "实际 %r" % (app.quick_p,))
+check("状态栏说清了任务会贴进哪一格", "重要不紧急" in app.status.cget("text"),
+      "实际 %r" % app.status.cget("text"))
+app.entry.delete(0, "end")
+app.entry.insert(0, "右键新建的任务")
+app.do_add()
+_tnew = [t for t in app.tasks if t["title"] == "右键新建的任务"]
+check("★ 打完字回车 → 任务真的落在第 2 格", len(_tnew) == 1 and _tnew[0]["p"] == 1,
+      "实际 %r" % [t["p"] for t in _tnew])
+
+# 板子外面点右键：说不清是哪格，沿用顶栏选着的那格（不乱跳）
+_seen_menus = []
+_real_popup3 = app._popup
+app._popup = lambda menu, widget=None, x=None, y=None: _seen_menus.append(menu)
+try:
+    app.quick_p = 3
+    app.on_right(E(5, 100000))
+finally:
+    app._popup = _real_popup3
+_lbl0 = _seen_menus[-1].entrycget(0, "label") if _seen_menus else ""
+check("板子外面右键：菜单不写落点，也不改 quick_p",
+      _seen_menus and "到「" not in _lbl0 and app.quick_p == 3, "实际 %r / %r" % (_lbl0, app.quick_p))
+
+# 列表视图：每格占整行，同样认得出
+app.mode = "list"
+app.redraw()
+app.cv.yview_moveto(0)
+root.update()
+_lr = dict(app._quad_rects)
+_lm = (_lr[2][0] + _lr[2][2] / 2.0, _lr[2][1] + _lr[2][3] / 2.0)
+check("列表视图下 quad_at 也按整行算", app.quad_at(*_lm) == 2,
+      "实际 %r" % (app.quad_at(*_lm),))
+app.mode = "matrix"
+
+# 收尾
+app.tasks = _keep_rt
+app.quick_p = 2
+app._rebuild_quick()
 app.save()
 app.redraw()
 root.update()
