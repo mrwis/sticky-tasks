@@ -5,7 +5,8 @@
 
 ## 下载即用（不用装 Python）
 
-1. 打开 [最新版本 Releases](https://github.com/mrwis/sticky-tasks/releases/latest)，下载 `逍遥便利贴.exe`；
+1. 打开 [最新版本 Releases](https://github.com/mrwis/sticky-tasks/releases/latest)，
+   下载 `xiaoyao-sticky-v1.0.exe`（就是程序本体，窗口标题叫「逍遥便利贴」，文件名带版本号方便区分）；
 2. 把它放进**你有写权限的目录**（自己新建一个文件夹最省事），**不要**放 `C:\Program Files`
    ——任务数据就存在 exe 旁边，那里写不进去；
 3. 双击运行。第一次启动会自带几条示例任务，直接改或删掉即可。
